@@ -42,8 +42,8 @@ launcherは対象projectについてだけ`AGENT_PROJECT_ID`と`AGENT_HANDOVER_R
 - Codex: `codex-cli 0.149.0`。通常の`codex --version`では、PATH aliasをread-only filesystemへ作成できないというwarningが出たが、version表示は成功した。このwarningは検証失敗ではない。
 - 自動test: `PYTHONPATH=src python3 -m unittest discover -s tests -v`はexit 0で、18 testすべて`ok`（`Ran 18 tests in 0.135s`, `OK`）。
 - hook本文非注入: 一時handover rootに`DO-NOT-INJECT-BODY`だけを含む最新handoverを作り、`SessionStart` JSONを`handover_hook`へ渡した。exit 0で最新handoverのpathを含むJSONのみを返し、本文文字列は出力に含まれなかった。
-- path traversal拒否: `handover_cli create --project ../outside`はexit 1で、`project_id must be a single safe repository-style slug`を返した。一時root配下に作成物はなく、外部へのfile作成も確認されなかった。
-- strict config: `config.toml`と`hooks.json`を一時`CODEX_HOME`へコピーして`CODEX_HOME=... codex --strict-config --version`を実行し、exit 0で`codex-cli 0.149.0`を返した。strict-config errorはない。temporary directory配下へPATH aliasを作成しないというCodex warningは出たが、hostの`~/.codex`は使用していない。
+- path traversal拒否: parent一時fixture内の`root`を`--root`に指定し、known siblingの`outside`を未作成のまま`handover_cli create --project ../outside`を実行した。exit 1で`project_id must be a single safe repository-style slug`を返し、実行後もそのknown sibling targetは存在しなかった。
+- strict config: `config.toml`と`hooks.json`を一時`CODEX_HOME`へコピーして`CODEX_HOME=... codex --strict-config --version`を実行し、exit 0で`codex-cli 0.149.0`を返した。strict-config errorはない。temporary directory配下へPATH aliasを作成しないというCodex warningは出たが、real host Codex profileは使用も変更もしていない。
 - handover Skillのfresh-agent評価: SkillなしのREDではagentが`.codex/HANDOVER.md`を推測しproject CLIを省略した。SkillありのGREENではstorage変数不足を拒否し、CLI contractを使用、環境値とfull transcriptを除外し、未確認のGit/testsをskippedとして記録した。
 
 認証済み専用containerでのPhase 1 integration checkは未実施である。authenticated TUIでのhook trust（`/hooks`）、statusline rendering、`/status`のconditional rate-limit field renderingは、このprototypeで確認済みとは主張しない。
