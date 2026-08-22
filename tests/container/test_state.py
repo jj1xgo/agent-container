@@ -8,6 +8,7 @@ from agent_container.state import StateLayout
 from agent_container.state import ensure_private_directory
 from agent_container.state import ensure_private_file
 from agent_container.state import validate_project_id
+from agent_container.state import validate_workspace_origin
 
 
 class StateValidationTest(unittest.TestCase):
@@ -64,3 +65,34 @@ class StateSecurityTest(unittest.TestCase):
             record.write(path)
             self.assertEqual(ProjectRecord.read(path), record)
             self.assertNotIn("token", path.read_text(encoding="utf-8").lower())
+
+    def test_workspace_origin_allows_only_repository_https_urls(self) -> None:
+        with TemporaryDirectory() as temp:
+            workspace = Path(temp) / "workspace"
+            (workspace / ".git").mkdir(parents=True)
+            repository = Repository.parse("jj1xgo/agent-container")
+
+            validate_workspace_origin(
+                workspace, repository, "https://github.com/jj1xgo/agent-container.git\n"
+            )
+            validate_workspace_origin(
+                workspace, repository, "https://github.com/jj1xgo/agent-container"
+            )
+            with self.assertRaisesRegex(ValueError, "origin does not match"):
+                validate_workspace_origin(
+                    workspace, repository, "git@github.com:jj1xgo/agent-container.git"
+                )
+
+    def test_workspace_origin_rejects_symlinked_workspace(self) -> None:
+        with TemporaryDirectory() as temp:
+            target = Path(temp) / "target"
+            (target / ".git").mkdir(parents=True)
+            workspace = Path(temp) / "workspace"
+            workspace.symlink_to(target, target_is_directory=True)
+
+            with self.assertRaisesRegex(ValueError, "not a safe Git repository"):
+                validate_workspace_origin(
+                    workspace,
+                    Repository.parse("jj1xgo/agent-container"),
+                    "https://github.com/jj1xgo/agent-container.git",
+                )

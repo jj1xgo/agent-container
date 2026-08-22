@@ -120,6 +120,21 @@ def ensure_private_file(path: Path) -> Path:
     return path.resolve()
 
 
+def validate_workspace_origin(
+    workspace: Path, repository: Repository, remote_url: str
+) -> None:
+    if workspace.is_symlink() or not (workspace / ".git").is_dir():
+        raise ValueError(f"workspace is not a safe Git repository: {workspace}")
+    allowed = {
+        repository.https_url,
+        repository.https_url.removesuffix(".git"),
+    }
+    if remote_url.strip() not in allowed:
+        raise ValueError(
+            f"workspace origin does not match {repository.slug}: {workspace}"
+        )
+
+
 @dataclass(frozen=True)
 class ProjectRecord:
     repository: Repository
