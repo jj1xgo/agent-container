@@ -50,7 +50,7 @@
 | statusline and `/status` | documented available fields are present | `agentctl run` exit 0; model・context・weekly・git・projectを表示; model+reasoning、context remaining、five-hour、weekly、used tokens、git branch、projectを設定（利用不能・ゼロの項目は省略） | 2026-08-22 |
 | handover notification | latest path only; no body | `agentctl run` exit 0; `/handovers/agent-container/2026-08-22_1340.md`のpathと読取指示だけを通知; 本文なし | 2026-08-22 |
 | restart and `/resume` | same project session continuity | `agentctl run` exit 0; 再起動後、同じproject sessionのresume成功 | 2026-08-22 |
-| shared auth update | authentication remains valid; no bind-mount write error | `stat` exit 0、`codex login status` exit 0; 前後ともmode `0600`、UID/GID 1000、size 4088、mtime不変; login有効; write/rename errorなし | 2026-08-22 |
+| shared auth update | authentication remains valid; no bind-mount write error | 通常のnested mountでdevice auth exit 0; 前後ともmode `0600`、UID/GID 1000、size 4088; mtime changed、inode unchanged; 同じnested mountの`codex login status` exit 0、ChatGPT login有効; doctor exit 0、必須項目は全PASS・network-policy WARNのみ; write/rename errorなし | 2026-08-22 |
 | approved branch push and PR | named test branch and unmerged PR created | exit 0; `test/phase1-container-smoke`をpush; [PR #2](https://github.com/jj1xgo/agent-container/pull/2)はOPEN・未merge、指定title、変更は`docs/phase1-container-smoke.md`のみ; remote mainに`tests`がなくunittest discoveryは開始前にexit 1; `git diff --check`はPASS | 2026-08-22 |
 | container mount inspection | prohibited host paths and Podman socket absent | inspect exit 0; PASS; workspace、project Codex home、shared `auth.json`、project cache、専用`gh` read-only、対象handoverだけをmount; host通常`~/.codex`、既存開発worktree、他handover、Podman socketなし; 検査専用停止containerを削除 | 2026-08-22 |
 

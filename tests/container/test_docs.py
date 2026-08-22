@@ -46,3 +46,18 @@ class Phase1DocumentationTest(unittest.TestCase):
             self.assertTrue(columns[2])
             self.assertRegex(columns[2], r"\bexit \d+\b")
             self.assertEqual(columns[3], "2026-08-22")
+
+    def test_shared_auth_row_records_rewrite_without_raw_file_metadata(self) -> None:
+        body = (ROOT / "docs/phase1-smoke-test.md").read_text(encoding="utf-8")
+        row = next(
+            line for line in body.splitlines() if line.startswith("| shared auth update |")
+        )
+        observed = [column.strip() for column in row.strip("|").split("|")][2]
+
+        self.assertIn("device auth exit 0", observed)
+        self.assertIn("mtime changed", observed)
+        self.assertIn("inode unchanged", observed)
+        self.assertIn("codex login status` exit 0", observed)
+        self.assertIn("doctor exit 0", observed)
+        self.assertNotIn("mtime unchanged", observed)
+        self.assertNotRegex(observed, r"(?:mtime|inode)\s*[=:]\s*[0-9]")
