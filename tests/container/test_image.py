@@ -7,6 +7,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ContainerImageContractTest(unittest.TestCase):
+    def test_image_installs_system_bubblewrap(self) -> None:
+        body = (ROOT / "Containerfile").read_text(encoding="utf-8")
+        install = re.search(
+            r"apt-get install -y --no-install-recommends (?P<packages>[^\n]+)",
+            body,
+        )
+
+        self.assertIsNotNone(install)
+        self.assertIn("bubblewrap", install.group("packages").split())
+
     def test_image_pins_codex_and_runs_as_agent(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
         self.assertIn("ARG CODEX_VERSION=0.149.0", body)
