@@ -26,7 +26,7 @@ bin/agentctl run agent-container
 
 ## 各commandの意味
 
-`bin/agentctl build`はrepositoryのContainerfileから`localhost/agent-container:dev`をbuildします。build contextへcredentialや状態directoryを入れません。
+`bin/agentctl build`はrepositoryのContainerfileから`localhost/agent-container:dev`をbuildします。build contextへcredentialや状態directoryを入れません。managed imageにはCodexのLinux sandbox用としてDebianの`bubblewrap`を含めます。
 
 `bin/agentctl auth codex`は認証専用containerでdevice codeによるCodexログインを開始します。利用者がブラウザで完了します。成功確認は`codex login status`の認証方式だけで行い、`auth.json`を表示・読み取りしません。認証fileは`0600`、状態directoryは`0700`でなければならず、modeが広い既存pathは自動修正せず診断に従って修正します。
 

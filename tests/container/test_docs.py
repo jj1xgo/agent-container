@@ -34,7 +34,7 @@ class Phase1DocumentationTest(unittest.TestCase):
         self.assertIn("別途利用者承認後にだけ行う", body)
         self.assertIn("PRはmergeしない", body)
 
-    def test_smoke_results_start_with_only_not_run_observations(self) -> None:
+    def test_smoke_results_record_all_completed_controller_checks(self) -> None:
         body = (ROOT / "docs/phase1-smoke-test.md").read_text(encoding="utf-8")
         table = body.split("| command/check | expected result | observed result | date |", 1)[1]
         rows = [line for line in table.splitlines() if line.startswith("| ")][1:]
@@ -42,4 +42,6 @@ class Phase1DocumentationTest(unittest.TestCase):
         for row in rows:
             columns = [column.strip() for column in row.strip("|").split("|")]
             self.assertEqual(len(columns), 4)
-            self.assertEqual(columns[2], "not run")
+            self.assertNotEqual(columns[2], "not run")
+            self.assertTrue(columns[2])
+            self.assertEqual(columns[3], "2026-08-22")
