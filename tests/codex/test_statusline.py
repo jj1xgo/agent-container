@@ -12,6 +12,8 @@ class StatusLineProfileTest(unittest.TestCase):
         with config_path.open("rb") as stream:
             config = tomllib.load(stream)
 
+        self.assertEqual(config["cli_auth_credentials_store"], "file")
+        self.assertEqual(config["forced_login_method"], "chatgpt")
         self.assertEqual(
             config["tui"]["status_line"],
             [

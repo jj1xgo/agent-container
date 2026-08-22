@@ -1,0 +1,6 @@
+.git
+.worktrees
+.codex
+auth.json
+__pycache__
+*.pyc
