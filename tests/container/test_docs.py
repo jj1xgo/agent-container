@@ -42,6 +42,7 @@ class Phase1DocumentationTest(unittest.TestCase):
         for row in rows:
             columns = [column.strip() for column in row.strip("|").split("|")]
             self.assertEqual(len(columns), 4)
-            self.assertNotEqual(columns[2], "not run")
+            self.assertNotIn("not run", columns[2].lower())
             self.assertTrue(columns[2])
+            self.assertRegex(columns[2], r"\bexit \d+\b")
             self.assertEqual(columns[3], "2026-08-22")
