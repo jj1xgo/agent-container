@@ -17,6 +17,7 @@ from agent_container.state import Repository
 from agent_container.state import StateLayout
 from agent_container.state import ensure_private_directory
 from agent_container.state import ensure_private_file
+from agent_container.state import validate_workspace
 from agent_container.state import validate_workspace_origin
 
 
@@ -127,6 +128,7 @@ def _add_project(
     ensure_private_file(layout.gh_dir / "hosts.yml")
     if not (layout.workspace.exists() or layout.workspace.is_symlink()):
         runner(clone_project_spec(layout, repository, image))
+    validate_workspace(layout.workspace)
     validate_workspace_origin(
         layout.workspace, repository, git_remote_reader(layout.workspace)
     )

@@ -96,3 +96,18 @@ class StateSecurityTest(unittest.TestCase):
                     Repository.parse("jj1xgo/agent-container"),
                     "https://github.com/jj1xgo/agent-container.git",
                 )
+
+    def test_workspace_origin_rejects_symlinked_git_directory(self) -> None:
+        with TemporaryDirectory() as temp:
+            workspace = Path(temp) / "workspace"
+            workspace.mkdir()
+            git_target = Path(temp) / "git-target"
+            git_target.mkdir()
+            (workspace / ".git").symlink_to(git_target, target_is_directory=True)
+
+            with self.assertRaisesRegex(ValueError, "not a safe Git repository"):
+                validate_workspace_origin(
+                    workspace,
+                    Repository.parse("jj1xgo/agent-container"),
+                    "https://github.com/jj1xgo/agent-container.git",
+                )

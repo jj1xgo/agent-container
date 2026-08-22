@@ -143,6 +143,32 @@ class AgentCtlProjectTest(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertFalse((root / "projects/agent-container/project.json").exists())
 
+    def test_project_add_rejects_git_symlink_before_reading_origin(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            handovers = Path(temp) / "handovers"
+            (handovers / "agent-container").mkdir(parents=True)
+            self._authenticated_state(root)
+            workspace = root / "workspaces/agent-container"
+            workspace.mkdir(parents=True)
+            workspace.parent.chmod(0o700)
+            git_target = Path(temp) / "git-target"
+            git_target.mkdir()
+            (workspace / ".git").symlink_to(git_target, target_is_directory=True)
+            origin_reads = []
+
+            result = main(
+                ["project", "add", "jj1xgo/agent-container", "--handover-root", str(handovers)],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: self.fail("clone runner must not be called"),
+                git_remote_reader=lambda path: origin_reads.append(path)
+                or "https://github.com/jj1xgo/agent-container.git",
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(origin_reads, [])
+            self.assertFalse((root / "projects/agent-container/project.json").exists())
+
     def test_project_add_rejects_symlinked_handover_project_before_clone(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp) / "state"

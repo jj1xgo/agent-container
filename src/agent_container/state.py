@@ -120,11 +120,21 @@ def ensure_private_file(path: Path) -> Path:
     return path.resolve()
 
 
+def validate_workspace(workspace: Path) -> None:
+    git_dir = workspace / ".git"
+    if (
+        not workspace.is_dir()
+        or workspace.is_symlink()
+        or git_dir.is_symlink()
+        or not git_dir.is_dir()
+    ):
+        raise ValueError(f"workspace is not a safe Git repository: {workspace}")
+
+
 def validate_workspace_origin(
     workspace: Path, repository: Repository, remote_url: str
 ) -> None:
-    if workspace.is_symlink() or not (workspace / ".git").is_dir():
-        raise ValueError(f"workspace is not a safe Git repository: {workspace}")
+    validate_workspace(workspace)
     allowed = {
         repository.https_url,
         repository.https_url.removesuffix(".git"),
