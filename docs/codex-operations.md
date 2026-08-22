@@ -47,3 +47,5 @@ launcherは対象projectについてだけ`AGENT_PROJECT_ID`と`AGENT_HANDOVER_R
 - handover Skillのfresh-agent評価: SkillなしのREDではagentが`.codex/HANDOVER.md`を推測しproject CLIを省略した。SkillありのGREENではstorage変数不足を拒否し、CLI contractを使用、環境値とfull transcriptを除外し、未確認のGit/testsをskippedとして記録した。
 
 認証済み専用containerでのPhase 1 integration checkは未実施である。authenticated TUIでのhook trust（`/hooks`）、statusline rendering、`/status`のconditional rate-limit field renderingは、このprototypeで確認済みとは主張しない。
+
+prototypeのunit testは認証済みTUIの動作を証明しない。rootless Podman、device auth、private clone、TUI、session resume、GitHub mutationを含む実host確認は、承認付きの[Phase 1 smoke test checklist](phase1-smoke-test.md)で記録する。
