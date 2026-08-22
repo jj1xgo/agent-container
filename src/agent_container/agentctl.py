@@ -188,7 +188,8 @@ def _runtime_preflight(
     project_id: str,
     environment: Mapping[str, str] | None,
     git_remote_reader: Callable[[Path], str],
-) -> tuple[StateLayout, Path]:
+    identity_reader: Callable[[], tuple[int, int]],
+) -> tuple[StateLayout, Path, int, int]:
     layout = StateLayout.from_environment(project_id, environment)
     _ensure_exact_state_root(layout, environment)
     for directory in _private_state_directories(layout):
@@ -204,7 +205,26 @@ def _runtime_preflight(
     )
     handover_root = _resolve_handover_root(record.handover_root, layout.project_id)
     handover_project = handover_root / layout.project_id
-    return layout, handover_project
+    uid, gid = _validated_process_identity(identity_reader)
+    return layout, handover_project, uid, gid
+
+
+def read_process_identity() -> tuple[int, int]:
+    return os.getuid(), os.getgid()
+
+
+def _validated_process_identity(
+    identity_reader: Callable[[], tuple[int, int]],
+) -> tuple[int, int]:
+    identity = identity_reader()
+    if (
+        not isinstance(identity, tuple)
+        or len(identity) != 2
+        or not all(isinstance(value, int) for value in identity)
+        or identity != (os.getuid(), os.getgid())
+    ):
+        raise ValueError("runtime uid and gid must match the current process")
+    return identity
 
 
 def _private_state_directories(layout: StateLayout) -> tuple[Path, ...]:
@@ -259,6 +279,14 @@ def _doctor_run(
         return subprocess.CompletedProcess(spec.argv, 1)
 
 
+def _check_failure_detail(error: Exception) -> str:
+    if isinstance(error, OSError) and not isinstance(
+        error, (PermissionError, FileNotFoundError)
+    ):
+        return "filesystem operation failed"
+    return str(error)
+
+
 def _doctor(
     project_id: str,
     image: str,
@@ -307,8 +335,10 @@ def _doctor(
                 "PASS", "private-state", "required directories mode 0700"
             )
         )
-    except (ValueError, PermissionError, FileNotFoundError) as error:
-        checks.append(CheckResult("FAIL", "private-state", str(error)))
+    except (ValueError, OSError) as error:
+        checks.append(
+            CheckResult("FAIL", "private-state", _check_failure_detail(error))
+        )
 
     for name, path in (
         ("codex-auth", layout.codex_auth_file),
@@ -317,8 +347,8 @@ def _doctor(
         try:
             ensure_private_file(path)
             checks.append(CheckResult("PASS", name, "present, mode 0600"))
-        except (ValueError, PermissionError, FileNotFoundError) as error:
-            checks.append(CheckResult("FAIL", name, str(error)))
+        except (ValueError, OSError) as error:
+            checks.append(CheckResult("FAIL", name, _check_failure_detail(error)))
 
     record: ProjectRecord | None = None
     try:
@@ -330,8 +360,10 @@ def _doctor(
                 f"repository {record.repository.slug}",
             )
         )
-    except (ValueError, PermissionError, FileNotFoundError) as error:
-        checks.append(CheckResult("FAIL", "project-metadata", str(error)))
+    except (ValueError, OSError) as error:
+        checks.append(
+            CheckResult("FAIL", "project-metadata", _check_failure_detail(error))
+        )
 
     if record is None:
         checks.append(
@@ -350,12 +382,14 @@ def _doctor(
             )
         except (
             ValueError,
-            PermissionError,
-            FileNotFoundError,
             subprocess.CalledProcessError,
             OSError,
         ) as error:
-            checks.append(CheckResult("FAIL", "workspace-origin", str(error)))
+            checks.append(
+                CheckResult(
+                    "FAIL", "workspace-origin", _check_failure_detail(error)
+                )
+            )
 
     if record is None:
         checks.append(
@@ -373,8 +407,12 @@ def _doctor(
                     "real directory within configured root",
                 )
             )
-        except (ValueError, PermissionError, FileNotFoundError) as error:
-            checks.append(CheckResult("FAIL", "handover-project", str(error)))
+        except (ValueError, OSError) as error:
+            checks.append(
+                CheckResult(
+                    "FAIL", "handover-project", _check_failure_detail(error)
+                )
+            )
 
     checks.append(
         CheckResult(
@@ -393,6 +431,10 @@ def main(
     git_remote_reader: Callable[[Path], str] = read_git_remote,
     stdout: TextIO = sys.stdout,
     stderr: TextIO = sys.stderr,
+    identity_reader: Callable[[], tuple[int, int]] = read_process_identity,
+    runtime_spec_builder: Callable[
+        [StateLayout, Path, str, int, int], CommandSpec
+    ] = run_codex_spec,
 ) -> int:
     try:
         arguments = parser().parse_args(argv)
@@ -419,17 +461,18 @@ def main(
             )
             return 0
         if arguments.command == "run":
-            layout, handover_project = _runtime_preflight(
+            layout, handover_project, uid, gid = _runtime_preflight(
                 arguments.project,
                 environment,
                 git_remote_reader,
+                identity_reader,
             )
-            spec = run_codex_spec(
+            spec = runtime_spec_builder(
                 layout,
                 handover_project,
                 arguments.image,
-                os.getuid(),
-                os.getgid(),
+                uid,
+                gid,
             )
             print(
                 f"Starting Codex for project: {layout.project_id}",
@@ -457,6 +500,9 @@ def main(
         return error.returncode or 1
     except (ValueError, PermissionError, FileNotFoundError) as error:
         print(f"error: {error}", file=stderr)
+        return 1
+    except OSError:
+        print("error: filesystem operation failed", file=stderr)
         return 1
 
 

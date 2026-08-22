@@ -5,8 +5,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import subprocess
 import unittest
+from unittest.mock import patch
 
 from agent_container.agentctl import main
+from agent_container.podman import run_codex_spec
 from agent_container.state import ProjectRecord
 from agent_container.state import Repository
 
@@ -265,6 +267,19 @@ class AgentCtlProjectTest(unittest.TestCase):
 
 
 class AgentCtlRunDoctorTest(unittest.TestCase):
+    DOCTOR_CHECK_ORDER = [
+        "podman-version",
+        "podman-rootless",
+        "image",
+        "private-state",
+        "codex-auth",
+        "gh-hosts",
+        "project-metadata",
+        "workspace-origin",
+        "handover-project",
+        "network-policy",
+    ]
+
     def _runtime_state(self, temp: str) -> tuple[Path, Path]:
         root = Path(temp) / "state"
         handover_root = Path(temp) / "handovers"
@@ -328,6 +343,14 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         rendered = stdout.getvalue() + stderr.getvalue()
         self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", rendered)
 
+    def _successful_doctor_runner(self, spec):
+        if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
+            return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+        return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
+
+    def _doctor_check_names(self, rendered: str) -> list[str]:
+        return [line.split()[1].removesuffix(":") for line in rendered.splitlines()]
+
     def test_run_validates_then_starts_codex(self) -> None:
         with TemporaryDirectory() as temp:
             root, handover_project = self._runtime_state(temp)
@@ -356,6 +379,33 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             )
             self.assertNotIn(str(root / "shared-auth/codex/auth.json"), output.getvalue())
             self.assertEqual(os.getuid(), root.stat().st_uid)
+
+    def test_run_rejects_identity_mismatch_before_building_runtime_spec(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            builder_calls = []
+            runner_calls = []
+            stderr = StringIO()
+
+            def runtime_spec_builder(*args):
+                builder_calls.append(args)
+                return run_codex_spec(*args)
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: runner_calls.append(spec)
+                or subprocess.CompletedProcess(spec.argv, 0),
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                identity_reader=lambda: (os.getuid() + 1, os.getgid()),
+                runtime_spec_builder=runtime_spec_builder,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(builder_calls, [])
+            self.assertEqual(runner_calls, [])
+            self.assertIn("must match the current process", stderr.getvalue())
 
     def test_doctor_reports_presence_without_secret_values(self) -> None:
         with TemporaryDirectory() as temp:
@@ -397,19 +447,8 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 ],
             )
             self.assertEqual(
-                [line.split()[1].removesuffix(":") for line in rendered.splitlines()],
-                [
-                    "podman-version",
-                    "podman-rootless",
-                    "image",
-                    "private-state",
-                    "codex-auth",
-                    "gh-hosts",
-                    "project-metadata",
-                    "workspace-origin",
-                    "handover-project",
-                    "network-policy",
-                ],
+                self._doctor_check_names(rendered),
+                self.DOCTOR_CHECK_ORDER,
             )
 
     def test_doctor_failure_is_nonzero_and_does_not_print_secret_values(self) -> None:
@@ -435,6 +474,62 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertIn("FAIL  codex-auth:", output.getvalue())
             self.assertIn("WARN  network-policy:", output.getvalue())
             self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", output.getvalue())
+
+    def test_doctor_converts_filesystem_oserrors_to_ordered_failures(self) -> None:
+        cases = (
+            ("private-state", "agent_container.agentctl._ensure_exact_state_root"),
+            ("project-metadata", "agent_container.agentctl._read_runtime_project"),
+            ("handover-project", "agent_container.agentctl._resolve_handover_root"),
+        )
+        for failed_check, target in cases:
+            with self.subTest(check=failed_check), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                output = StringIO()
+                errors = StringIO()
+                with patch(
+                    target,
+                    side_effect=OSError("DO-NOT-PRINT-CREDENTIAL-BODY"),
+                ):
+                    result = main(
+                        ["doctor", "agent-container"],
+                        environment={"AGENT_CONTAINER_HOME": str(root)},
+                        runner=self._successful_doctor_runner,
+                        git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                        stdout=output,
+                        stderr=errors,
+                    )
+
+                rendered = output.getvalue() + errors.getvalue()
+                self.assertEqual(result, 1)
+                self.assertIn(f"FAIL  {failed_check}: filesystem operation failed", rendered)
+                self.assertEqual(
+                    self._doctor_check_names(rendered),
+                    self.DOCTOR_CHECK_ORDER,
+                )
+                self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", rendered)
+
+    def test_run_converts_filesystem_oserror_without_running_container(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            runner_calls = []
+            stderr = StringIO()
+
+            def failing_remote_reader(path):
+                raise OSError("DO-NOT-PRINT-CREDENTIAL-BODY")
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: runner_calls.append(spec)
+                or subprocess.CompletedProcess(spec.argv, 0),
+                git_remote_reader=failing_remote_reader,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(runner_calls, [])
+            self.assertIn("error: filesystem operation failed", stderr.getvalue())
+            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
 
     def test_run_rejects_symlinked_configured_state_root_before_runner(self) -> None:
         with TemporaryDirectory() as temp:

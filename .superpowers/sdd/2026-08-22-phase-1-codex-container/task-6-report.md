@@ -35,3 +35,32 @@
 ## Concerns
 
 - No known implementation concerns. Real-host Podman behavior was intentionally not smoke-tested in this task, per scope.
+
+## Fix Round 1
+
+### Findings addressed
+
+- Added an explicit caller/runtime-preflight identity gate. An injectable identity reader is checked against the real process UID/GID before the runtime spec builder is called; the existing `run_codex_spec` identity validation remains as defense-in-depth.
+- Converted base filesystem `OSError` failures in doctor state, credential, metadata, workspace, and handover checks into sanitized fixed FAIL results. Remaining command-level filesystem `OSError` exits `1` without a traceback or exception text.
+
+### RED/GREEN evidence
+
+- RED: `PYTHONPATH=src python3 -m unittest tests.container.test_agentctl.AgentCtlRunDoctorTest.test_run_rejects_identity_mismatch_before_building_runtime_spec -v` failed with `TypeError: main() got an unexpected keyword argument 'identity_reader'`, confirming no caller-side injectable identity boundary existed.
+- GREEN: the focused identity mismatch plus valid-run command passed 2 tests; the mismatch test proved both the runtime spec builder and runner remained untouched.
+- RED: the focused doctor/run filesystem-error command failed with 4 errors: private-state, project-metadata, handover-project, and outer run paths each propagated `OSError: DO-NOT-PRINT-CREDENTIAL-BODY`.
+- GREEN: `PYTHONPATH=src python3 -m unittest tests.container.test_agentctl.AgentCtlRunDoctorTest.test_run_rejects_identity_mismatch_before_building_runtime_spec tests.container.test_agentctl.AgentCtlRunDoctorTest.test_doctor_converts_filesystem_oserrors_to_ordered_failures tests.container.test_agentctl.AgentCtlRunDoctorTest.test_run_converts_filesystem_oserror_without_running_container -v` passed 3 tests. Each doctor subcase retained the same ten check names/order and omitted the exception sentinel.
+- GREEN: `PYTHONPATH=src python3 -m unittest discover -s tests/container -v` passed 48 tests.
+- GREEN: `PYTHONPATH=src python3 -m unittest discover -s tests -v` passed 66 tests.
+- `git diff --check` exited 0.
+
+### Files and self-review
+
+- Modified `src/agent_container/agentctl.py`, `tests/container/test_agentctl.py`, and this report only.
+- The main injection interface remains backward-compatible: the identity reader and runtime builder are optional trailing dependencies, and existing callers require no changes.
+- UID/GID validation now completes inside runtime preflight before builder construction; the builder still independently rejects non-current identities.
+- Non-permission/not-found `OSError` text is not rendered, preventing exception messages from disclosing credential-like content. Doctor continues through its fixed checks and WARN line after handled filesystem failures.
+- The deferred double parse of `project.json` was not refactored.
+
+### Concerns
+
+- None. No real Podman, GitHub, Git mutation, or Codex operation ran.
