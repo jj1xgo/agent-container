@@ -5,3 +5,16 @@
 !profiles/
 !profiles/codex/
 !profiles/codex/**
+**/auth.json
+**/hosts.yml
+**/.git
+**/.git/**
+**/.worktrees
+**/.worktrees/**
+**/.codex
+**/.codex/**
+**/__pycache__
+**/__pycache__/**
+**/.cache
+**/.cache/**
+**/*.pyc

@@ -1,9 +1,21 @@
+from fnmatch import fnmatchcase
 from pathlib import Path
 import re
+import subprocess
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def containerignore_includes(path: str, patterns: list[str]) -> bool:
+    included = True
+    for raw_pattern in patterns:
+        negated = raw_pattern.startswith("!")
+        pattern = raw_pattern.removeprefix("!").rstrip("/")
+        if fnmatchcase(path, pattern) or fnmatchcase(path, f"{pattern}/**"):
+            included = negated
+    return included
 
 
 class ContainerImageContractTest(unittest.TestCase):
@@ -53,19 +65,48 @@ class ContainerImageContractTest(unittest.TestCase):
                 "!profiles/",
                 "!profiles/codex/",
                 "!profiles/codex/**",
+                "**/auth.json",
+                "**/hosts.yml",
+                "**/.git",
+                "**/.git/**",
+                "**/.worktrees",
+                "**/.worktrees/**",
+                "**/.codex",
+                "**/.codex/**",
+                "**/__pycache__",
+                "**/__pycache__/**",
+                "**/.cache",
+                "**/.cache/**",
+                "**/*.pyc",
             ],
         )
 
         sensitive_nested_paths = (
-            "nested/agent-container/shared-auth/codex/auth.json",
-            "nested/agent-container/gh/hosts.yml",
-            "nested/agent-container/workspaces/project/.git/config",
-            "nested/agent-container/projects/project/codex-home/session.json",
-            "nested/.worktrees/topic/index",
-            "nested/cache/archive.bin",
+            "src/fixture/auth.json",
+            "profiles/codex/nested/auth.json",
+            "src/fixture/hosts.yml",
+            "profiles/codex/.git/config",
+            "src/.worktrees/topic/index",
+            "profiles/codex/.codex/session.json",
+            "src/agent_container/__pycache__/state.cpython-314.pyc",
+            "profiles/codex/generated.pyc",
+            "src/agent_container/.cache/archive.bin",
         )
-        allowed_roots = ("src/", "profiles/codex/")
         for path in sensitive_nested_paths:
             with self.subTest(path=path):
-                self.assertNotEqual(path, "Containerfile")
-                self.assertFalse(path.startswith(allowed_roots))
+                self.assertFalse(containerignore_includes(path, patterns))
+
+    def test_containerignore_includes_every_tracked_copy_input(self) -> None:
+        patterns = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()
+        tracked = subprocess.run(
+            ("git", "ls-files", "--", "Containerfile", "src", "profiles/codex"),
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+
+        self.assertTrue(tracked)
+        for path in tracked:
+            with self.subTest(path=path):
+                self.assertTrue(containerignore_includes(path, patterns))
