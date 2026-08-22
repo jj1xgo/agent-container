@@ -22,6 +22,8 @@ def _clean_line(value: str, field: str) -> str:
 
 def latest_handover(root: Path, project_id: str) -> Path | None:
     project = root.resolve() / validate_project_id(project_id)
+    if project.is_symlink():
+        return None
     if not project.is_dir():
         return None
     candidates = [
@@ -44,6 +46,8 @@ def create_handover(
     session = _clean_line(session_id, "session_id") if session_id.strip() else "（未記録）"
     timestamp = now or datetime.now().astimezone()
     project = root.resolve() / project_id
+    if project.is_symlink():
+        raise ValueError("project directory must not be a symlink")
     project.mkdir(parents=True, exist_ok=True)
     path = project / timestamp.strftime("%Y-%m-%d_%H%M.md")
     created = timestamp.isoformat(timespec="minutes")

@@ -33,6 +33,18 @@ class HandoverTest(unittest.TestCase):
 
             self.assertEqual(latest_handover(Path(temp), "agent-container"), newest)
 
+    def test_latest_handover_ignores_project_directory_symlink(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "root"
+            outside = Path(temp) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            outside_file = outside / "2026-08-22_1815.md"
+            outside_file.write_text("outside", encoding="utf-8")
+            (root / "agent-container").symlink_to(outside, target_is_directory=True)
+
+            self.assertIsNone(latest_handover(root, "agent-container"))
+
     def test_create_handover_uses_expected_path_and_metadata(self) -> None:
         with TemporaryDirectory() as temp:
             path = create_handover(
@@ -56,6 +68,20 @@ class HandoverTest(unittest.TestCase):
             create_handover(Path(temp), "agent-container", "first", "", now)
             with self.assertRaises(FileExistsError):
                 create_handover(Path(temp), "agent-container", "second", "", now)
+
+    def test_create_handover_rejects_project_directory_symlink(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "root"
+            outside = Path(temp) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            (root / "agent-container").symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaises(ValueError) as raised:
+                create_handover(root, "agent-container", "title", "session")
+
+            self.assertEqual(str(raised.exception), "project directory must not be a symlink")
+            self.assertEqual(list(outside.iterdir()), [])
 
 
 class HandoverCliTest(unittest.TestCase):
