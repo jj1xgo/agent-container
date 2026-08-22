@@ -1,0 +1,19 @@
+{
+  "description": "Discover project handovers without injecting their body.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONPATH=/opt/agent-container/src /usr/bin/python3 -m agent_container.handover_hook",
+            "statusMessage": "Checking project handover",
+            "additionalContextLimit": 1000,
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}
