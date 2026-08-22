@@ -11,6 +11,8 @@ def main() -> int:
         payload = json.load(sys.stdin)
     except json.JSONDecodeError:
         return 0
+    if not isinstance(payload, dict):
+        return 0
     if payload.get("hook_event_name") != "SessionStart":
         return 0
     root = os.environ.get("AGENT_HANDOVER_ROOT")
@@ -19,7 +21,7 @@ def main() -> int:
         return 0
     try:
         path = latest_handover(Path(root), project_id)
-    except ValueError:
+    except (ValueError, OSError):
         return 0
     if path is None:
         return 0

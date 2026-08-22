@@ -1,10 +1,14 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from io import StringIO
 import json
 import os
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
+
+from agent_container.handover_hook import main
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,6 +31,14 @@ def run_hook(environment: dict[str, str], payload: dict[str, object]) -> subproc
 
 
 class HandoverHookTest(unittest.TestCase):
+    def test_null_payload_is_silent(self) -> None:
+        result = run_hook({}, None)
+        self.assertEqual(result.stdout, "")
+
+    def test_array_payload_is_silent(self) -> None:
+        result = run_hook({}, [])
+        self.assertEqual(result.stdout, "")
+
     def test_missing_environment_is_silent(self) -> None:
         result = run_hook({}, {"hook_event_name": "SessionStart", "source": "startup"})
         self.assertEqual(result.stdout, "")
@@ -64,6 +76,21 @@ class HandoverHookTest(unittest.TestCase):
                 {"hook_event_name": "SessionStart", "source": "startup"},
             )
             self.assertEqual(result.stdout, "")
+
+    def test_filesystem_error_is_silent(self) -> None:
+        payload = {"hook_event_name": "SessionStart", "source": "startup"}
+        with (
+            patch.dict(
+                os.environ,
+                {"AGENT_HANDOVER_ROOT": "/handovers", "AGENT_PROJECT_ID": "agent-container"},
+                clear=True,
+            ),
+            patch("sys.stdin", StringIO(json.dumps(payload))),
+            patch("sys.stdout", new_callable=StringIO) as stdout,
+            patch("agent_container.handover_hook.latest_handover", side_effect=OSError("unreadable")),
+        ):
+            self.assertEqual(main(), 0)
+            self.assertEqual(stdout.getvalue(), "")
 
     def test_hooks_json_registers_only_session_start(self) -> None:
         config = json.loads((ROOT / "profiles" / "codex" / "hooks.json").read_text())
