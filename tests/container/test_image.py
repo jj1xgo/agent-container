@@ -40,7 +40,32 @@ class ContainerImageContractTest(unittest.TestCase):
             ),
         )
 
-    def test_containerignore_excludes_git_and_local_state(self) -> None:
+    def test_containerignore_is_an_allowlist_for_build_inputs_only(self) -> None:
         patterns = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()
-        for required in (".git", ".worktrees", ".codex", "auth.json", "__pycache__"):
-            self.assertIn(required, patterns)
+
+        self.assertEqual(
+            patterns,
+            [
+                "**",
+                "!Containerfile",
+                "!src/",
+                "!src/**",
+                "!profiles/",
+                "!profiles/codex/",
+                "!profiles/codex/**",
+            ],
+        )
+
+        sensitive_nested_paths = (
+            "nested/agent-container/shared-auth/codex/auth.json",
+            "nested/agent-container/gh/hosts.yml",
+            "nested/agent-container/workspaces/project/.git/config",
+            "nested/agent-container/projects/project/codex-home/session.json",
+            "nested/.worktrees/topic/index",
+            "nested/cache/archive.bin",
+        )
+        allowed_roots = ("src/", "profiles/codex/")
+        for path in sensitive_nested_paths:
+            with self.subTest(path=path):
+                self.assertNotEqual(path, "Containerfile")
+                self.assertFalse(path.startswith(allowed_roots))

@@ -13,16 +13,73 @@ from agent_container.state import ProjectRecord
 from agent_container.state import Repository
 
 
+def successful_podman_result(spec):
+    if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
+        return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+    return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
+
+
 class AgentCtlBuildAuthTest(unittest.TestCase):
+    @staticmethod
+    def _successful_probe(spec):
+        return successful_podman_result(spec)
+
+    def test_build_requires_successful_rootless_podman_before_build(self) -> None:
+        calls = []
+
+        def runner(spec):
+            calls.append(spec)
+            if spec.argv[:2] == ("podman", "info"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="false\n")
+            return subprocess.CompletedProcess(
+                spec.argv, 0, stdout="podman version 5.8\n"
+            )
+
+        result = main(["build"], runner=runner)
+
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            [call.argv for call in calls],
+            [
+                ("podman", "--version"),
+                ("podman", "info", "--format", "{{.Host.Security.Rootless}}"),
+            ],
+        )
+
+    def test_build_preserves_failed_version_probe_exit_code(self) -> None:
+        calls = []
+        stderr = StringIO()
+
+        def runner(spec):
+            calls.append(spec)
+            return subprocess.CompletedProcess(spec.argv, 23)
+
+        result = main(["build"], runner=runner, stderr=stderr)
+
+        self.assertEqual(result, 23)
+        self.assertEqual([call.argv for call in calls], [("podman", "--version")])
+        self.assertEqual(stderr.getvalue(), "error: command failed with exit code 23\n")
+
+    def test_invalid_image_is_rejected_before_any_runner_call(self) -> None:
+        for image in ("", "-danger", "two words", "line\nfeed"):
+            with self.subTest(image=image):
+                calls = []
+                result = main(
+                    [f"--image={image}", "build"],
+                    runner=lambda spec: calls.append(spec),
+                )
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+
     def test_build_runs_one_podman_build(self) -> None:
         calls = []
         result = main(
             ["build"],
-            runner=lambda spec: calls.append(spec)
-            or subprocess.CompletedProcess(spec.argv, 0),
+            runner=lambda spec: calls.append(spec) or self._successful_probe(spec),
         )
         self.assertEqual(result, 0)
-        self.assertEqual(calls[0].argv[:2], ("podman", "build"))
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[2].argv[:2], ("podman", "build"))
 
     def test_auth_creates_private_state_and_runs_device_login(self) -> None:
         with TemporaryDirectory() as temp:
@@ -31,17 +88,114 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
 
             def runner(spec):
                 calls.append(spec)
-                auth_file = Path(temp) / "shared-auth/codex/auth.json"
-                auth_file.write_text("fixture-not-a-token", encoding="utf-8")
-                auth_file.chmod(0o600)
-                return subprocess.CompletedProcess(spec.argv, 0)
+                if spec.argv[-3:] == ("codex", "login", "--device-auth"):
+                    auth_file = Path(temp) / "shared-auth/codex/auth.json"
+                    auth_file.write_text("fixture-not-a-token", encoding="utf-8")
+                    auth_file.chmod(0o600)
+                return self._successful_probe(spec)
 
             result = main(["auth", "codex"], environment=environment, runner=runner)
             self.assertEqual(result, 0)
             self.assertEqual(
                 (Path(temp) / "shared-auth/codex").stat().st_mode & 0o777, 0o700
             )
-            self.assertIn("--device-auth", calls[0].argv)
+            self.assertEqual(len(calls), 5)
+            self.assertIn("--device-auth", calls[3].argv)
+            self.assertEqual(calls[4].argv[-3:], ("codex", "login", "status"))
+
+    def test_auth_rejects_symlinked_state_root_before_probe_or_creation(self) -> None:
+        with TemporaryDirectory() as temp:
+            real_root = Path(temp) / "real-state"
+            real_root.mkdir()
+            linked_root = Path(temp) / "linked-state"
+            linked_root.symlink_to(real_root, target_is_directory=True)
+            calls = []
+
+            result = main(
+                ["auth", "codex"],
+                environment={"AGENT_CONTAINER_HOME": str(linked_root)},
+                runner=lambda spec: calls.append(spec),
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(calls, [])
+            self.assertEqual(list(real_root.iterdir()), [])
+
+    def test_auth_propagates_login_status_failure(self) -> None:
+        with TemporaryDirectory() as temp:
+            calls = []
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-3:] == ("codex", "login", "--device-auth"):
+                    auth_file = Path(temp) / "shared-auth/codex/auth.json"
+                    auth_file.write_text(
+                        "DO-NOT-PRINT-CREDENTIAL-BODY", encoding="utf-8"
+                    )
+                    auth_file.chmod(0o600)
+                if spec.argv[-3:] == ("codex", "login", "status"):
+                    return subprocess.CompletedProcess(spec.argv, 17)
+                return self._successful_probe(spec)
+
+            stderr = StringIO()
+            result = main(
+                ["auth", "codex"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=runner,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 17)
+            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
+
+    def test_auth_missing_image_does_not_create_state(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "new-state"
+            calls = []
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[:3] == ("podman", "image", "exists"):
+                    return subprocess.CompletedProcess(spec.argv, 31)
+                return self._successful_probe(spec)
+
+            result = main(
+                ["auth", "codex"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 31)
+            self.assertEqual(len(calls), 3)
+            self.assertFalse(root.exists())
+
+    def test_auth_rejects_runner_created_broad_credential_file_before_status(self) -> None:
+        with TemporaryDirectory() as temp:
+            calls = []
+            stderr = StringIO()
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-3:] == ("codex", "login", "--device-auth"):
+                    auth_file = Path(temp) / "shared-auth/codex/auth.json"
+                    auth_file.write_text(
+                        "DO-NOT-PRINT-CREDENTIAL-BODY", encoding="utf-8"
+                    )
+                    auth_file.chmod(0o644)
+                return self._successful_probe(spec)
+
+            result = main(
+                ["auth", "codex"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=runner,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(len(calls), 4)
+            self.assertIn("mode 0600", stderr.getvalue())
+            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
 
     def test_auth_error_does_not_print_credential_content(self) -> None:
         with TemporaryDirectory() as temp:
@@ -82,10 +236,11 @@ class AgentCtlProjectTest(unittest.TestCase):
 
             def runner(spec):
                 calls.append(spec)
-                workspace = root / "workspaces/agent-container"
-                workspace.mkdir(parents=True)
-                (workspace / ".git").mkdir()
-                return subprocess.CompletedProcess(spec.argv, 0)
+                if "clone" in spec.argv:
+                    workspace = root / "workspaces/agent-container"
+                    workspace.mkdir(parents=True)
+                    (workspace / ".git").mkdir()
+                return successful_podman_result(spec)
 
             result = main(
                 ["project", "add", "jj1xgo/agent-container", "--handover-root", str(handovers)],
@@ -98,9 +253,36 @@ class AgentCtlProjectTest(unittest.TestCase):
             record = ProjectRecord.read(root / "projects/agent-container/project.json")
             self.assertEqual(record.repository.slug, "jj1xgo/agent-container")
             self.assertTrue((root / "projects/agent-container/codex-home/config.toml").is_file())
-            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(calls), 4)
             for forbidden in ("checkout", "reset", "clean", "fetch"):
-                self.assertNotIn(forbidden, calls[0].argv)
+                self.assertNotIn(forbidden, calls[-1].argv)
+
+    def test_project_add_missing_image_never_starts_clone_or_creates_project_state(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            handovers = Path(temp) / "handovers"
+            (handovers / "agent-container").mkdir(parents=True)
+            self._authenticated_state(root)
+            calls = []
+            stderr = StringIO()
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[:3] == ("podman", "image", "exists"):
+                    return subprocess.CompletedProcess(spec.argv, 41)
+                return successful_podman_result(spec)
+
+            result = main(
+                ["project", "add", "jj1xgo/agent-container", "--handover-root", str(handovers)],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 41)
+            self.assertEqual(len(calls), 3)
+            self.assertFalse((root / "projects").exists())
+            self.assertFalse((root / "workspaces").exists())
 
     def test_project_add_leaves_existing_workspace_directory_untouched(self) -> None:
         with TemporaryDirectory() as temp:
@@ -135,8 +317,9 @@ class AgentCtlProjectTest(unittest.TestCase):
             self._authenticated_state(root)
 
             def runner(spec):
-                (root / "workspaces/agent-container/.git").mkdir(parents=True)
-                return subprocess.CompletedProcess(spec.argv, 0)
+                if "clone" in spec.argv:
+                    (root / "workspaces/agent-container/.git").mkdir(parents=True)
+                return successful_podman_result(spec)
 
             result = main(
                 ["project", "add", "jj1xgo/agent-container", "--handover-root", str(handovers)],
@@ -212,6 +395,26 @@ class AgentCtlProjectTest(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertEqual(calls, [])
 
+    def test_project_add_rejects_symlinked_state_root_before_probe_or_creation(self) -> None:
+        with TemporaryDirectory() as temp:
+            real_root = Path(temp) / "real-state"
+            real_root.mkdir(mode=0o700)
+            linked_root = Path(temp) / "linked-state"
+            linked_root.symlink_to(real_root, target_is_directory=True)
+            handovers = Path(temp) / "handovers"
+            (handovers / "agent-container").mkdir(parents=True)
+            calls = []
+
+            result = main(
+                ["project", "add", "jj1xgo/agent-container", "--handover-root", str(handovers)],
+                environment={"AGENT_CONTAINER_HOME": str(linked_root)},
+                runner=lambda spec: calls.append(spec),
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(calls, [])
+            self.assertEqual(list(real_root.iterdir()), [])
+
     def test_project_add_leaves_partial_clone_marker_after_failure(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp) / "state"
@@ -221,9 +424,11 @@ class AgentCtlProjectTest(unittest.TestCase):
             marker = root / "workspaces/agent-container/KEEP-ME"
 
             def runner(spec):
-                marker.parent.mkdir(parents=True)
-                marker.write_text("partial-clone", encoding="utf-8")
-                raise subprocess.CalledProcessError(9, spec.argv)
+                if "clone" in spec.argv:
+                    marker.parent.mkdir(parents=True)
+                    marker.write_text("partial-clone", encoding="utf-8")
+                    raise subprocess.CalledProcessError(9, spec.argv)
+                return successful_podman_result(spec)
 
             result = main(
                 ["project", "add", "jj1xgo/agent-container", "--handover-root", str(handovers)],
@@ -256,14 +461,14 @@ class AgentCtlProjectTest(unittest.TestCase):
             result = main(
                 ["project", "add", "jj1xgo/agent-container", "--handover-root", str(handovers)],
                 environment={"AGENT_CONTAINER_HOME": str(root)},
-                runner=lambda spec: calls.append(spec) or subprocess.CompletedProcess(spec.argv, 0),
+                runner=lambda spec: calls.append(spec) or successful_podman_result(spec),
                 git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
             )
 
             self.assertEqual(result, 0)
             for name, marker in branches.items():
                 self.assertEqual(marker.read_text(encoding="utf-8"), name)
-            self.assertEqual(calls, [])
+            self.assertEqual(len(calls), 3)
 
 
 class AgentCtlRunDoctorTest(unittest.TestCase):
@@ -360,25 +565,51 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             result = main(
                 ["run", "agent-container"],
                 environment={"AGENT_CONTAINER_HOME": str(root)},
-                runner=lambda spec: calls.append(spec)
-                or subprocess.CompletedProcess(spec.argv, 0),
+                runner=lambda spec: calls.append(spec) or successful_podman_result(spec),
                 git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
                 stdout=output,
             )
 
             self.assertEqual(result, 0)
-            self.assertEqual(len(calls), 1)
-            self.assertIn("codex", calls[0].argv)
-            self.assertIn("AGENT_PROJECT_ID=agent-container", calls[0].argv)
+            self.assertEqual(len(calls), 4)
+            self.assertIn("codex", calls[-1].argv)
+            self.assertIn("AGENT_PROJECT_ID=agent-container", calls[-1].argv)
             self.assertIn(
                 f"src={handover_project},dst=/handovers/agent-container",
-                " ".join(calls[0].argv),
+                " ".join(calls[-1].argv),
             )
             self.assertEqual(
                 output.getvalue(), "Starting Codex for project: agent-container\n"
             )
             self.assertNotIn(str(root / "shared-auth/codex/auth.json"), output.getvalue())
             self.assertEqual(os.getuid(), root.stat().st_uid)
+
+    def test_run_missing_image_preserves_exit_code_without_starting_codex(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            calls = []
+            stdout = StringIO()
+            stderr = StringIO()
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[:3] == ("podman", "image", "exists"):
+                    return subprocess.CompletedProcess(spec.argv, 29)
+                return successful_podman_result(spec)
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 29)
+            self.assertEqual(len(calls), 3)
+            self.assertNotIn("Starting Codex", stdout.getvalue())
+            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
 
     def test_run_rejects_identity_mismatch_before_building_runtime_spec(self) -> None:
         with TemporaryDirectory() as temp:

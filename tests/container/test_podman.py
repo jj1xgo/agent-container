@@ -3,6 +3,7 @@ import os
 import unittest
 
 from agent_container.podman import auth_codex_spec
+from agent_container.podman import codex_login_status_spec
 from agent_container.podman import build_image_spec
 from agent_container.podman import clone_project_spec
 from agent_container.podman import run_codex_spec
@@ -28,6 +29,17 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertIn("src=/state/shared-auth/codex,dst=/home/agent/.codex", joined)
         self.assertIn("codex login --device-auth", joined)
         self.assertNotIn("/workspace", joined)
+
+    def test_login_status_uses_the_same_sanitized_auth_container(self) -> None:
+        layout = StateLayout(Path("/state"), "auth")
+
+        spec = codex_login_status_spec(layout, IMAGE)
+
+        joined = " ".join(spec.argv)
+        self.assertIn("src=/state/shared-auth/codex,dst=/home/agent/.codex", joined)
+        self.assertEqual(spec.argv[-3:], ("codex", "login", "status"))
+        self.assertNotIn("/workspace", joined)
+        self.assertNotIn("token", joined.lower())
 
     def test_clone_uses_read_only_gh_config_without_credential_content(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")

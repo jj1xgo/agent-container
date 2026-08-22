@@ -13,6 +13,7 @@ from agent_container.podman import CommandSpec
 from agent_container.podman import auth_codex_spec
 from agent_container.podman import build_image_spec
 from agent_container.podman import clone_project_spec
+from agent_container.podman import codex_login_status_spec
 from agent_container.podman import podman_image_exists_spec
 from agent_container.podman import podman_rootless_spec
 from agent_container.podman import podman_version_spec
@@ -36,6 +37,21 @@ class CheckResult:
     level: str
     name: str
     detail: str
+
+
+def _validate_image(value: str) -> str:
+    if (
+        not value
+        or value.startswith("-")
+        or any(
+            character.isspace()
+            or ord(character) < 32
+            or ord(character) == 127
+            for character in value
+        )
+    ):
+        raise ValueError("image must be a non-empty name without whitespace or options")
+    return value
 
 
 def parser() -> argparse.ArgumentParser:
@@ -87,6 +103,18 @@ def _prepare_codex_auth(layout: StateLayout, profile_root: Path) -> None:
     else:
         seed_codex_home(profile_root, layout.codex_auth_dir)
         ensure_private_directory(layout.codex_auth_dir)
+    if layout.codex_auth_file.exists() or layout.codex_auth_file.is_symlink():
+        ensure_private_file(layout.codex_auth_file)
+
+
+def _validate_existing_codex_auth(layout: StateLayout) -> None:
+    for directory in (
+        layout.root,
+        layout.root / "shared-auth",
+        layout.codex_auth_dir,
+    ):
+        if directory.exists() or directory.is_symlink():
+            ensure_private_directory(directory)
     if layout.codex_auth_file.exists() or layout.codex_auth_file.is_symlink():
         ensure_private_file(layout.codex_auth_file)
 
@@ -172,14 +200,22 @@ def _add_project(
     project_id = project_value if project_value is not None else repository.name
     layout = StateLayout.from_environment(project_id, environment)
     resolved_handover_root = _resolve_handover_root(handover_root, layout.project_id)
+    _ensure_exact_state_root(layout, environment)
+    workspace_exists = layout.workspace.exists() or layout.workspace.is_symlink()
+    if workspace_exists:
+        validate_workspace(layout.workspace)
+        validate_workspace_origin(
+            layout.workspace, repository, git_remote_reader(layout.workspace)
+        )
+    _podman_preflight(runner, image_required=image)
     _prepare_project_directories(layout)
     ensure_private_file(layout.gh_dir / "hosts.yml")
-    if not (layout.workspace.exists() or layout.workspace.is_symlink()):
+    if not workspace_exists:
         runner(clone_project_spec(layout, repository, image))
-    validate_workspace(layout.workspace)
-    validate_workspace_origin(
-        layout.workspace, repository, git_remote_reader(layout.workspace)
-    )
+        validate_workspace(layout.workspace)
+        validate_workspace_origin(
+            layout.workspace, repository, git_remote_reader(layout.workspace)
+        )
     _seed_project_codex_home(layout, profile_root)
     ProjectRecord(repository, resolved_handover_root).write(layout.project_file)
 
@@ -277,6 +313,39 @@ def _doctor_run(
         )
     except OSError:
         return subprocess.CompletedProcess(spec.argv, 1)
+
+
+def _required_probe_run(
+    runner: Callable[[CommandSpec], subprocess.CompletedProcess],
+    spec: CommandSpec,
+) -> subprocess.CompletedProcess:
+    if runner is run_command:
+        completed = run_command(spec, check=False, capture_output=True)
+    else:
+        completed = runner(spec)
+    if completed.returncode != 0:
+        raise subprocess.CalledProcessError(completed.returncode, spec.argv)
+    return completed
+
+
+def _require_success(
+    completed: subprocess.CompletedProcess,
+    spec: CommandSpec,
+) -> None:
+    if completed.returncode != 0:
+        raise subprocess.CalledProcessError(completed.returncode, spec.argv)
+
+
+def _podman_preflight(
+    runner: Callable[[CommandSpec], subprocess.CompletedProcess],
+    image_required: str | None = None,
+) -> None:
+    _required_probe_run(runner, podman_version_spec())
+    rootless = _required_probe_run(runner, podman_rootless_spec())
+    if (rootless.stdout or "").strip().lower() != "true":
+        raise ValueError("rootless Podman is required")
+    if image_required is not None:
+        _required_probe_run(runner, podman_image_exists_spec(image_required))
 
 
 def _check_failure_detail(error: Exception) -> str:
@@ -438,15 +507,22 @@ def main(
 ) -> int:
     try:
         arguments = parser().parse_args(argv)
+        _validate_image(arguments.image)
         repository_root = Path(__file__).resolve().parents[2]
         if arguments.command == "build":
+            _podman_preflight(runner)
             runner(build_image_spec(repository_root, arguments.image))
             return 0
         if arguments.command == "auth" and arguments.agent == "codex":
             layout = StateLayout.from_environment("auth", environment)
+            _ensure_exact_state_root(layout, environment)
+            _validate_existing_codex_auth(layout)
+            _podman_preflight(runner, image_required=arguments.image)
             _prepare_codex_auth(layout, repository_root / "profiles/codex")
             runner(auth_codex_spec(layout, arguments.image))
             ensure_private_file(layout.codex_auth_file)
+            status_spec = codex_login_status_spec(layout, arguments.image)
+            _require_success(runner(status_spec), status_spec)
             return 0
         if arguments.command == "project" and arguments.project_command == "add":
             _add_project(
@@ -467,6 +543,7 @@ def main(
                 git_remote_reader,
                 identity_reader,
             )
+            _podman_preflight(runner, image_required=arguments.image)
             spec = runtime_spec_builder(
                 layout,
                 handover_project,

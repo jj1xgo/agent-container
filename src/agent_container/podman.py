@@ -61,6 +61,13 @@ def auth_codex_spec(layout: StateLayout, image: str) -> CommandSpec:
     return CommandSpec(tuple(argv), {})
 
 
+def codex_login_status_spec(layout: StateLayout, image: str) -> CommandSpec:
+    argv = _runtime_prefix(os.getuid(), os.getgid())
+    argv += ["--mount", _mount(layout.codex_auth_dir, "/home/agent/.codex")]
+    argv += [image, "codex", "login", "status"]
+    return CommandSpec(tuple(argv), {})
+
+
 def clone_project_spec(
     layout: StateLayout, repository: Repository, image: str
 ) -> CommandSpec:

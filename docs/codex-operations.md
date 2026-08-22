@@ -46,6 +46,6 @@ launcherは対象projectについてだけ`AGENT_PROJECT_ID`と`AGENT_HANDOVER_R
 - strict config: `config.toml`と`hooks.json`を一時`CODEX_HOME`へコピーして`CODEX_HOME=... codex --strict-config --version`を実行し、exit 0で`codex-cli 0.149.0`を返した。strict-config errorはない。temporary directory配下へPATH aliasを作成しないというCodex warningは出たが、real host Codex profileは使用も変更もしていない。
 - handover Skillのfresh-agent評価: SkillなしのREDではagentが`.codex/HANDOVER.md`を推測しproject CLIを省略した。SkillありのGREENではstorage変数不足を拒否し、CLI contractを使用、環境値とfull transcriptを除外し、未確認のGit/testsをskippedとして記録した。
 
-認証済み専用containerでのPhase 1 integration checkは未実施である。authenticated TUIでのhook trust（`/hooks`）、statusline rendering、`/status`のconditional rate-limit field renderingは、このprototypeで確認済みとは主張しない。
+認証済み専用containerでのPhase 1 integration checkは2026-08-22に完了した。rootless Podman、device auth、private clone、authenticated TUIでのhook trust（`/hooks`）、statusline、`/status`、session resume、共有認証の継続、test branchのpushと未merge PR作成までの結果は、承認付きの[Phase 1 smoke test checklist](phase1-smoke-test.md)に記録している。
 
-prototypeのunit testは認証済みTUIの動作を証明しない。rootless Podman、device auth、private clone、TUI、session resume、GitHub mutationを含む実host確認は、承認付きの[Phase 1 smoke test checklist](phase1-smoke-test.md)で記録する。
+prototypeのunit testと実host smoke testは役割が異なる。前者は安全境界とcommand contractの回帰を検出し、後者は認証済みTUIと外部サービスを含むend-to-end動作を確認する。

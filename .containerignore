@@ -1,6 +1,7 @@
-.git
-.worktrees
-.codex
-auth.json
-__pycache__
-*.pyc
+**
+!Containerfile
+!src/
+!src/**
+!profiles/
+!profiles/codex/
+!profiles/codex/**
