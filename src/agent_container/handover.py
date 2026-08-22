@@ -2,15 +2,10 @@ from datetime import datetime
 from pathlib import Path
 import re
 
+from agent_container.state import validate_project_id
 
-PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+
 HANDOVER_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{4}\.md$")
-
-
-def validate_project_id(project_id: str) -> str:
-    if project_id in {".", ".."} or PROJECT_ID.fullmatch(project_id) is None:
-        raise ValueError("project_id must be a single safe repository-style slug")
-    return project_id
 
 
 def _clean_line(value: str, field: str) -> str:
