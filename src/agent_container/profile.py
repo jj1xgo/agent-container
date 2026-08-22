@@ -16,7 +16,7 @@ def seed_codex_home(profile_root: Path, codex_home: Path) -> None:
             target for _, target in sources if target.exists() or target.is_symlink()
         )
         raise FileExistsError(f"managed profile target already exists: {existing}")
-    codex_home.mkdir(parents=True, mode=0o700)
+    codex_home.mkdir(parents=True, exist_ok=True, mode=0o700)
     shutil.copy2(sources[0][0], sources[0][1])
     shutil.copy2(sources[1][0], sources[1][1])
     shutil.copytree(sources[2][0], sources[2][1], symlinks=False)
