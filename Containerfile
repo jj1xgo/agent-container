@@ -7,7 +7,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global "@openai/codex@${CODEX_VERSION}"
 
-RUN useradd --create-home --uid 1000 --shell /bin/bash agent \
+RUN groupmod --new-name agent node \
+    && usermod --login agent --home /home/agent --move-home node \
     && mkdir -p /opt/agent-container /workspace \
     && chown agent:agent /workspace
 

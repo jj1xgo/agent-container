@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import unittest
 
 
@@ -14,6 +15,20 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertIn("WORKDIR /workspace", body)
         self.assertIn("COPY src /opt/agent-container/src", body)
         self.assertIn("COPY profiles/codex /opt/agent-container/profiles/codex", body)
+
+    def test_image_reuses_base_node_identity_for_agent(self) -> None:
+        body = (ROOT / "Containerfile").read_text(encoding="utf-8")
+
+        self.assertNotRegex(body, r"useradd[^\n]*--uid\s+1000")
+        self.assertNotRegex(body, r"groupadd[^\n]*--gid\s+1000")
+        self.assertRegex(body, r"groupmod[^\n]*--new-name\s+agent\s+node")
+        self.assertRegex(
+            body,
+            re.compile(
+                r"usermod[^\n]*--login\s+agent[^\n]*"
+                r"--home\s+/home/agent[^\n]*--move-home[^\n]*\snode"
+            ),
+        )
 
     def test_containerignore_excludes_git_and_local_state(self) -> None:
         patterns = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()
