@@ -105,7 +105,31 @@ def run_codex_spec(
     return CommandSpec(tuple(argv), {})
 
 
-def run_command(spec: CommandSpec, check: bool = True) -> subprocess.CompletedProcess[str]:
+def podman_version_spec() -> CommandSpec:
+    return CommandSpec(("podman", "--version"), {})
+
+
+def podman_rootless_spec() -> CommandSpec:
+    return CommandSpec(
+        ("podman", "info", "--format", "{{.Host.Security.Rootless}}"), {}
+    )
+
+
+def podman_image_exists_spec(image: str) -> CommandSpec:
+    return CommandSpec(("podman", "image", "exists", image), {})
+
+
+def run_command(
+    spec: CommandSpec,
+    check: bool = True,
+    capture_output: bool = False,
+) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.update(spec.environment)
-    return subprocess.run(spec.argv, env=environment, text=True, check=check)
+    return subprocess.run(
+        spec.argv,
+        env=environment,
+        text=True,
+        check=check,
+        capture_output=capture_output,
+    )

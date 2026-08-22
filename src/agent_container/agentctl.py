@@ -1,4 +1,7 @@
 import argparse
+from dataclasses import dataclass
+import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -10,6 +13,10 @@ from agent_container.podman import CommandSpec
 from agent_container.podman import auth_codex_spec
 from agent_container.podman import build_image_spec
 from agent_container.podman import clone_project_spec
+from agent_container.podman import podman_image_exists_spec
+from agent_container.podman import podman_rootless_spec
+from agent_container.podman import podman_version_spec
+from agent_container.podman import run_codex_spec
 from agent_container.podman import run_command
 from agent_container.profile import seed_codex_home
 from agent_container.state import ProjectRecord
@@ -22,6 +29,13 @@ from agent_container.state import validate_workspace_origin
 
 
 DEFAULT_IMAGE = "localhost/agent-container:dev"
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    level: str
+    name: str
+    detail: str
 
 
 def parser() -> argparse.ArgumentParser:
@@ -84,12 +98,46 @@ def _resolve_handover_root(handover_root: Path, project_id: str) -> Path:
         raise ValueError(f"handover root must not be a symlink: {handover_root}")
     if not handover_root.is_dir():
         raise FileNotFoundError(handover_root)
+    resolved_root = handover_root.resolve(strict=True)
+    if resolved_root != handover_root:
+        raise ValueError(
+            f"handover root must not contain symlinks or traversal: {handover_root}"
+        )
     handover_project = handover_root / project_id
     if handover_project.is_symlink():
         raise ValueError(f"handover project must not be a symlink: {handover_project}")
     if not handover_project.is_dir():
         raise FileNotFoundError(handover_project)
-    return handover_root.resolve()
+    resolved_project = handover_project.resolve(strict=True)
+    if resolved_project.parent != resolved_root:
+        raise ValueError("handover project must stay within its configured root")
+    return resolved_root
+
+
+def _configured_state_root(
+    environment: Mapping[str, str] | None,
+) -> Path:
+    env = os.environ if environment is None else environment
+    if env.get("AGENT_CONTAINER_HOME"):
+        root = Path(env["AGENT_CONTAINER_HOME"])
+    elif env.get("XDG_DATA_HOME"):
+        root = Path(env["XDG_DATA_HOME"]) / "agent-container"
+    else:
+        root = Path.home() / ".local/share/agent-container"
+    if not root.is_absolute():
+        raise ValueError("agent container state root must be absolute")
+    return root
+
+
+def _ensure_exact_state_root(
+    layout: StateLayout,
+    environment: Mapping[str, str] | None,
+) -> None:
+    configured_root = _configured_state_root(environment)
+    if configured_root.is_symlink() or configured_root != layout.root:
+        raise ValueError(
+            "agent container state root must not contain symlinks or traversal"
+        )
 
 
 def _prepare_project_directories(layout: StateLayout) -> None:
@@ -136,6 +184,208 @@ def _add_project(
     ProjectRecord(repository, resolved_handover_root).write(layout.project_file)
 
 
+def _runtime_preflight(
+    project_id: str,
+    environment: Mapping[str, str] | None,
+    git_remote_reader: Callable[[Path], str],
+) -> tuple[StateLayout, Path]:
+    layout = StateLayout.from_environment(project_id, environment)
+    _ensure_exact_state_root(layout, environment)
+    for directory in _private_state_directories(layout):
+        ensure_private_directory(directory)
+    ensure_private_file(layout.codex_auth_file)
+    ensure_private_file(layout.gh_dir / "hosts.yml")
+    record = _read_runtime_project(layout.project_file)
+    validate_workspace(layout.workspace)
+    validate_workspace_origin(
+        layout.workspace,
+        record.repository,
+        git_remote_reader(layout.workspace),
+    )
+    handover_root = _resolve_handover_root(record.handover_root, layout.project_id)
+    handover_project = handover_root / layout.project_id
+    return layout, handover_project
+
+
+def _private_state_directories(layout: StateLayout) -> tuple[Path, ...]:
+    return (
+        layout.root,
+        layout.root / "shared-auth",
+        layout.codex_auth_dir,
+        layout.gh_dir,
+        layout.project_dir.parent,
+        layout.project_dir,
+        layout.codex_home,
+        layout.cache,
+        layout.workspace.parent,
+    )
+
+
+def _read_runtime_project(path: Path) -> ProjectRecord:
+    ensure_private_file(path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"repository", "handover_root"}
+        or not isinstance(payload["repository"], str)
+        or not isinstance(payload["handover_root"], str)
+    ):
+        raise ValueError("project metadata has invalid fields")
+    record = ProjectRecord.read(path)
+    configured_handover_root = Path(payload["handover_root"])
+    if configured_handover_root != record.handover_root:
+        raise ValueError(
+            "handover root in project metadata must not contain symlinks or traversal"
+        )
+    return record
+
+
+def _doctor_run(
+    runner: Callable[[CommandSpec], subprocess.CompletedProcess],
+    spec: CommandSpec,
+) -> subprocess.CompletedProcess:
+    try:
+        if runner is run_command:
+            return run_command(spec, check=False, capture_output=True)
+        return runner(spec)
+    except subprocess.CalledProcessError as error:
+        return subprocess.CompletedProcess(
+            spec.argv,
+            error.returncode,
+            stdout=error.stdout,
+            stderr=error.stderr,
+        )
+    except OSError:
+        return subprocess.CompletedProcess(spec.argv, 1)
+
+
+def _doctor(
+    project_id: str,
+    image: str,
+    environment: Mapping[str, str] | None,
+    runner: Callable[[CommandSpec], subprocess.CompletedProcess],
+    git_remote_reader: Callable[[Path], str],
+) -> list[CheckResult]:
+    layout = StateLayout.from_environment(project_id, environment)
+    checks: list[CheckResult] = []
+
+    version = _doctor_run(runner, podman_version_spec())
+    checks.append(
+        CheckResult(
+            "PASS" if version.returncode == 0 else "FAIL",
+            "podman-version",
+            "available" if version.returncode == 0 else "unavailable",
+        )
+    )
+
+    rootless = _doctor_run(runner, podman_rootless_spec())
+    rootless_value = (rootless.stdout or "").strip().lower()
+    rootless_ok = rootless.returncode == 0 and rootless_value == "true"
+    checks.append(
+        CheckResult(
+            "PASS" if rootless_ok else "FAIL",
+            "podman-rootless",
+            "true" if rootless_ok else "rootless mode is required",
+        )
+    )
+
+    image_check = _doctor_run(runner, podman_image_exists_spec(image))
+    checks.append(
+        CheckResult(
+            "PASS" if image_check.returncode == 0 else "FAIL",
+            "image",
+            f"present: {image}" if image_check.returncode == 0 else f"missing: {image}",
+        )
+    )
+
+    try:
+        _ensure_exact_state_root(layout, environment)
+        for directory in _private_state_directories(layout):
+            ensure_private_directory(directory)
+        checks.append(
+            CheckResult(
+                "PASS", "private-state", "required directories mode 0700"
+            )
+        )
+    except (ValueError, PermissionError, FileNotFoundError) as error:
+        checks.append(CheckResult("FAIL", "private-state", str(error)))
+
+    for name, path in (
+        ("codex-auth", layout.codex_auth_file),
+        ("gh-hosts", layout.gh_dir / "hosts.yml"),
+    ):
+        try:
+            ensure_private_file(path)
+            checks.append(CheckResult("PASS", name, "present, mode 0600"))
+        except (ValueError, PermissionError, FileNotFoundError) as error:
+            checks.append(CheckResult("FAIL", name, str(error)))
+
+    record: ProjectRecord | None = None
+    try:
+        record = _read_runtime_project(layout.project_file)
+        checks.append(
+            CheckResult(
+                "PASS",
+                "project-metadata",
+                f"repository {record.repository.slug}",
+            )
+        )
+    except (ValueError, PermissionError, FileNotFoundError) as error:
+        checks.append(CheckResult("FAIL", "project-metadata", str(error)))
+
+    if record is None:
+        checks.append(
+            CheckResult("FAIL", "workspace-origin", "project metadata unavailable")
+        )
+    else:
+        try:
+            validate_workspace(layout.workspace)
+            validate_workspace_origin(
+                layout.workspace,
+                record.repository,
+                git_remote_reader(layout.workspace),
+            )
+            checks.append(
+                CheckResult("PASS", "workspace-origin", "exact HTTPS origin")
+            )
+        except (
+            ValueError,
+            PermissionError,
+            FileNotFoundError,
+            subprocess.CalledProcessError,
+            OSError,
+        ) as error:
+            checks.append(CheckResult("FAIL", "workspace-origin", str(error)))
+
+    if record is None:
+        checks.append(
+            CheckResult("FAIL", "handover-project", "project metadata unavailable")
+        )
+    else:
+        try:
+            handover_root = _resolve_handover_root(
+                record.handover_root, layout.project_id
+            )
+            checks.append(
+                CheckResult(
+                    "PASS",
+                    "handover-project",
+                    "real directory within configured root",
+                )
+            )
+        except (ValueError, PermissionError, FileNotFoundError) as error:
+            checks.append(CheckResult("FAIL", "handover-project", str(error)))
+
+    checks.append(
+        CheckResult(
+            "WARN",
+            "network-policy",
+            "outbound network is not domain-restricted in Phase 1",
+        )
+    )
+    return checks
+
+
 def main(
     argv: list[str] | None = None,
     environment: Mapping[str, str] | None = None,
@@ -144,7 +394,6 @@ def main(
     stdout: TextIO = sys.stdout,
     stderr: TextIO = sys.stderr,
 ) -> int:
-    del stdout
     try:
         arguments = parser().parse_args(argv)
         repository_root = Path(__file__).resolve().parents[2]
@@ -169,6 +418,39 @@ def main(
                 repository_root / "profiles/codex",
             )
             return 0
+        if arguments.command == "run":
+            layout, handover_project = _runtime_preflight(
+                arguments.project,
+                environment,
+                git_remote_reader,
+            )
+            spec = run_codex_spec(
+                layout,
+                handover_project,
+                arguments.image,
+                os.getuid(),
+                os.getgid(),
+            )
+            print(
+                f"Starting Codex for project: {layout.project_id}",
+                file=stdout,
+            )
+            runner(spec)
+            return 0
+        if arguments.command == "doctor":
+            checks = _doctor(
+                arguments.project,
+                arguments.image,
+                environment,
+                runner,
+                git_remote_reader,
+            )
+            for check in checks:
+                print(
+                    f"{check.level}  {check.name}: {check.detail}",
+                    file=stdout,
+                )
+            return 1 if any(check.level == "FAIL" for check in checks) else 0
         return 1
     except subprocess.CalledProcessError as error:
         print(f"error: command failed with exit code {error.returncode}", file=stderr)

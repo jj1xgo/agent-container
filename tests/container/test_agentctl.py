@@ -1,4 +1,6 @@
 from io import StringIO
+import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import subprocess
@@ -6,6 +8,7 @@ import unittest
 
 from agent_container.agentctl import main
 from agent_container.state import ProjectRecord
+from agent_container.state import Repository
 
 
 class AgentCtlBuildAuthTest(unittest.TestCase):
@@ -259,6 +262,342 @@ class AgentCtlProjectTest(unittest.TestCase):
             for name, marker in branches.items():
                 self.assertEqual(marker.read_text(encoding="utf-8"), name)
             self.assertEqual(calls, [])
+
+
+class AgentCtlRunDoctorTest(unittest.TestCase):
+    def _runtime_state(self, temp: str) -> tuple[Path, Path]:
+        root = Path(temp) / "state"
+        handover_root = Path(temp) / "handovers"
+        private_directories = (
+            root,
+            root / "shared-auth",
+            root / "shared-auth/codex",
+            root / "gh",
+            root / "projects",
+            root / "projects/agent-container",
+            root / "projects/agent-container/codex-home",
+            root / "projects/agent-container/cache",
+            root / "workspaces",
+        )
+        for directory in private_directories:
+            directory.mkdir(mode=0o700)
+
+        workspace = root / "workspaces/agent-container"
+        (workspace / ".git").mkdir(parents=True)
+        handover_project = handover_root / "agent-container"
+        handover_project.mkdir(parents=True)
+
+        auth_file = root / "shared-auth/codex/auth.json"
+        auth_file.write_text("DO-NOT-PRINT-CREDENTIAL-BODY", encoding="utf-8")
+        auth_file.chmod(0o600)
+        hosts_file = root / "gh/hosts.yml"
+        hosts_file.write_text("github.com:\n", encoding="utf-8")
+        hosts_file.chmod(0o600)
+        ProjectRecord(
+            Repository.parse("jj1xgo/agent-container"), handover_root.resolve()
+        ).write(root / "projects/agent-container/project.json")
+        return root, handover_project
+
+    def _assert_run_refused(
+        self,
+        root: Path,
+        *,
+        environment_root: Path | None = None,
+        remote_url: str = "https://github.com/jj1xgo/agent-container.git",
+    ) -> None:
+        calls = []
+        stdout = StringIO()
+        stderr = StringIO()
+
+        result = main(
+            ["run", "agent-container"],
+            environment={
+                "AGENT_CONTAINER_HOME": str(
+                    root if environment_root is None else environment_root
+                )
+            },
+            runner=lambda spec: calls.append(spec)
+            or subprocess.CompletedProcess(spec.argv, 0),
+            git_remote_reader=lambda path: remote_url,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(calls, [])
+        rendered = stdout.getvalue() + stderr.getvalue()
+        self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", rendered)
+
+    def test_run_validates_then_starts_codex(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, handover_project = self._runtime_state(temp)
+            calls = []
+            output = StringIO()
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec)
+                or subprocess.CompletedProcess(spec.argv, 0),
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=output,
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(len(calls), 1)
+            self.assertIn("codex", calls[0].argv)
+            self.assertIn("AGENT_PROJECT_ID=agent-container", calls[0].argv)
+            self.assertIn(
+                f"src={handover_project},dst=/handovers/agent-container",
+                " ".join(calls[0].argv),
+            )
+            self.assertEqual(
+                output.getvalue(), "Starting Codex for project: agent-container\n"
+            )
+            self.assertNotIn(str(root / "shared-auth/codex/auth.json"), output.getvalue())
+            self.assertEqual(os.getuid(), root.stat().st_uid)
+
+    def test_doctor_reports_presence_without_secret_values(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            calls = []
+            output = StringIO()
+
+            def doctor_runner(spec):
+                calls.append(spec)
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
+
+            result = main(
+                ["doctor", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=doctor_runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=output,
+            )
+
+            self.assertEqual(result, 0)
+            rendered = output.getvalue()
+            self.assertIn("PASS  podman-rootless: true", rendered)
+            self.assertIn("PASS  codex-auth: present, mode 0600", rendered)
+            self.assertIn("PASS  gh-hosts: present, mode 0600", rendered)
+            self.assertIn("PASS  workspace-origin: exact HTTPS origin", rendered)
+            self.assertIn(
+                "WARN  network-policy: outbound network is not domain-restricted in Phase 1",
+                rendered,
+            )
+            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", rendered)
+            self.assertEqual(
+                [call.argv for call in calls],
+                [
+                    ("podman", "--version"),
+                    ("podman", "info", "--format", "{{.Host.Security.Rootless}}"),
+                    ("podman", "image", "exists", "localhost/agent-container:dev"),
+                ],
+            )
+            self.assertEqual(
+                [line.split()[1].removesuffix(":") for line in rendered.splitlines()],
+                [
+                    "podman-version",
+                    "podman-rootless",
+                    "image",
+                    "private-state",
+                    "codex-auth",
+                    "gh-hosts",
+                    "project-metadata",
+                    "workspace-origin",
+                    "handover-project",
+                    "network-policy",
+                ],
+            )
+
+    def test_doctor_failure_is_nonzero_and_does_not_print_secret_values(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            (root / "shared-auth/codex/auth.json").chmod(0o644)
+            output = StringIO()
+
+            def doctor_runner(spec):
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+                return subprocess.CompletedProcess(spec.argv, 0)
+
+            result = main(
+                ["doctor", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=doctor_runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=output,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertIn("FAIL  codex-auth:", output.getvalue())
+            self.assertIn("WARN  network-policy:", output.getvalue())
+            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", output.getvalue())
+
+    def test_run_rejects_symlinked_configured_state_root_before_runner(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            linked_root = Path(temp) / "linked-state"
+            linked_root.symlink_to(root, target_is_directory=True)
+
+            self._assert_run_refused(root, environment_root=linked_root)
+
+    def test_run_rejects_symlinked_state_root_ancestor_before_runner(self) -> None:
+        with TemporaryDirectory() as temp:
+            real_parent = Path(temp) / "real-parent"
+            real_parent.mkdir()
+            root, _ = self._runtime_state(str(real_parent))
+            linked_parent = Path(temp) / "linked-parent"
+            linked_parent.symlink_to(real_parent, target_is_directory=True)
+
+            self._assert_run_refused(
+                root,
+                environment_root=linked_parent / "state",
+            )
+
+    def test_run_rejects_symlinked_metadata_handover_root_before_runner(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            real_root = Path(temp) / "real-handovers"
+            (real_root / "agent-container").mkdir(parents=True)
+            linked_root = Path(temp) / "linked-handovers"
+            linked_root.symlink_to(real_root, target_is_directory=True)
+            project_file = root / "projects/agent-container/project.json"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "repository": "jj1xgo/agent-container",
+                        "handover_root": str(linked_root),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            project_file.chmod(0o600)
+
+            self._assert_run_refused(root)
+
+    def test_run_rejects_symlinked_auth_file_before_runner(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            auth_file = root / "shared-auth/codex/auth.json"
+            auth_target = Path(temp) / "outside-auth.json"
+            auth_target.write_text("DO-NOT-PRINT-CREDENTIAL-BODY", encoding="utf-8")
+            auth_target.chmod(0o600)
+            auth_file.unlink()
+            auth_file.symlink_to(auth_target)
+
+            self._assert_run_refused(root)
+
+    def test_run_rejects_symlinked_gh_directory_before_runner(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            gh_dir = root / "gh"
+            (gh_dir / "hosts.yml").unlink()
+            gh_dir.rmdir()
+            gh_target = Path(temp) / "outside-gh"
+            gh_target.mkdir(mode=0o700)
+            hosts = gh_target / "hosts.yml"
+            hosts.write_text("github.com:\n", encoding="utf-8")
+            hosts.chmod(0o600)
+            gh_dir.symlink_to(gh_target, target_is_directory=True)
+
+            self._assert_run_refused(root)
+
+    def test_run_rejects_symlinked_workspace_before_runner(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            workspace = root / "workspaces/agent-container"
+            (workspace / ".git").rmdir()
+            workspace.rmdir()
+            workspace_target = Path(temp) / "outside-workspace"
+            (workspace_target / ".git").mkdir(parents=True)
+            workspace.symlink_to(workspace_target, target_is_directory=True)
+
+            self._assert_run_refused(root)
+
+    def test_run_rejects_symlinked_git_directory_before_runner(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            git_directory = root / "workspaces/agent-container/.git"
+            git_directory.rmdir()
+            git_target = Path(temp) / "outside-git"
+            git_target.mkdir()
+            git_directory.symlink_to(git_target, target_is_directory=True)
+
+            self._assert_run_refused(root)
+
+    def test_run_rejects_symlinked_project_metadata_before_runner(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            project_file = root / "projects/agent-container/project.json"
+            metadata = project_file.read_text(encoding="utf-8")
+            project_file.unlink()
+            metadata_target = Path(temp) / "outside-project.json"
+            metadata_target.write_text(metadata, encoding="utf-8")
+            metadata_target.chmod(0o600)
+            project_file.symlink_to(metadata_target)
+
+            self._assert_run_refused(root)
+
+    def test_run_rejects_malformed_project_metadata_before_runner(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            project_file = root / "projects/agent-container/project.json"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "repository": ["jj1xgo", "agent-container"],
+                        "handover_root": {"path": "/tmp/handovers"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            project_file.chmod(0o600)
+
+            self._assert_run_refused(root)
+
+    def test_run_rejects_symlinked_handover_project_before_runner(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, handover_project = self._runtime_state(temp)
+            handover_project.rmdir()
+            handover_target = Path(temp) / "outside-handover"
+            handover_target.mkdir()
+            handover_project.symlink_to(handover_target, target_is_directory=True)
+
+            self._assert_run_refused(root)
+
+    def test_run_rejects_broad_private_modes_before_runner(self) -> None:
+        private_paths = (
+            ("state-root", "state", 0o755),
+            ("shared-auth-parent", "state/shared-auth", 0o755),
+            ("codex-auth-directory", "state/shared-auth/codex", 0o755),
+            ("gh-directory", "state/gh", 0o755),
+            ("projects-parent", "state/projects", 0o755),
+            ("project-directory", "state/projects/agent-container", 0o755),
+            ("codex-home", "state/projects/agent-container/codex-home", 0o755),
+            ("cache", "state/projects/agent-container/cache", 0o755),
+            ("workspaces-parent", "state/workspaces", 0o755),
+            ("codex-auth", "state/shared-auth/codex/auth.json", 0o644),
+            ("gh-hosts", "state/gh/hosts.yml", 0o644),
+            ("project-metadata", "state/projects/agent-container/project.json", 0o644),
+        )
+        for name, relative_path, mode in private_paths:
+            with self.subTest(boundary=name), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                (Path(temp) / relative_path).chmod(mode)
+
+                self._assert_run_refused(root)
+
+    def test_run_rejects_mismatched_workspace_origin_before_runner(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+
+            self._assert_run_refused(
+                root,
+                remote_url="https://github.com/example/other.git",
+            )
 
 
 if __name__ == "__main__":

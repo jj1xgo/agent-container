@@ -57,6 +57,26 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertNotIn("/vault,dst=", joined)
         self.assertNotIn("token", joined.lower())
 
+    def test_run_rejects_uid_or_gid_other_than_current_process(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        handover_project = Path("/vault/handovers/agent-container")
+        with self.assertRaisesRegex(ValueError, "current user"):
+            run_codex_spec(
+                layout,
+                handover_project,
+                IMAGE,
+                os.getuid() + 1,
+                os.getgid(),
+            )
+        with self.assertRaisesRegex(ValueError, "current user"):
+            run_codex_spec(
+                layout,
+                handover_project,
+                IMAGE,
+                os.getuid(),
+                os.getgid() + 1,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
