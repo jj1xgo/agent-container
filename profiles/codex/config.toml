@@ -1,0 +1,13 @@
+cli_auth_credentials_store = "file"
+forced_login_method = "chatgpt"
+
+[tui]
+status_line = [
+  "model-with-reasoning",
+  "context-remaining",
+  "five-hour-limit",
+  "weekly-limit",
+  "used-tokens",
+  "git-branch",
+  "project-name",
+]
