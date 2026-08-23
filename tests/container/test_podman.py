@@ -10,6 +10,7 @@ from agent_container.podman import build_image_spec
 from agent_container.podman import cli_version_spec
 from agent_container.podman import clone_project_spec
 from agent_container.podman import run_codex_spec
+from agent_container.podman import run_claude_spec
 from agent_container.state import Repository
 from agent_container.state import StateLayout
 
@@ -140,6 +141,59 @@ class PodmanCommandTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "current user"):
             run_codex_spec(
+                layout,
+                handover_project,
+                IMAGE,
+                os.getuid(),
+                os.getgid() + 1,
+            )
+
+    def test_claude_run_has_hardened_flags_and_isolated_mounts(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+
+        spec = run_claude_spec(
+            layout=layout,
+            handover_project=Path("/vault/handovers/agent-container"),
+            image=IMAGE,
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
+
+        joined = " ".join(spec.argv)
+        for required in ("--rm", "--read-only", "--cap-drop=all", "no-new-privileges"):
+            self.assertIn(required, spec.argv if required != "no-new-privileges" else joined)
+        for source, target in (
+            ("/state/workspaces/agent-container", "/workspace"),
+            ("/state/projects/agent-container/claude-config", "/home/agent/.claude"),
+            (
+                "/state/shared-auth/claude/.credentials.json",
+                "/home/agent/.claude/.credentials.json",
+            ),
+            ("/state/projects/agent-container/cache", "/home/agent/.cache"),
+            ("/state/gh", "/home/agent/.config/gh"),
+            ("/vault/handovers/agent-container", "/handovers/agent-container"),
+        ):
+            self.assertIn(f"src={source},dst={target}", joined)
+        self.assertIn("src=/state/gh,dst=/home/agent/.config/gh,ro=true", joined)
+        self.assertIn("CLAUDE_CONFIG_DIR=/home/agent/.claude", joined)
+        self.assertIn("AGENT_PROJECT_ID=agent-container", joined)
+        self.assertIn("AGENT_HANDOVER_ROOT=/handovers", joined)
+        self.assertEqual(spec.argv[-1], "claude")
+        self.assertNotIn("dangerously-skip-permissions", joined)
+
+    def test_claude_run_rejects_uid_or_gid_other_than_current_process(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        handover_project = Path("/vault/handovers/agent-container")
+        with self.assertRaisesRegex(ValueError, "current user"):
+            run_claude_spec(
+                layout,
+                handover_project,
+                IMAGE,
+                os.getuid() + 1,
+                os.getgid(),
+            )
+        with self.assertRaisesRegex(ValueError, "current user"):
+            run_claude_spec(
                 layout,
                 handover_project,
                 IMAGE,

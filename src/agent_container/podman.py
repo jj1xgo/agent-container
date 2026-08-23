@@ -170,6 +170,37 @@ def run_codex_spec(
     return CommandSpec(tuple(argv), {})
 
 
+def run_claude_spec(
+    layout: StateLayout,
+    handover_project: Path,
+    image: str,
+    uid: int,
+    gid: int,
+) -> CommandSpec:
+    if uid != os.getuid() or gid != os.getgid():
+        raise ValueError("runtime uid and gid must match the current user")
+    argv = _runtime_prefix(uid, gid)
+    argv += _git_environment_args()
+    mounts = (
+        (layout.workspace, "/workspace", False),
+        (layout.claude_config, "/home/agent/.claude", False),
+        (
+            layout.claude_auth_file,
+            "/home/agent/.claude/.credentials.json",
+            False,
+        ),
+        (layout.cache, "/home/agent/.cache", False),
+        (layout.gh_dir, "/home/agent/.config/gh", True),
+        (handover_project, f"/handovers/{layout.project_id}", False),
+    )
+    for source, target, read_only in mounts:
+        argv += ["--mount", _mount(source, target, read_only)]
+    argv += ["--env", "CLAUDE_CONFIG_DIR=/home/agent/.claude"]
+    argv += ["--env", "AGENT_HANDOVER_ROOT=/handovers"]
+    argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image, "claude"]
+    return CommandSpec(tuple(argv), {})
+
+
 def podman_version_spec() -> CommandSpec:
     return CommandSpec(("podman", "--version"), {})
 

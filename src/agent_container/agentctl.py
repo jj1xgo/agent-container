@@ -22,6 +22,7 @@ from agent_container.podman import podman_image_exists_spec
 from agent_container.podman import podman_rootless_spec
 from agent_container.podman import podman_version_spec
 from agent_container.podman import run_codex_spec
+from agent_container.podman import run_claude_spec
 from agent_container.podman import run_command
 from agent_container.profile import seed_codex_home
 from agent_container.state import ProjectRecord
@@ -37,6 +38,7 @@ from agent_container.state import validate_version
 
 
 DEFAULT_IMAGE = "localhost/agent-container:dev"
+RuntimeSpecBuilder = Callable[[StateLayout, Path, str, int, int], CommandSpec]
 
 
 def read_cachebuster() -> str:
@@ -220,6 +222,10 @@ def _prepare_project_directories(layout: StateLayout) -> None:
     ensure_private_directory(layout.workspace.parent, create=True)
 
 
+def _prepare_claude_project_state(layout: StateLayout) -> None:
+    ensure_private_directory(layout.claude_config, create=True)
+
+
 def _seed_project_codex_home(layout: StateLayout, profile_root: Path) -> None:
     if layout.codex_home.exists() or layout.codex_home.is_symlink():
         ensure_private_directory(layout.codex_home)
@@ -265,15 +271,16 @@ def _add_project(
 
 def _runtime_preflight(
     project_id: str,
+    agent: str,
     environment: Mapping[str, str] | None,
     git_remote_reader: Callable[[Path], str],
     identity_reader: Callable[[], tuple[int, int]],
 ) -> tuple[StateLayout, Path, int, int]:
     layout = StateLayout.from_environment(project_id, environment)
     _ensure_exact_state_root(layout, environment)
-    for directory in _private_state_directories(layout):
+    for directory in _common_runtime_state_directories(layout):
         ensure_private_directory(directory)
-    ensure_private_file(layout.codex_auth_file)
+    _validate_runtime_agent_state(layout, agent)
     ensure_private_file(layout.gh_dir / "hosts.yml")
     record = _read_runtime_project(layout.project_file)
     validate_workspace(layout.workspace)
@@ -306,17 +313,46 @@ def _validated_process_identity(
     return identity
 
 
-def _private_state_directories(layout: StateLayout) -> tuple[Path, ...]:
+def _common_runtime_state_directories(layout: StateLayout) -> tuple[Path, ...]:
     return (
         layout.root,
         layout.root / "shared-auth",
-        layout.codex_auth_dir,
         layout.gh_dir,
         layout.project_dir.parent,
         layout.project_dir,
-        layout.codex_home,
         layout.cache,
         layout.workspace.parent,
+    )
+
+
+def _runtime_agent_directories(layout: StateLayout, agent: str) -> tuple[Path, ...]:
+    if agent == "codex":
+        return (layout.codex_auth_dir, layout.codex_home)
+    if agent == "claude":
+        directories = [layout.claude_auth_dir]
+        if layout.claude_config.exists() or layout.claude_config.is_symlink():
+            directories.append(layout.claude_config)
+        return tuple(directories)
+    raise ValueError("agent must be codex or claude")
+
+
+def _runtime_agent_auth_file(layout: StateLayout, agent: str) -> Path:
+    if agent == "codex":
+        return layout.codex_auth_file
+    if agent == "claude":
+        return layout.claude_auth_file
+    raise ValueError("agent must be codex or claude")
+
+
+def _validate_runtime_agent_state(layout: StateLayout, agent: str) -> None:
+    for directory in _runtime_agent_directories(layout, agent):
+        ensure_private_directory(directory)
+    ensure_private_file(_runtime_agent_auth_file(layout, agent))
+
+
+def _private_state_directories(layout: StateLayout) -> tuple[Path, ...]:
+    return _common_runtime_state_directories(layout) + _runtime_agent_directories(
+        layout, "codex"
     )
 
 
@@ -544,9 +580,8 @@ def main(
     stdout: TextIO = sys.stdout,
     stderr: TextIO = sys.stderr,
     identity_reader: Callable[[], tuple[int, int]] = read_process_identity,
-    runtime_spec_builder: Callable[
-        [StateLayout, Path, str, int, int], CommandSpec
-    ] = run_codex_spec,
+    runtime_spec_builder: RuntimeSpecBuilder | None = None,
+    runtime_spec_builders: Mapping[str, RuntimeSpecBuilder] | None = None,
     cachebuster_reader: Callable[[], str] = read_cachebuster,
 ) -> int:
     try:
@@ -622,12 +657,22 @@ def main(
         if arguments.command == "run":
             layout, handover_project, uid, gid = _runtime_preflight(
                 arguments.project,
+                arguments.agent,
                 environment,
                 git_remote_reader,
                 identity_reader,
             )
             _podman_preflight(runner, image_required=arguments.image)
-            spec = runtime_spec_builder(
+            if arguments.agent == "claude":
+                _prepare_claude_project_state(layout)
+            builders = (
+                {"codex": run_codex_spec, "claude": run_claude_spec}
+                if runtime_spec_builders is None
+                else runtime_spec_builders
+            )
+            if runtime_spec_builder is not None:
+                builders = {**builders, "codex": runtime_spec_builder}
+            spec = builders[arguments.agent](
                 layout,
                 handover_project,
                 arguments.image,
@@ -635,7 +680,7 @@ def main(
                 gid,
             )
             print(
-                f"Starting Codex for project: {layout.project_id}",
+                f"Starting {arguments.agent.title()} for project: {layout.project_id}",
                 file=stdout,
             )
             runner(spec)

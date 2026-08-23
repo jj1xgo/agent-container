@@ -10,6 +10,7 @@ from unittest.mock import patch
 from agent_container.agentctl import main
 from agent_container.agentctl import parser
 from agent_container.podman import run_codex_spec
+from agent_container.podman import run_claude_spec
 from agent_container.state import ProjectRecord
 from agent_container.state import Repository
 
@@ -480,6 +481,7 @@ class AgentCtlProjectTest(unittest.TestCase):
             record = ProjectRecord.read(root / "projects/agent-container/project.json")
             self.assertEqual(record.repository.slug, "jj1xgo/agent-container")
             self.assertTrue((root / "projects/agent-container/codex-home/config.toml").is_file())
+            self.assertFalse((root / "projects/agent-container/claude-config").exists())
             self.assertEqual(len(calls), 4)
             for forbidden in ("checkout", "reset", "clean", "fetch"):
                 self.assertNotIn(forbidden, calls[-1].argv)
@@ -719,6 +721,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             root,
             root / "shared-auth",
             root / "shared-auth/codex",
+            root / "shared-auth/claude",
             root / "gh",
             root / "projects",
             root / "projects/agent-container",
@@ -737,6 +740,11 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         auth_file = root / "shared-auth/codex/auth.json"
         auth_file.write_text("DO-NOT-PRINT-CREDENTIAL-BODY", encoding="utf-8")
         auth_file.chmod(0o600)
+        claude_auth_file = root / "shared-auth/claude/.credentials.json"
+        claude_auth_file.write_text(
+            "DO-NOT-PRINT-CLAUDE-CREDENTIAL", encoding="utf-8"
+        )
+        claude_auth_file.chmod(0o600)
         hosts_file = root / "gh/hosts.yml"
         hosts_file.write_text("github.com:\n", encoding="utf-8")
         hosts_file.chmod(0o600)
@@ -837,6 +845,132 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(len(calls), 3)
             self.assertNotIn("Starting Codex", stdout.getvalue())
             self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
+
+    def test_run_claude_creates_project_config_after_image_preflight(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, handover_project = self._runtime_state(temp)
+            calls = []
+            builder_calls = []
+            output = StringIO()
+            config = root / "projects/agent-container/claude-config"
+
+            def runtime_spec_builder(*args):
+                builder_calls.append(args)
+                self.assertEqual(len(calls), 3)
+                self.assertEqual(calls[-1].argv[:3], ("podman", "image", "exists"))
+                self.assertTrue(config.is_dir())
+                self.assertEqual(config.stat().st_mode & 0o777, 0o700)
+                return run_claude_spec(*args)
+
+            result = main(
+                ["run", "agent-container", "--agent", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec) or successful_podman_result(spec),
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                runtime_spec_builders={"claude": runtime_spec_builder},
+                stdout=output,
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(len(builder_calls), 1)
+            self.assertEqual(len(calls), 4)
+            self.assertEqual(calls[-1].argv[-1], "claude")
+            self.assertIn(
+                f"src={handover_project},dst=/handovers/agent-container",
+                " ".join(calls[-1].argv),
+            )
+            self.assertEqual(
+                output.getvalue(), "Starting Claude for project: agent-container\n"
+            )
+
+    def test_run_claude_missing_image_does_not_create_config(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            calls = []
+            config = root / "projects/agent-container/claude-config"
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[:3] == ("podman", "image", "exists"):
+                    return subprocess.CompletedProcess(spec.argv, 29)
+                return successful_podman_result(spec)
+
+            result = main(
+                ["run", "agent-container", "--agent", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 29)
+            self.assertEqual(len(calls), 3)
+            self.assertFalse(config.exists())
+
+    def test_run_claude_rejects_broad_auth_or_config_without_secret_output(self) -> None:
+        cases = (
+            ("auth", "shared-auth/claude/.credentials.json", 0o644),
+            ("config", "projects/agent-container/claude-config", 0o755),
+        )
+        for name, relative_path, mode in cases:
+            with self.subTest(boundary=name), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                path = root / relative_path
+                if name == "config":
+                    path.mkdir(mode=0o700)
+                path.chmod(mode)
+                calls = []
+                stderr = StringIO()
+
+                result = main(
+                    ["run", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stderr=stderr,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertIn("mode", stderr.getvalue())
+                self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", stderr.getvalue())
+
+    def test_run_claude_rejects_symlinked_auth_or_config_without_secret_output(self) -> None:
+        cases = (
+            ("auth", "shared-auth/claude/.credentials.json", "auth-target"),
+            ("config", "projects/agent-container/claude-config", "config-target"),
+        )
+        for name, relative_path, target_name in cases:
+            with self.subTest(boundary=name), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                path = root / relative_path
+                target = Path(temp) / target_name
+                if name == "auth":
+                    path.unlink()
+                    target.write_text(
+                        "DO-NOT-PRINT-CLAUDE-CREDENTIAL", encoding="utf-8"
+                    )
+                    target.chmod(0o600)
+                else:
+                    target.mkdir(mode=0o700)
+                path.symlink_to(target, target_is_directory=name == "config")
+                calls = []
+                stderr = StringIO()
+
+                result = main(
+                    ["run", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stderr=stderr,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertIn("must not be a symlink", stderr.getvalue())
+                self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", stderr.getvalue())
 
     def test_run_rejects_identity_mismatch_before_building_runtime_spec(self) -> None:
         with TemporaryDirectory() as temp:
