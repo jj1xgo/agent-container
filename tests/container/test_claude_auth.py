@@ -1,3 +1,4 @@
+import hmac
 import os
 from pathlib import Path
 import stat
@@ -36,8 +37,22 @@ class ClaudeAuthTest(unittest.TestCase):
 
             self.assertEqual(stat.S_IMODE(staged.stat().st_mode), 0o600)
             install_claude_token(staged, old)
-            self.assertEqual(old.read_text(encoding="ascii"), "n" * 32)
+            self.assertTrue(
+                hmac.compare_digest(old.read_text(encoding="ascii"), "n" * 32)
+            )
             self.assertFalse(staged.exists())
+
+    def test_stage_cleans_generated_file_after_final_read_failure(self) -> None:
+        with TemporaryDirectory() as temp:
+            auth_dir = Path(temp) / "shared-auth/claude"
+            auth_dir.mkdir(parents=True, mode=0o700)
+            auth_dir.chmod(0o700)
+
+            with patch.object(Path, "read_text", side_effect=OSError("read failure")):
+                with self.assertRaises(OSError):
+                    stage_claude_token(auth_dir, "x" * 32)
+
+            self.assertFalse(any(auth_dir.iterdir()))
 
     def test_invalid_token_creates_no_staging_file(self) -> None:
         with TemporaryDirectory() as temp:
@@ -79,7 +94,9 @@ class ClaudeAuthTest(unittest.TestCase):
                 install_claude_token(staged, destination)
 
             self.assertTrue(staged.exists())
-            self.assertEqual(target.read_text(encoding="ascii"), "o" * 32)
+            self.assertTrue(
+                hmac.compare_digest(target.read_text(encoding="ascii"), "o" * 32)
+            )
 
             destination.unlink()
             auth_dir.chmod(0o755)
@@ -182,7 +199,11 @@ class ClaudeAuthTest(unittest.TestCase):
                 stat.S_IMODE((quarantine / ".credentials.json").stat().st_mode), 0o600
             )
             self.assertEqual(stat.S_IMODE((quarantine / "backups/old").stat().st_mode), 0o600)
-            self.assertEqual(layout.claude_token_file.read_text(encoding="ascii"), "t" * 32)
+            self.assertTrue(
+                hmac.compare_digest(
+                    layout.claude_token_file.read_text(encoding="ascii"), "t" * 32
+                )
+            )
 
     def test_quarantine_preserves_nested_backup_directories(self) -> None:
         with TemporaryDirectory() as temp:

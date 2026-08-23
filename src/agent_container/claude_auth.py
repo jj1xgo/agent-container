@@ -36,13 +36,15 @@ def stage_claude_token(auth_dir: Path, token: str) -> Path:
             stream.write(token)
             stream.flush()
             os.fsync(stream.fileno())
+        ensure_private_file(staged)
+        validate_claude_oauth_token(staged.read_text(encoding="ascii"))
     except BaseException:
         try:
             staged.unlink()
+        except OSError:
+            pass
         finally:
             raise
-    ensure_private_file(staged)
-    validate_claude_oauth_token(staged.read_text(encoding="ascii"))
     return staged
 
 
