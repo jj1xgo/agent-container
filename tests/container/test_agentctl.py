@@ -72,15 +72,62 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
                 self.assertEqual(result, 1)
                 self.assertEqual(calls, [])
 
-    def test_build_runs_one_podman_build(self) -> None:
+    def test_build_uses_requested_versions_and_prints_ordered_cli_probes(self) -> None:
         calls = []
+        stdout = StringIO()
+
+        def runner(spec):
+            calls.append(spec)
+            if spec.argv[-2:] == ("codex", "--version"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="codex 0.149.0\n")
+            if spec.argv[-2:] == ("claude", "--version"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="claude 1.2.3\n")
+            return self._successful_probe(spec)
+
+        result = main(
+            ["build", "--codex-version", "0.149.0", "--claude-version", "1.2.3"],
+            runner=runner,
+            stdout=stdout,
+            cachebuster_reader=lambda: "12345",
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIn("CODEX_VERSION=0.149.0", calls[2].argv)
+        self.assertIn("CLAUDE_VERSION=1.2.3", calls[2].argv)
+        self.assertIn("AGENT_CLI_CACHEBUST=12345", calls[2].argv)
+        self.assertEqual(
+            [call.argv[-2:] for call in calls[3:]],
+            [("codex", "--version"), ("claude", "--version")],
+        )
+        self.assertEqual(
+            stdout.getvalue(),
+            "Codex version: codex 0.149.0\nClaude version: claude 1.2.3\n",
+        )
+
+    def test_build_returns_claude_probe_exit_without_printing_probe_stderr(self) -> None:
+        calls = []
+        stderr = StringIO()
+
+        def runner(spec):
+            calls.append(spec)
+            if spec.argv[-2:] == ("claude", "--version"):
+                return subprocess.CompletedProcess(
+                    spec.argv,
+                    23,
+                    stderr="DO-NOT-PRINT-PROBE-STDERR",
+                )
+            return self._successful_probe(spec)
+
         result = main(
             ["build"],
-            runner=lambda spec: calls.append(spec) or self._successful_probe(spec),
+            runner=runner,
+            stderr=stderr,
+            cachebuster_reader=lambda: "12345",
         )
-        self.assertEqual(result, 0)
-        self.assertEqual(len(calls), 3)
-        self.assertEqual(calls[2].argv[:2], ("podman", "build"))
+
+        self.assertEqual(result, 23)
+        self.assertEqual(calls[-1].argv[-2:], ("claude", "--version"))
+        self.assertNotIn("DO-NOT-PRINT-PROBE-STDERR", stderr.getvalue())
 
     def test_auth_creates_private_state_and_runs_device_login(self) -> None:
         with TemporaryDirectory() as temp:

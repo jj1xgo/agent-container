@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from typing import Callable
 from typing import Mapping
 from typing import TextIO
@@ -13,6 +14,7 @@ from agent_container.podman import CommandSpec
 from agent_container.podman import auth_codex_spec
 from agent_container.podman import build_image_spec
 from agent_container.podman import clone_project_spec
+from agent_container.podman import cli_version_spec
 from agent_container.podman import codex_login_status_spec
 from agent_container.podman import podman_image_exists_spec
 from agent_container.podman import podman_rootless_spec
@@ -33,6 +35,10 @@ from agent_container.state import validate_version
 
 
 DEFAULT_IMAGE = "localhost/agent-container:dev"
+
+
+def read_cachebuster() -> str:
+    return str(time.time_ns())
 
 
 @dataclass(frozen=True)
@@ -519,6 +525,7 @@ def main(
     runtime_spec_builder: Callable[
         [StateLayout, Path, str, int, int], CommandSpec
     ] = run_codex_spec,
+    cachebuster_reader: Callable[[], str] = read_cachebuster,
 ) -> int:
     try:
         arguments = parser().parse_args(argv)
@@ -539,7 +546,20 @@ def main(
         repository_root = Path(__file__).resolve().parents[2]
         if arguments.command == "build":
             _podman_preflight(runner)
-            runner(build_image_spec(repository_root, arguments.image))
+            runner(
+                build_image_spec(
+                    repository_root,
+                    arguments.image,
+                    arguments.codex_version,
+                    arguments.claude_version,
+                    cachebuster_reader(),
+                )
+            )
+            for label, agent in (("Codex", "codex"), ("Claude", "claude")):
+                version = _required_probe_run(
+                    runner, cli_version_spec(arguments.image, agent)
+                )
+                print(f"{label} version: {(version.stdout or '').strip()}", file=stdout)
             return 0
         if arguments.command == "auth" and arguments.agent == "codex":
             layout = StateLayout.from_environment("auth", environment)

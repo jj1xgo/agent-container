@@ -29,10 +29,14 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertIsNotNone(install)
         self.assertIn("bubblewrap", install.group("packages").split())
 
-    def test_image_pins_codex_and_runs_as_agent(self) -> None:
+    def test_image_installs_latest_agent_clis_and_runs_as_agent(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
-        self.assertIn("ARG CODEX_VERSION=0.149.0", body)
+        self.assertIn("ARG CODEX_VERSION=latest", body)
+        self.assertIn("ARG CLAUDE_VERSION=latest", body)
+        self.assertIn("ARG AGENT_CLI_CACHEBUST=0", body)
         self.assertIn("@openai/codex@${CODEX_VERSION}", body)
+        self.assertIn("@anthropic-ai/claude-code@${CLAUDE_VERSION}", body)
+        self.assertIn("DISABLE_UPDATES=1", body)
         self.assertIn("USER agent", body)
         self.assertIn("WORKDIR /workspace", body)
         self.assertIn("COPY src /opt/agent-container/src", body)

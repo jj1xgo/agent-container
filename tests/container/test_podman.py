@@ -5,6 +5,7 @@ import unittest
 from agent_container.podman import auth_codex_spec
 from agent_container.podman import codex_login_status_spec
 from agent_container.podman import build_image_spec
+from agent_container.podman import cli_version_spec
 from agent_container.podman import clone_project_spec
 from agent_container.podman import run_codex_spec
 from agent_container.state import Repository
@@ -15,12 +16,41 @@ IMAGE = "localhost/agent-container:dev"
 
 
 class PodmanCommandTest(unittest.TestCase):
-    def test_build_uses_only_repository_context(self) -> None:
-        spec = build_image_spec(Path("/repo"), IMAGE)
+    def test_build_uses_versions_cachebuster_and_repository_context(self) -> None:
+        spec = build_image_spec(Path("/repo"), IMAGE, "0.149.0", "1.2.3", "12345")
         self.assertEqual(
             spec.argv,
-            ("podman", "build", "--tag", IMAGE, "--file", "/repo/Containerfile", "/repo"),
+            (
+                "podman",
+                "build",
+                "--build-arg",
+                "CODEX_VERSION=0.149.0",
+                "--build-arg",
+                "CLAUDE_VERSION=1.2.3",
+                "--build-arg",
+                "AGENT_CLI_CACHEBUST=12345",
+                "--tag",
+                IMAGE,
+                "--file",
+                "/repo/Containerfile",
+                "/repo",
+            ),
         )
+
+    def test_cli_version_probes_are_hardened_and_mount_free(self) -> None:
+        for agent in ("codex", "claude"):
+            with self.subTest(agent=agent):
+                spec = cli_version_spec(IMAGE, agent)
+
+                self.assertEqual(spec.argv[-2:], (agent, "--version"))
+                self.assertNotIn("--mount", spec.argv)
+                for required in (
+                    "--rm",
+                    "--read-only",
+                    "--cap-drop=all",
+                    "--security-opt=no-new-privileges",
+                ):
+                    self.assertIn(required, spec.argv)
 
     def test_auth_mounts_only_shared_codex_auth_directory(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")

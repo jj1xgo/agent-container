@@ -46,10 +46,47 @@ def _git_environment_args() -> list[str]:
     ]
 
 
-def build_image_spec(repo_root: Path, image: str) -> CommandSpec:
+def build_image_spec(
+    repo_root: Path,
+    image: str,
+    codex_version: str,
+    claude_version: str,
+    cachebuster: str,
+) -> CommandSpec:
     root = repo_root.resolve()
     return CommandSpec(
-        ("podman", "build", "--tag", image, "--file", str(root / "Containerfile"), str(root)),
+        (
+            "podman",
+            "build",
+            "--build-arg",
+            f"CODEX_VERSION={codex_version}",
+            "--build-arg",
+            f"CLAUDE_VERSION={claude_version}",
+            "--build-arg",
+            f"AGENT_CLI_CACHEBUST={cachebuster}",
+            "--tag",
+            image,
+            "--file",
+            str(root / "Containerfile"),
+            str(root),
+        ),
+        {},
+    )
+
+
+def cli_version_spec(image: str, agent: str) -> CommandSpec:
+    return CommandSpec(
+        (
+            "podman",
+            "run",
+            "--rm",
+            "--read-only",
+            "--cap-drop=all",
+            "--security-opt=no-new-privileges",
+            image,
+            agent,
+            "--version",
+        ),
         {},
     )
 
