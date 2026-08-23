@@ -701,12 +701,43 @@ class AgentCtlProjectTest(unittest.TestCase):
 
 
 class AgentCtlRunDoctorTest(unittest.TestCase):
-    DOCTOR_CHECK_ORDER = [
+    CODEX_DOCTOR = [
         "podman-version",
         "podman-rootless",
         "image",
+        "codex-version",
         "private-state",
         "codex-auth",
+        "gh-hosts",
+        "project-metadata",
+        "workspace-origin",
+        "handover-project",
+        "network-policy",
+    ]
+    CLAUDE_DOCTOR = [
+        "podman-version",
+        "podman-rootless",
+        "image",
+        "claude-version",
+        "private-state",
+        "claude-auth",
+        "claude-config",
+        "gh-hosts",
+        "project-metadata",
+        "workspace-origin",
+        "handover-project",
+        "network-policy",
+    ]
+    ALL_DOCTOR = [
+        "podman-version",
+        "podman-rootless",
+        "image",
+        "codex-version",
+        "claude-version",
+        "private-state",
+        "codex-auth",
+        "claude-auth",
+        "claude-config",
         "gh-hosts",
         "project-metadata",
         "workspace-origin",
@@ -1026,7 +1057,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertIn("PASS  gh-hosts: present, mode 0600", rendered)
             self.assertIn("PASS  workspace-origin: exact HTTPS origin", rendered)
             self.assertIn(
-                "WARN  network-policy: outbound network is not domain-restricted in Phase 1",
+                "WARN  network-policy: outbound network is not domain-restricted in Phase 2",
                 rendered,
             )
             self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", rendered)
@@ -1036,12 +1067,110 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                     ("podman", "--version"),
                     ("podman", "info", "--format", "{{.Host.Security.Rootless}}"),
                     ("podman", "image", "exists", "localhost/agent-container:dev"),
+                    (
+                        "podman",
+                        "run",
+                        "--rm",
+                        "--read-only",
+                        "--cap-drop=all",
+                        "--security-opt=no-new-privileges",
+                        "--userns=keep-id:uid=1000,gid=1000",
+                        "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
+                        "localhost/agent-container:dev",
+                        "codex",
+                        "--version",
+                    ),
                 ],
             )
             self.assertEqual(
                 self._doctor_check_names(rendered),
-                self.DOCTOR_CHECK_ORDER,
+                self.CODEX_DOCTOR,
             )
+
+    def test_doctor_reports_checks_in_selected_agent_order(self) -> None:
+        cases = (
+            ("codex", self.CODEX_DOCTOR),
+            ("claude", self.CLAUDE_DOCTOR),
+            ("all", self.ALL_DOCTOR),
+        )
+        for agent, expected_order in cases:
+            with self.subTest(agent=agent), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                config = root / "projects/agent-container/claude-config"
+                config.mkdir(mode=0o700)
+                output = StringIO()
+
+                result = main(
+                    ["doctor", "agent-container", "--agent", agent],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=self._successful_doctor_runner,
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stdout=output,
+                )
+
+                self.assertEqual(result, 0)
+                self.assertEqual(
+                    self._doctor_check_names(output.getvalue()), expected_order
+                )
+
+    def test_doctor_all_runs_common_probes_once_and_reports_missing_claude_state(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            claude_auth = root / "shared-auth/claude/.credentials.json"
+            claude_auth.unlink()
+            output = StringIO()
+            calls = []
+
+            def doctor_runner(spec):
+                calls.append(spec)
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+                if spec.argv[-2:] in (("codex", "--version"), ("claude", "--version")):
+                    return subprocess.CompletedProcess(
+                        spec.argv,
+                        0,
+                        stdout="version\n",
+                        stderr="DO-NOT-PRINT-PROBE-STDERR",
+                    )
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
+
+            result = main(
+                ["doctor", "agent-container", "--agent", "all"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=doctor_runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=output,
+            )
+
+            rendered = output.getvalue()
+            self.assertEqual(result, 1)
+            self.assertEqual(
+                [call.argv[:3] for call in calls].count(("podman", "--version")), 1
+            )
+            self.assertEqual(
+                [call.argv[:2] for call in calls].count(("podman", "info")), 1
+            )
+            self.assertEqual(
+                [call.argv[:3] for call in calls].count(("podman", "image", "exists")),
+                1,
+            )
+            self.assertEqual(
+                [
+                    call.argv[-2:]
+                    for call in calls
+                    if call.argv[:2] == ("podman", "run")
+                    and call.argv[-1] == "--version"
+                ],
+                [("codex", "--version"), ("claude", "--version")],
+            )
+            self.assertIn("FAIL  claude-auth:", rendered)
+            self.assertIn("FAIL  claude-config:", rendered)
+            self.assertEqual(self._doctor_check_names(rendered), self.ALL_DOCTOR)
+            self.assertFalse(
+                (root / "projects/agent-container/claude-config").exists()
+            )
+            self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", rendered)
+            self.assertNotIn("DO-NOT-PRINT-PROBE-STDERR", rendered)
 
     def test_doctor_failure_is_nonzero_and_does_not_print_secret_values(self) -> None:
         with TemporaryDirectory() as temp:
@@ -1096,7 +1225,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 self.assertIn(f"FAIL  {failed_check}: filesystem operation failed", rendered)
                 self.assertEqual(
                     self._doctor_check_names(rendered),
-                    self.DOCTOR_CHECK_ORDER,
+                    self.CODEX_DOCTOR,
                 )
                 self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", rendered)
 

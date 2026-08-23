@@ -350,10 +350,13 @@ def _validate_runtime_agent_state(layout: StateLayout, agent: str) -> None:
     ensure_private_file(_runtime_agent_auth_file(layout, agent))
 
 
-def _private_state_directories(layout: StateLayout) -> tuple[Path, ...]:
-    return _common_runtime_state_directories(layout) + _runtime_agent_directories(
-        layout, "codex"
-    )
+def _private_state_directories(
+    layout: StateLayout, agents: tuple[str, ...]
+) -> tuple[Path, ...]:
+    directories = list(_common_runtime_state_directories(layout))
+    for agent in agents:
+        directories.extend(_runtime_agent_directories(layout, agent))
+    return tuple(directories)
 
 
 def _read_runtime_project(path: Path) -> ProjectRecord:
@@ -437,6 +440,7 @@ def _check_failure_detail(error: Exception) -> str:
 
 def _doctor(
     project_id: str,
+    agent: str,
     image: str,
     environment: Mapping[str, str] | None,
     runner: Callable[[CommandSpec], subprocess.CompletedProcess],
@@ -444,6 +448,7 @@ def _doctor(
 ) -> list[CheckResult]:
     layout = StateLayout.from_environment(project_id, environment)
     checks: list[CheckResult] = []
+    agents = ("codex", "claude") if agent == "all" else (agent,)
 
     version = _doctor_run(runner, podman_version_spec())
     checks.append(
@@ -474,9 +479,27 @@ def _doctor(
         )
     )
 
+    for selected_agent in agents:
+        if image_check.returncode == 0:
+            cli_version = _doctor_run(
+                runner, cli_version_spec(image, selected_agent)
+            )
+            version_ok = cli_version.returncode == 0
+            version_detail = "available" if version_ok else "unavailable"
+        else:
+            version_ok = False
+            version_detail = "image unavailable"
+        checks.append(
+            CheckResult(
+                "PASS" if version_ok else "FAIL",
+                f"{selected_agent}-version",
+                version_detail,
+            )
+        )
+
     try:
         _ensure_exact_state_root(layout, environment)
-        for directory in _private_state_directories(layout):
+        for directory in _private_state_directories(layout, agents):
             ensure_private_directory(directory)
         checks.append(
             CheckResult(
@@ -488,15 +511,31 @@ def _doctor(
             CheckResult("FAIL", "private-state", _check_failure_detail(error))
         )
 
-    for name, path in (
-        ("codex-auth", layout.codex_auth_file),
-        ("gh-hosts", layout.gh_dir / "hosts.yml"),
-    ):
+    for selected_agent in agents:
+        name = f"{selected_agent}-auth"
+        path = _runtime_agent_auth_file(layout, selected_agent)
         try:
             ensure_private_file(path)
             checks.append(CheckResult("PASS", name, "present, mode 0600"))
         except (ValueError, OSError) as error:
             checks.append(CheckResult("FAIL", name, _check_failure_detail(error)))
+
+    if "claude" in agents:
+        try:
+            ensure_private_directory(layout.claude_config)
+            checks.append(
+                CheckResult("PASS", "claude-config", "present, mode 0700")
+            )
+        except (ValueError, OSError) as error:
+            checks.append(
+                CheckResult("FAIL", "claude-config", _check_failure_detail(error))
+            )
+
+    try:
+        ensure_private_file(layout.gh_dir / "hosts.yml")
+        checks.append(CheckResult("PASS", "gh-hosts", "present, mode 0600"))
+    except (ValueError, OSError) as error:
+        checks.append(CheckResult("FAIL", "gh-hosts", _check_failure_detail(error)))
 
     record: ProjectRecord | None = None
     try:
@@ -566,7 +605,7 @@ def _doctor(
         CheckResult(
             "WARN",
             "network-policy",
-            "outbound network is not domain-restricted in Phase 1",
+            "outbound network is not domain-restricted in Phase 2",
         )
     )
     return checks
@@ -688,6 +727,7 @@ def main(
         if arguments.command == "doctor":
             checks = _doctor(
                 arguments.project,
+                arguments.agent,
                 arguments.image,
                 environment,
                 runner,
