@@ -1,5 +1,6 @@
 import argparse
 from dataclasses import dataclass
+import getpass
 import json
 import os
 from pathlib import Path
@@ -10,18 +11,23 @@ from typing import Callable
 from typing import Mapping
 from typing import TextIO
 
+from agent_container.claude_auth import discard_staged_token
+from agent_container.claude_auth import install_claude_token
+from agent_container.claude_auth import quarantine_legacy_claude_state
+from agent_container.claude_auth import stage_claude_token
+from agent_container.claude_auth import validate_legacy_quarantine_sources
 from agent_container.migration import add_plugin_entries
 from agent_container.migration import apply_claude_migration
 from agent_container.migration import plan_claude_migration
 from agent_container.migration import render_migration_plan
 from agent_container.podman import CommandSpec
 from agent_container.podman import auth_codex_spec
-from agent_container.podman import auth_claude_spec
 from agent_container.podman import build_image_spec
 from agent_container.podman import clone_project_spec
 from agent_container.podman import cli_version_spec
 from agent_container.podman import codex_login_status_spec
-from agent_container.podman import claude_login_status_spec
+from agent_container.podman import claude_setup_token_spec
+from agent_container.podman import claude_token_status_spec
 from agent_container.podman import podman_image_exists_spec
 from agent_container.podman import podman_rootless_spec
 from agent_container.podman import podman_version_spec
@@ -34,6 +40,7 @@ from agent_container.state import Repository
 from agent_container.state import StateLayout
 from agent_container.state import ensure_private_directory
 from agent_container.state import ensure_private_file
+from agent_container.state import validate_claude_oauth_token
 from agent_container.state import validate_workspace
 from agent_container.state import validate_workspace_origin
 from agent_container.state import validate_agent
@@ -55,6 +62,10 @@ class CheckResult:
     level: str
     name: str
     detail: str
+
+
+class _ClaudeTokenFilesystemError(Exception):
+    pass
 
 
 def _validate_image(value: str) -> str:
@@ -150,23 +161,43 @@ def _validate_existing_codex_auth(layout: StateLayout) -> None:
 
 
 def _prepare_claude_auth(layout: StateLayout) -> None:
-    ensure_private_directory(layout.root, create=True)
-    ensure_private_directory(layout.root / "shared-auth", create=True)
-    ensure_private_directory(layout.claude_auth_dir, create=True)
-    if layout.claude_auth_file.exists() or layout.claude_auth_file.is_symlink():
-        ensure_private_file(layout.claude_auth_file)
+    try:
+        ensure_private_directory(layout.root, create=True)
+        ensure_private_directory(layout.root / "shared-auth", create=True)
+        ensure_private_directory(layout.claude_auth_dir, create=True)
+        if layout.claude_token_file.exists() or layout.claude_token_file.is_symlink():
+            ensure_private_file(layout.claude_token_file)
+    except (ValueError, OSError):
+        raise _ClaudeTokenFilesystemError from None
 
 
 def _validate_existing_claude_auth(layout: StateLayout) -> None:
-    for directory in (
-        layout.root,
-        layout.root / "shared-auth",
-        layout.claude_auth_dir,
-    ):
-        if directory.exists() or directory.is_symlink():
-            ensure_private_directory(directory)
-    if layout.claude_auth_file.exists() or layout.claude_auth_file.is_symlink():
-        ensure_private_file(layout.claude_auth_file)
+    try:
+        for directory in (
+            layout.root,
+            layout.root / "shared-auth",
+            layout.claude_auth_dir,
+        ):
+            if directory.exists() or directory.is_symlink():
+                ensure_private_directory(directory)
+        if layout.claude_token_file.exists() or layout.claude_token_file.is_symlink():
+            ensure_private_file(layout.claude_token_file)
+    except (ValueError, OSError):
+        raise _ClaudeTokenFilesystemError from None
+
+
+def _snapshot_legacy_claude_sources(layout: StateLayout) -> tuple[Path, ...]:
+    if not (layout.claude_auth_dir.exists() or layout.claude_auth_dir.is_symlink()):
+        return ()
+    try:
+        return validate_legacy_quarantine_sources(layout)
+    except (ValueError, OSError):
+        raise _ClaudeTokenFilesystemError from None
+
+
+def _require_private_token_terminal(stdin: TextIO, stderr: TextIO) -> None:
+    if not stdin.isatty() or not stderr.isatty():
+        raise ValueError("Claude setup-token requires a private terminal")
 
 
 def _resolve_handover_root(handover_root: Path, project_id: str) -> Path:
@@ -415,6 +446,17 @@ def _required_probe_run(
     return completed
 
 
+def _suppressed_run(
+    runner: Callable[[CommandSpec], subprocess.CompletedProcess],
+    spec: CommandSpec,
+) -> subprocess.CompletedProcess[str]:
+    if runner is run_command:
+        completed = run_command(spec, check=False, capture_output=True)
+    else:
+        completed = runner(spec)
+    return subprocess.CompletedProcess(spec.argv, completed.returncode)
+
+
 def _require_success(
     completed: subprocess.CompletedProcess,
     spec: CommandSpec,
@@ -625,10 +667,12 @@ def main(
     git_remote_reader: Callable[[Path], str] = read_git_remote,
     stdout: TextIO = sys.stdout,
     stderr: TextIO = sys.stderr,
+    stdin: TextIO = sys.stdin,
     identity_reader: Callable[[], tuple[int, int]] = read_process_identity,
     runtime_spec_builder: RuntimeSpecBuilder | None = None,
     runtime_spec_builders: Mapping[str, RuntimeSpecBuilder] | None = None,
     cachebuster_reader: Callable[[], str] = read_cachebuster,
+    token_reader: Callable[[str], str] | None = None,
 ) -> int:
     try:
         arguments = parser().parse_args(argv)
@@ -680,14 +724,41 @@ def main(
             layout = StateLayout.from_environment("auth", environment)
             _ensure_exact_state_root(layout, environment)
             _validate_existing_claude_auth(layout)
+            legacy_sources = _snapshot_legacy_claude_sources(layout)
             _podman_preflight(runner, image_required=arguments.image)
+            if token_reader is None:
+                _require_private_token_terminal(stdin, stderr)
             _prepare_claude_auth(layout)
-            login_spec = auth_claude_spec(layout, arguments.image)
-            _require_success(runner(login_spec), login_spec)
-            ensure_private_directory(layout.claude_auth_dir)
-            ensure_private_file(layout.claude_auth_file)
-            status_spec = claude_login_status_spec(layout, arguments.image)
-            _require_success(runner(status_spec), status_spec)
+            setup_spec = claude_setup_token_spec(arguments.image)
+            _require_success(runner(setup_spec), setup_spec)
+            reader = getpass.getpass if token_reader is None else token_reader
+            token = ""
+            try:
+                try:
+                    token = reader("Paste Claude setup token (input hidden): ")
+                except (EOFError, KeyboardInterrupt):
+                    print("error: Claude token input cancelled", file=stderr)
+                    return 1
+                validate_claude_oauth_token(token)
+                try:
+                    staged = stage_claude_token(layout.claude_auth_dir, token)
+                except (ValueError, OSError):
+                    raise _ClaudeTokenFilesystemError from None
+            finally:
+                token = ""
+            try:
+                status_spec = claude_token_status_spec(staged, arguments.image)
+                _require_success(_suppressed_run(runner, status_spec), status_spec)
+                try:
+                    install_claude_token(staged, layout.claude_token_file)
+                    quarantine_legacy_claude_state(layout, legacy_sources)
+                except (ValueError, OSError):
+                    raise _ClaudeTokenFilesystemError from None
+            finally:
+                try:
+                    discard_staged_token(staged)
+                except (ValueError, OSError):
+                    raise _ClaudeTokenFilesystemError from None
             return 0
         if arguments.command == "project" and arguments.project_command == "add":
             _add_project(
@@ -770,6 +841,9 @@ def main(
     except subprocess.CalledProcessError as error:
         print(f"error: command failed with exit code {error.returncode}", file=stderr)
         return error.returncode or 1
+    except _ClaudeTokenFilesystemError:
+        print("error: Claude token filesystem operation failed", file=stderr)
+        return 1
     except (ValueError, PermissionError, FileNotFoundError) as error:
         print(f"error: {error}", file=stderr)
         return 1

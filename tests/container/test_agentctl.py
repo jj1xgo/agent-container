@@ -1,4 +1,5 @@
 from io import StringIO
+import hmac
 import json
 import os
 from pathlib import Path
@@ -23,9 +24,50 @@ def successful_podman_result(spec):
 
 
 class AgentCtlBuildAuthTest(unittest.TestCase):
+    OLD_TOKEN = "o" * 32
+    NEW_TOKEN = "n" * 32
+
     @staticmethod
     def _successful_probe(spec):
         return successful_podman_result(spec)
+
+    def _make_claude_state(
+        self, root: Path, token: str | None = None, legacy: bool = False
+    ) -> Path:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root.chmod(0o700)
+        shared = root / "shared-auth"
+        shared.mkdir(exist_ok=True, mode=0o700)
+        shared.chmod(0o700)
+        auth_dir = shared / "claude"
+        auth_dir.mkdir(exist_ok=True, mode=0o700)
+        auth_dir.chmod(0o700)
+        if token is not None:
+            active = auth_dir / "oauth-token"
+            active.write_text(token, encoding="ascii")
+            active.chmod(0o600)
+        if legacy:
+            for name, body in (
+                (".credentials.json", "legacy-credential-private"),
+                (".claude.json", "legacy-metadata-private"),
+            ):
+                path = auth_dir / name
+                path.write_text(body, encoding="ascii")
+                path.chmod(0o600)
+            backups = auth_dir / "backups"
+            backups.mkdir(mode=0o700)
+            backup = backups / "old"
+            backup.write_text("legacy-backup-private", encoding="ascii")
+            backup.chmod(0o600)
+        return auth_dir
+
+    def _assert_token_matches(self, path: Path, expected: bytes) -> None:
+        self.assertTrue(hmac.compare_digest(path.read_bytes(), expected))
+
+    def _assert_private_values_absent(
+        self, rendered: str, *private_values: str
+    ) -> None:
+        self.assertTrue(all(value not in rendered for value in private_values))
 
     def test_build_requires_successful_rootless_podman_before_build(self) -> None:
         calls = []
@@ -267,30 +309,205 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
             self.assertIn("mode 0600", stderr.getvalue())
             self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
 
-    def test_claude_auth_creates_private_state_and_runs_login_status(self) -> None:
+    def test_claude_auth_activates_verified_token_and_quarantines_legacy(self) -> None:
         with TemporaryDirectory() as temp:
+            root = Path(temp)
+            auth_dir = self._make_claude_state(root, self.OLD_TOKEN, legacy=True)
+            active = auth_dir / "oauth-token"
             calls = []
-            environment = {"AGENT_CONTAINER_HOME": temp}
+            status_observations = []
+            stdout = StringIO()
+            stderr = StringIO()
 
             def runner(spec):
                 calls.append(spec)
-                if spec.argv[-3:] == ("claude", "auth", "login"):
-                    auth_file = Path(temp) / "shared-auth/claude/.credentials.json"
-                    auth_file.write_text("fixture-not-a-token", encoding="utf-8")
-                    auth_file.chmod(0o600)
+                if spec.argv[-3:] == ("claude", "auth", "status"):
+                    status_observations.append(
+                        (
+                            hmac.compare_digest(active.read_bytes(), b"o" * 32),
+                            (auth_dir / ".credentials.json").exists(),
+                            (auth_dir / ".claude.json").exists(),
+                            (auth_dir / "backups").exists(),
+                        )
+                    )
+                    return subprocess.CompletedProcess(
+                        spec.argv,
+                        0,
+                        stdout="status-output-private",
+                        stderr="runner-stderr-private",
+                    )
                 return self._successful_probe(spec)
 
-            result = main(["auth", "claude"], environment=environment, runner=runner)
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=runner,
+                token_reader=lambda prompt: self.NEW_TOKEN,
+                stdout=stdout,
+                stderr=stderr,
+            )
 
             self.assertEqual(result, 0)
-            self.assertEqual(
-                (Path(temp) / "shared-auth/claude").stat().st_mode & 0o777, 0o700
-            )
             self.assertEqual(len(calls), 5)
-            self.assertEqual(calls[3].argv[-3:], ("claude", "auth", "login"))
+            self.assertEqual(calls[0].argv, ("podman", "--version"))
+            self.assertEqual(calls[1].argv[:2], ("podman", "info"))
+            self.assertEqual(calls[2].argv[:3], ("podman", "image", "exists"))
+            self.assertEqual(calls[3].argv[-2:], ("claude", "setup-token"))
             self.assertEqual(calls[4].argv[-3:], ("claude", "auth", "status"))
+            status_mount = next(
+                value
+                for value in calls[4].argv
+                if "dst=/run/secrets/claude-oauth-token" in value
+            )
+            staged_source = Path(
+                status_mount.split("src=", 1)[1].split(",dst=", 1)[0]
+            )
+            self.assertEqual(staged_source.parent, auth_dir)
+            self.assertNotEqual(staged_source, active)
+            self.assertFalse(staged_source.exists())
+            self.assertEqual(status_observations, [(True, True, True, True)])
+            self._assert_token_matches(active, b"n" * 32)
+            quarantine_runs = list((root / "quarantine/claude").iterdir())
+            self.assertEqual(len(quarantine_runs), 1)
+            self.assertEqual(
+                {path.name for path in quarantine_runs[0].iterdir()},
+                {".credentials.json", ".claude.json", "backups"},
+            )
+            self.assertFalse((quarantine_runs[0] / "oauth-token").exists())
+            rendered = stdout.getvalue() + stderr.getvalue()
+            self._assert_private_values_absent(
+                rendered,
+                self.NEW_TOKEN,
+                self.OLD_TOKEN,
+                "legacy-credential-private",
+                "legacy-metadata-private",
+                "legacy-backup-private",
+                "status-output-private",
+                "runner-stderr-private",
+            )
 
-    def test_claude_auth_missing_image_does_not_create_state(self) -> None:
+    def test_claude_auth_setup_failure_does_not_prompt_or_change_existing_token(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+            old_bytes = active.read_bytes()
+            calls = []
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-2:] == ("claude", "setup-token"):
+                    return subprocess.CompletedProcess(spec.argv, 19)
+                return self._successful_probe(spec)
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=runner,
+                token_reader=lambda prompt: (_ for _ in ()).throw(AssertionError()),
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 19)
+            self.assertEqual(calls[-1].argv[-2:], ("claude", "setup-token"))
+            self._assert_token_matches(active, old_bytes)
+            self.assertEqual(list(active.parent.glob(".oauth-token-stage-*")), [])
+
+    def test_claude_auth_cancelled_prompt_preserves_existing_token(self) -> None:
+        for cancellation in (EOFError, KeyboardInterrupt):
+            with self.subTest(cancellation=cancellation.__name__), TemporaryDirectory() as temp:
+                root = Path(temp)
+                active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+                old_bytes = active.read_bytes()
+                calls = []
+                stdout = StringIO()
+                stderr = StringIO()
+
+                def reader(prompt):
+                    raise cancellation
+
+                result = main(
+                    ["auth", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": temp},
+                    runner=lambda spec: calls.append(spec) or self._successful_probe(spec),
+                    token_reader=reader,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls[-1].argv[-2:], ("claude", "setup-token"))
+                self.assertEqual(stderr.getvalue(), "error: Claude token input cancelled\n")
+                self._assert_token_matches(active, old_bytes)
+                self.assertEqual(list(active.parent.glob(".oauth-token-stage-*")), [])
+                self._assert_private_values_absent(
+                    stdout.getvalue() + stderr.getvalue(), self.OLD_TOKEN
+                )
+
+    def test_claude_auth_invalid_token_never_runs_status_and_preserves_existing(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+            old_bytes = active.read_bytes()
+            calls = []
+            stderr = StringIO()
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=lambda spec: calls.append(spec) or self._successful_probe(spec),
+                token_reader=lambda prompt: "z" * 31,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertTrue(all(call.argv[-3:] != ("claude", "auth", "status") for call in calls))
+            self._assert_token_matches(active, old_bytes)
+            self.assertEqual(list(active.parent.glob(".oauth-token-stage-*")), [])
+            self._assert_private_values_absent(
+                stderr.getvalue(), "z" * 31, self.OLD_TOKEN
+            )
+
+    def test_claude_auth_status_failure_discards_stage_and_preserves_existing(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+            old_bytes = active.read_bytes()
+            calls = []
+            stdout = StringIO()
+            stderr = StringIO()
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-3:] == ("claude", "auth", "status"):
+                    return subprocess.CompletedProcess(
+                        spec.argv,
+                        17,
+                        stdout="status-output-private",
+                        stderr="runner-stderr-private",
+                    )
+                return self._successful_probe(spec)
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=runner,
+                token_reader=lambda prompt: self.NEW_TOKEN,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 17)
+            self._assert_token_matches(active, old_bytes)
+            self.assertEqual(list(active.parent.glob(".oauth-token-stage-*")), [])
+            self._assert_private_values_absent(
+                stdout.getvalue() + stderr.getvalue(),
+                self.NEW_TOKEN,
+                self.OLD_TOKEN,
+                "status-output-private",
+                "runner-stderr-private",
+            )
+
+    def test_claude_auth_missing_image_creates_no_state_and_does_not_prompt(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp) / "new-state"
             calls = []
@@ -305,6 +522,7 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
                 ["auth", "claude"],
                 environment={"AGENT_CONTAINER_HOME": str(root)},
                 runner=runner,
+                token_reader=lambda prompt: (_ for _ in ()).throw(AssertionError()),
                 stderr=StringIO(),
             )
 
@@ -312,46 +530,12 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
             self.assertEqual(len(calls), 3)
             self.assertFalse(root.exists())
 
-    def test_claude_auth_rejects_broad_credential_file_before_status(self) -> None:
-        with TemporaryDirectory() as temp:
-            calls = []
-            stderr = StringIO()
-
-            def runner(spec):
-                calls.append(spec)
-                if spec.argv[-3:] == ("claude", "auth", "login"):
-                    auth_file = Path(temp) / "shared-auth/claude/.credentials.json"
-                    auth_file.write_text(
-                        "DO-NOT-PRINT-CLAUDE-CREDENTIAL", encoding="utf-8"
-                    )
-                    auth_file.chmod(0o644)
-                return self._successful_probe(spec)
-
-            result = main(
-                ["auth", "claude"],
-                environment={"AGENT_CONTAINER_HOME": temp},
-                runner=runner,
-                stderr=stderr,
-            )
-
-            self.assertEqual(result, 1)
-            self.assertEqual(len(calls), 4)
-            self.assertIn("mode 0600", stderr.getvalue())
-            self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", stderr.getvalue())
-
-    def test_claude_auth_rejects_symlinked_credential_before_status(self) -> None:
+    def test_claude_auth_rejects_unsafe_existing_token_metadata_before_container(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp)
-            auth_dir = root / "shared-auth/claude"
-            auth_dir.mkdir(parents=True, mode=0o700)
-            root.chmod(0o700)
-            auth_dir.parent.chmod(0o700)
-            credential_target = root / "credential-target"
-            credential_target.write_text(
-                "DO-NOT-PRINT-CLAUDE-CREDENTIAL", encoding="utf-8"
-            )
-            credential_target.chmod(0o600)
-            (auth_dir / ".credentials.json").symlink_to(credential_target)
+            active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+            active.chmod(0o644)
+            old_bytes = active.read_bytes()
             calls = []
             stderr = StringIO()
 
@@ -359,92 +543,154 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
                 ["auth", "claude"],
                 environment={"AGENT_CONTAINER_HOME": temp},
                 runner=lambda spec: calls.append(spec),
+                token_reader=lambda prompt: self.NEW_TOKEN,
                 stderr=stderr,
             )
 
             self.assertEqual(result, 1)
             self.assertEqual(calls, [])
-            self.assertIn("must not be a symlink", stderr.getvalue())
-            self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", stderr.getvalue())
+            self._assert_token_matches(active, old_bytes)
+            self.assertEqual(stderr.getvalue(), "error: Claude token filesystem operation failed\n")
+            self._assert_private_values_absent(
+                stderr.getvalue(), str(active), self.OLD_TOKEN, self.NEW_TOKEN
+            )
 
-    def test_claude_auth_propagates_login_status_failure(self) -> None:
+    def test_claude_auth_allows_replacing_malformed_existing_token(self) -> None:
         with TemporaryDirectory() as temp:
+            root = Path(temp)
+            active = self._make_claude_state(root, "malformed") / "oauth-token"
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=self._successful_probe,
+                token_reader=lambda prompt: self.NEW_TOKEN,
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 0)
+            self._assert_token_matches(active, b"n" * 32)
+
+    def test_claude_auth_requires_private_tty_for_default_reader(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+            old_bytes = active.read_bytes()
             calls = []
             stderr = StringIO()
 
+            with patch(
+                "agent_container.agentctl.getpass.getpass", side_effect=AssertionError
+            ):
+                result = main(
+                    ["auth", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": temp},
+                    runner=lambda spec: calls.append(spec) or self._successful_probe(spec),
+                    stdin=StringIO(),
+                    stderr=stderr,
+                )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(len(calls), 3)
+            self.assertTrue(all(call.argv[-2:] != ("claude", "setup-token") for call in calls))
+            self._assert_token_matches(active, old_bytes)
+
+    def test_claude_auth_status_output_is_suppressed_with_real_run_command_adapter(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            bin_dir = Path(temp) / "bin"
+            bin_dir.mkdir()
+            podman = bin_dir / "podman"
+            podman.write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  'info --format {{.Host.Security.Rootless}}') echo true ;;\n"
+                "  *'auth status') echo status-output-private; "
+                "echo runner-stderr-private >&2 ;;\n"
+                "esac\n",
+                encoding="ascii",
+            )
+            podman.chmod(0o755)
+            stdout = StringIO()
+            stderr = StringIO()
+
+            with patch.dict(os.environ, {"PATH": str(bin_dir)}):
+                result = main(
+                    ["auth", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    token_reader=lambda prompt: self.NEW_TOKEN,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+            self.assertEqual(result, 0)
+            rendered = stdout.getvalue() + stderr.getvalue()
+            self._assert_private_values_absent(
+                rendered,
+                self.NEW_TOKEN,
+                "status-output-private",
+                "runner-stderr-private",
+            )
+
+    def test_claude_auth_validates_legacy_sources_before_setup_and_moves_after_status(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            auth_dir = self._make_claude_state(root, self.OLD_TOKEN, legacy=True)
+            active = auth_dir / "oauth-token"
+            order = []
+
             def runner(spec):
-                calls.append(spec)
-                if spec.argv[-3:] == ("claude", "auth", "login"):
-                    auth_file = Path(temp) / "shared-auth/claude/.credentials.json"
-                    auth_file.write_text(
-                        "DO-NOT-PRINT-CLAUDE-CREDENTIAL", encoding="utf-8"
-                    )
-                    auth_file.chmod(0o600)
+                if spec.argv[-2:] == ("claude", "setup-token"):
+                    order.append("setup-with-legacy")
+                    self.assertTrue((auth_dir / ".credentials.json").exists())
                 if spec.argv[-3:] == ("claude", "auth", "status"):
-                    return subprocess.CompletedProcess(spec.argv, 17)
+                    order.append("status-with-legacy-and-old-active")
+                    self.assertTrue((auth_dir / ".credentials.json").exists())
+                    self._assert_token_matches(active, b"o" * 32)
                 return self._successful_probe(spec)
 
             result = main(
                 ["auth", "claude"],
                 environment={"AGENT_CONTAINER_HOME": temp},
                 runner=runner,
-                stderr=stderr,
+                token_reader=lambda prompt: self.NEW_TOKEN,
+                stderr=StringIO(),
             )
 
-            self.assertEqual(result, 17)
-            self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", stderr.getvalue())
-
-    def test_claude_auth_propagates_login_failure_before_status(self) -> None:
-        with TemporaryDirectory() as temp:
-            calls = []
-            stderr = StringIO()
-
-            def runner(spec):
-                calls.append(spec)
-                if spec.argv[-3:] == ("claude", "auth", "login"):
-                    return subprocess.CompletedProcess(spec.argv, 19)
-                return self._successful_probe(spec)
-
-            result = main(
-                ["auth", "claude"],
-                environment={"AGENT_CONTAINER_HOME": temp},
-                runner=runner,
-                stderr=stderr,
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                order,
+                ["setup-with-legacy", "status-with-legacy-and-old-active"],
             )
+            self.assertFalse((auth_dir / ".credentials.json").exists())
+            self.assertTrue(any((root / "quarantine/claude").iterdir()))
 
-            self.assertEqual(result, 19)
-            self.assertEqual(len(calls), 4)
-            self.assertEqual(calls[-1].argv[-3:], ("claude", "auth", "login"))
-            self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", stderr.getvalue())
-
-    def test_claude_auth_revalidates_directory_after_login_before_status(self) -> None:
+    def test_claude_auth_staging_failure_preserves_token_without_path_leak(self) -> None:
         with TemporaryDirectory() as temp:
-            calls = []
+            root = Path(temp)
+            auth_dir = self._make_claude_state(root, self.OLD_TOKEN)
+            active = auth_dir / "oauth-token"
+            old_bytes = active.read_bytes()
             stderr = StringIO()
 
-            def runner(spec):
-                calls.append(spec)
-                if spec.argv[-3:] == ("claude", "auth", "login"):
-                    auth_dir = Path(temp) / "shared-auth/claude"
-                    auth_file = auth_dir / ".credentials.json"
-                    auth_file.write_text(
-                        "DO-NOT-PRINT-CLAUDE-CREDENTIAL", encoding="utf-8"
-                    )
-                    auth_file.chmod(0o600)
-                    auth_dir.chmod(0o755)
-                return self._successful_probe(spec)
+            def reader(prompt):
+                auth_dir.chmod(0o755)
+                return self.NEW_TOKEN
 
             result = main(
                 ["auth", "claude"],
                 environment={"AGENT_CONTAINER_HOME": temp},
-                runner=runner,
+                runner=self._successful_probe,
+                token_reader=reader,
                 stderr=stderr,
             )
 
             self.assertEqual(result, 1)
-            self.assertEqual(len(calls), 4)
-            self.assertIn("mode 0700", stderr.getvalue())
-            self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", stderr.getvalue())
+            self._assert_token_matches(active, old_bytes)
+            self.assertEqual(stderr.getvalue(), "error: Claude token filesystem operation failed\n")
+            self._assert_private_values_absent(
+                stderr.getvalue(), str(auth_dir), self.NEW_TOKEN, self.OLD_TOKEN
+            )
 
 
 class AgentCtlProjectTest(unittest.TestCase):
