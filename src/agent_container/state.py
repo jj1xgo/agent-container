@@ -41,6 +41,14 @@ def validate_project_id(value: str) -> str:
     return value
 
 
+def validate_claude_oauth_token(value: str) -> str:
+    if not 32 <= len(value) <= 4096 or any(
+        ord(character) < 33 or ord(character) > 126 for character in value
+    ):
+        raise ValueError("Claude OAuth token has invalid format")
+    return value
+
+
 @dataclass(frozen=True)
 class Repository:
     owner: str
@@ -103,7 +111,27 @@ class StateLayout:
 
     @property
     def claude_auth_file(self) -> Path:
+        return self.claude_legacy_credentials_file
+
+    @property
+    def claude_token_file(self) -> Path:
+        return self.claude_auth_dir / "oauth-token"
+
+    @property
+    def claude_legacy_credentials_file(self) -> Path:
         return self.claude_auth_dir / ".credentials.json"
+
+    @property
+    def claude_legacy_metadata_file(self) -> Path:
+        return self.claude_auth_dir / ".claude.json"
+
+    @property
+    def claude_legacy_backups(self) -> Path:
+        return self.claude_auth_dir / "backups"
+
+    @property
+    def claude_quarantine_root(self) -> Path:
+        return self.root / "quarantine/claude"
 
     @property
     def project_dir(self) -> Path:

@@ -11,6 +11,7 @@ from agent_container.state import validate_agent
 from agent_container.state import validate_plugin_identifier
 from agent_container.state import validate_project_id
 from agent_container.state import validate_version
+from agent_container.state import validate_claude_oauth_token
 from agent_container.state import validate_workspace_origin
 
 
@@ -35,21 +36,42 @@ class StateValidationTest(unittest.TestCase):
             self.assertEqual(layout.workspace, Path(temp).resolve() / "workspaces/agent-container")
             self.assertEqual(layout.codex_auth_file, Path(temp).resolve() / "shared-auth/codex/auth.json")
 
-    def test_state_layout_has_claude_paths(self) -> None:
-        with TemporaryDirectory() as temp:
-            root = Path(temp).resolve()
-            layout = StateLayout.from_environment(
-                "agent-container", {"AGENT_CONTAINER_HOME": temp}
-            )
-            self.assertEqual(layout.claude_auth_dir, root / "shared-auth/claude")
-            self.assertEqual(
-                layout.claude_auth_file,
-                root / "shared-auth/claude/.credentials.json",
-            )
-            self.assertEqual(
-                layout.claude_config,
-                root / "projects/agent-container/claude-config",
-            )
+    def test_state_layout_has_setup_token_and_legacy_paths(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        self.assertEqual(
+            layout.claude_token_file,
+            Path("/state/shared-auth/claude/oauth-token"),
+        )
+        self.assertEqual(
+            layout.claude_legacy_credentials_file,
+            Path("/state/shared-auth/claude/.credentials.json"),
+        )
+        self.assertEqual(
+            layout.claude_legacy_metadata_file,
+            Path("/state/shared-auth/claude/.claude.json"),
+        )
+        self.assertEqual(
+            layout.claude_legacy_backups,
+            Path("/state/shared-auth/claude/backups"),
+        )
+        self.assertEqual(
+            layout.claude_quarantine_root,
+            Path("/state/quarantine/claude"),
+        )
+
+    def test_claude_oauth_token_accepts_only_safe_single_line_ascii(self) -> None:
+        self.assertEqual(validate_claude_oauth_token("x" * 32), "x" * 32)
+        self.assertEqual(validate_claude_oauth_token("Z" * 4096), "Z" * 4096)
+        for value in (
+            "x" * 31,
+            "x" * 4097,
+            "x y" + "x" * 29,
+            "x\n" + "x" * 31,
+            "é" * 32,
+            "\x7f" + "x" * 31,
+        ):
+            with self.subTest(length=len(value)), self.assertRaises(ValueError):
+                validate_claude_oauth_token(value)
 
     def test_agent_version_and_plugin_validation(self) -> None:
         self.assertEqual(validate_agent("claude"), "claude")
