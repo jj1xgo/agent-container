@@ -506,6 +506,57 @@ class PluginMigrationPlanningTest(MigrationTestCase):
 
                 self.assertNotIn(SECRET_MARKER, str(caught.exception))
 
+    def test_selected_plugin_record_requires_exact_supported_schema(self) -> None:
+        malformed_updates = (
+            {"scope": "project"},
+            {"scope": 1},
+            {"credential": SECRET_MARKER},
+        )
+        for update in malformed_updates:
+            with self.subTest(update=update), TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                source, _ = self.make_plugin_source(root)
+                manifest_path = source / "plugins/installed_plugins.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                record = manifest["plugins"]["issue-ops@local-marketplace"][0]
+                record.update(update)
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                plan = plan_claude_migration(source, root / "destination")
+
+                with self.assertRaises(ValueError) as caught:
+                    add_plugin_entries(plan, ("issue-ops@local-marketplace",))
+
+                self.assertNotIn(SECRET_MARKER, str(caught.exception))
+
+    def test_selected_plugin_cache_path_must_match_name_marketplace_and_version(
+        self,
+    ) -> None:
+        mismatches = (
+            ("plugins/cache/local-marketplace/different/1.2.3", "1.2.3"),
+            ("plugins/cache/different-marketplace/issue-ops/1.2.3", "1.2.3"),
+            ("plugins/cache/local-marketplace/issue-ops/1.2.3", "9.9.9"),
+        )
+        for relative_path, version in mismatches:
+            with (
+                self.subTest(relative_path=relative_path, version=version),
+                TemporaryDirectory() as temp,
+            ):
+                root = Path(temp).resolve()
+                source, _ = self.make_plugin_source(root)
+                cache_path = source / relative_path
+                cache_path.mkdir(parents=True, exist_ok=True)
+                (cache_path / "plugin.json").write_text("{}\n", encoding="utf-8")
+                manifest_path = source / "plugins/installed_plugins.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                record = manifest["plugins"]["issue-ops@local-marketplace"][0]
+                record["installPath"] = str(cache_path)
+                record["version"] = version
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                plan = plan_claude_migration(source, root / "destination")
+
+                with self.assertRaises(ValueError):
+                    add_plugin_entries(plan, ("issue-ops@local-marketplace",))
+
     def test_selected_cache_path_must_be_canonical_and_inside_plugin_cache(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp).resolve()
@@ -580,6 +631,57 @@ class PluginMigrationPlanningTest(MigrationTestCase):
                     add_plugin_entries(plan, ("issue-ops@local-marketplace",))
 
                 self.assertNotIn(SECRET_MARKER, str(caught.exception))
+
+    def test_selected_marketplace_rejects_unknown_fields_without_leaking_them(
+        self,
+    ) -> None:
+        malformed_metadata = (
+            {
+                "source": {"source": "github", "repo": "safe/plugins"},
+                "credential": SECRET_MARKER,
+            },
+            {
+                "source": {
+                    "source": "github",
+                    "repo": "safe/plugins",
+                    "credential": SECRET_MARKER,
+                }
+            },
+        )
+        for metadata in malformed_metadata:
+            with self.subTest(metadata=metadata), TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                source, _ = self.make_plugin_source(root)
+                (source / "plugins/known_marketplaces.json").write_text(
+                    json.dumps({"local-marketplace": metadata}), encoding="utf-8"
+                )
+                plan = plan_claude_migration(source, root / "destination")
+
+                with self.assertRaises(ValueError) as caught:
+                    add_plugin_entries(plan, ("issue-ops@local-marketplace",))
+
+                self.assertNotIn(SECRET_MARKER, str(caught.exception))
+
+    def test_selected_marketplace_requires_exact_supported_source_schema(self) -> None:
+        malformed_metadata = (
+            {},
+            {"source": []},
+            {"source": {"source": "gitlab", "repo": "safe/plugins"}},
+            {"source": {"source": "github"}},
+            {"source": {"source": "github", "repo": 1}},
+            {"source": {"source": "github", "repo": ""}},
+        )
+        for metadata in malformed_metadata:
+            with self.subTest(metadata=metadata), TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                source, _ = self.make_plugin_source(root)
+                (source / "plugins/known_marketplaces.json").write_text(
+                    json.dumps({"local-marketplace": metadata}), encoding="utf-8"
+                )
+                plan = plan_claude_migration(source, root / "destination")
+
+                with self.assertRaises(ValueError):
+                    add_plugin_entries(plan, ("issue-ops@local-marketplace",))
 
     def test_plugin_metadata_rejects_nonstandard_json_constants(self) -> None:
         with TemporaryDirectory() as temp:

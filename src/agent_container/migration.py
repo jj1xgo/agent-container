@@ -356,16 +356,29 @@ def _validated_plugin_record(
     record = records[0]
     if (
         not isinstance(record, dict)
-        or not isinstance(record.get("installPath"), str)
-        or not isinstance(record.get("version"), str)
+        or set(record) != {"scope", "installPath", "version"}
+        or record.get("scope") != "user"
+        or type(record.get("installPath")) is not str
+        or type(record.get("version")) is not str
         or not record["installPath"]
         or not record["version"]
     ):
         raise ValueError("selected plugin installation record is malformed")
-    return record
+    return {
+        "scope": "user",
+        "installPath": record["installPath"],
+        "version": record["version"],
+    }
 
 
-def _validated_plugin_cache_path(source: Path, install_path_value: str) -> Path:
+def _validated_plugin_cache_path(
+    source: Path,
+    install_path_value: str,
+    *,
+    name: str,
+    marketplace: str,
+    version: str,
+) -> Path:
     install_path = Path(install_path_value)
     cache_root = source / "plugins/cache"
     if not install_path.is_absolute():
@@ -380,8 +393,14 @@ def _validated_plugin_cache_path(source: Path, install_path_value: str) -> Path:
         for part in relative_path.parts
     ):
         raise ValueError("selected plugin cache path is malformed")
-    if relative_path.parts[:2] != ("plugins", "cache") or len(relative_path.parts) < 3:
-        raise ValueError("selected plugin cache path is outside plugin cache")
+    if relative_path.parts != (
+        "plugins",
+        "cache",
+        marketplace,
+        name,
+        version,
+    ):
+        raise ValueError("selected plugin cache path does not match plugin metadata")
 
     source_descriptor = _open_absolute_directory_nofollow(source, "source")
     cache_descriptor = -1
@@ -409,6 +428,35 @@ def _validated_plugin_cache_path(source: Path, install_path_value: str) -> Path:
             os.close(cache_descriptor)
         os.close(source_descriptor)
     return install_path
+
+
+def _validated_marketplace_metadata(metadata: Any) -> dict[str, Any]:
+    if not isinstance(metadata, dict) or set(metadata) != {"source"}:
+        raise ValueError(
+            "selected plugin marketplace metadata is missing or malformed"
+        )
+    source_metadata = metadata["source"]
+    if (
+        not isinstance(source_metadata, dict)
+        or set(source_metadata) != {"source", "repo"}
+        or source_metadata.get("source") != "github"
+        or type(source_metadata.get("repo")) is not str
+        or re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}/"
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}",
+            source_metadata["repo"],
+        )
+        is None
+    ):
+        raise ValueError(
+            "selected plugin marketplace metadata is missing or malformed"
+        )
+    return {
+        "source": {
+            "source": "github",
+            "repo": source_metadata["repo"],
+        }
+    }
 
 
 def _generated_json(relative_path: str, payload: Any) -> GeneratedFile:
@@ -457,10 +505,14 @@ def add_plugin_entries(
             raise ValueError("selected plugin identifier is malformed")
         record = _validated_plugin_record(installed, plugin_id)
         install_path = _validated_plugin_cache_path(
-            plan.source, record["installPath"]
+            plan.source,
+            record["installPath"],
+            name=name,
+            marketplace=marketplace,
+            version=record["version"],
         )
         _walk_allowlisted_directory(plan.source, install_path, entries, skipped)
-        selected_plugins[plugin_id] = installed["plugins"][plugin_id]
+        selected_plugins[plugin_id] = [record]
         selected_marketplaces.add(marketplace)
 
     marketplaces = _read_plugin_metadata(
@@ -470,12 +522,9 @@ def add_plugin_entries(
         raise ValueError("plugin marketplace metadata has an unsupported schema")
     filtered_marketplaces: dict[str, Any] = {}
     for marketplace in sorted(selected_marketplaces):
-        metadata = marketplaces.get(marketplace)
-        if not isinstance(metadata, dict):
-            raise ValueError(
-                "selected plugin marketplace metadata is missing or malformed"
-            )
-        filtered_marketplaces[marketplace] = metadata
+        filtered_marketplaces[marketplace] = _validated_marketplace_metadata(
+            marketplaces.get(marketplace)
+        )
 
     entries_by_path = {entry.relative_path: entry for entry in entries}
     generated_by_path = {
