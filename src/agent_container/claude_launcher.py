@@ -19,13 +19,18 @@ def load_token(path: Path) -> str:
             raise PermissionError("Claude OAuth token must have mode 0600")
         if details.st_uid != os.getuid():
             raise PermissionError("Claude OAuth token must be owned by the current user")
-        value = os.read(descriptor, 4097)
+        chunks = bytearray()
+        while len(chunks) < 4097:
+            chunk = os.read(descriptor, 4097 - len(chunks))
+            if not chunk:
+                break
+            chunks.extend(chunk)
     finally:
         os.close(descriptor)
     try:
-        token = value.decode("ascii", errors="strict")
-    except UnicodeDecodeError as error:
-        raise ValueError("Claude OAuth token must be ASCII") from error
+        token = bytes(chunks).decode("ascii", errors="strict")
+    except UnicodeDecodeError:
+        raise ValueError("Claude OAuth token must be ASCII") from None
     return validate_claude_oauth_token(token)
 
 

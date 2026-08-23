@@ -154,7 +154,7 @@ def claude_setup_token_spec(image: str) -> CommandSpec:
 def claude_token_status_spec(token_file: Path, image: str) -> CommandSpec:
     argv = _claude_setup_prefix()
     argv += ["--mount", _mount(token_file, _CLAUDE_TOKEN_PATH, True)]
-    argv += [image, "claude", "auth", "status"]
+    argv += [image, *_CLAUDE_LAUNCHER_PREFIX, "auth", "status"]
     return CommandSpec(tuple(argv), {})
 
 

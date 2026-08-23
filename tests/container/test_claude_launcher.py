@@ -3,6 +3,7 @@ import io
 import os
 from pathlib import Path
 import tempfile
+import traceback
 import unittest
 from unittest.mock import patch
 
@@ -83,6 +84,41 @@ class ClaudeLauncherTest(unittest.TestCase):
             token_file = self.write_token(Path(temporary), "not a valid token")
 
             self.assert_silent_failure(lambda: load_token(token_file))
+
+    def test_load_token_rejects_an_oversized_payload_after_short_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            token_file = self.write_token(Path(temporary))
+
+            with patch(
+                "agent_container.claude_launcher.os.read",
+                side_effect=(b"a" * 32, b"b" * 4065),
+            ) as read_mock:
+                with self.assertRaises(ValueError):
+                    load_token(token_file)
+
+            self.assertEqual(read_mock.call_count, 2)
+
+    def test_load_token_hides_decode_failure_details_from_tracebacks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            token_file = Path(temporary) / "oauth-token"
+            token_file.write_bytes(b"a" * 31 + b"\xff")
+            token_file.chmod(0o600)
+
+            with self.assertRaises(ValueError) as caught:
+                load_token(token_file)
+
+            formatted = "".join(
+                traceback.format_exception(
+                    caught.exception,
+                    chain=True,
+                )
+            )
+            observed = (
+                caught.exception.__cause__ is None,
+                caught.exception.__suppress_context__,
+                "UnicodeDecodeError" in formatted,
+            )
+            self.assertEqual(observed, (True, True, False))
 
     def test_exec_claude_sets_the_token_and_scrubs_subprocess_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -100,7 +100,20 @@ class PodmanCommandTest(unittest.TestCase):
             status.argv,
         )
         self.assertIn("CLAUDE_CONFIG_DIR=/home/agent/.claude", joined)
-        self.assertEqual(status.argv[-3:], ("claude", "auth", "status"))
+        self.assertEqual(
+            status.argv[-9:],
+            (
+                IMAGE,
+                "python3",
+                "-m",
+                "agent_container.claude_launcher",
+                "/run/secrets/claude-oauth-token",
+                "--",
+                "claude",
+                "auth",
+                "status",
+            ),
+        )
         self.assertNotIn("/workspace", joined)
 
     def test_clone_uses_read_only_gh_config_without_credential_content(self) -> None:
