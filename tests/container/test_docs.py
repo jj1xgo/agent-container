@@ -61,3 +61,39 @@ class Phase1DocumentationTest(unittest.TestCase):
         self.assertIn("doctor exit 0", observed)
         self.assertNotIn("mtime unchanged", observed)
         self.assertNotRegex(observed, r"(?:mtime|inode)\s*[=:]\s*[0-9]")
+
+
+class Phase2DocumentationTest(unittest.TestCase):
+    def test_operator_guide_contains_claude_contracts(self) -> None:
+        body = (ROOT / "docs/phase2-claude-code.md").read_text(encoding="utf-8")
+        for command in (
+            "agentctl build",
+            "agentctl auth claude",
+            "agentctl migrate claude",
+            "--agent claude",
+            "--agent all",
+        ):
+            self.assertIn(command, body)
+        for boundary in (
+            "~/.claude",
+            ".credentials.json",
+            "0700",
+            "0600",
+            "dry-run",
+            "外向き通信はドメイン制限されていません",
+        ):
+            self.assertIn(boundary, body)
+        self.assertIn("credential本文を表示しません", body)
+        self.assertIn("旧claude-containerを変更しません", body)
+
+    def test_smoke_guide_contains_required_safety_checks(self) -> None:
+        body = (ROOT / "docs/phase2-smoke-test.md").read_text(encoding="utf-8")
+        for expected in (
+            "利用者承認",
+            "mainへ直接pushしない",
+            "credential本文を表示しない",
+            "claude auth status",
+            "認証更新",
+            "旧claude-container",
+        ):
+            self.assertIn(expected, body)
