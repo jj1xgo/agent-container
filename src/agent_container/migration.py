@@ -307,6 +307,209 @@ def plan_claude_migration(source: Path, destination: Path) -> MigrationPlan:
     return MigrationPlan(source, destination, tuple(entries), (), tuple(skipped))
 
 
+def _reject_duplicate_manifest_keys(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("plugin metadata contains duplicate object keys")
+        result[key] = value
+    return result
+
+
+def _reject_nonstandard_json_constant(_: str) -> None:
+    raise ValueError("plugin metadata contains a nonstandard JSON constant")
+
+
+def _read_plugin_metadata(source: Path, relative_path: Path) -> Any:
+    source_descriptor = _open_absolute_directory_nofollow(source, "source")
+    metadata_descriptor = -1
+    try:
+        metadata_descriptor = _open_relative_source(
+            source_descriptor, relative_path, is_directory=False
+        )
+        if not stat.S_ISREG(os.fstat(metadata_descriptor).st_mode):
+            raise ValueError("plugin metadata must be a regular file")
+        try:
+            return json.loads(
+                _read_descriptor(metadata_descriptor),
+                object_pairs_hook=_reject_duplicate_manifest_keys,
+                parse_constant=_reject_nonstandard_json_constant,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError("plugin metadata must contain valid JSON") from None
+    except (FileNotFoundError, NotADirectoryError):
+        raise ValueError("required plugin metadata is missing") from None
+    finally:
+        if metadata_descriptor >= 0:
+            os.close(metadata_descriptor)
+        os.close(source_descriptor)
+
+
+def _validated_plugin_record(
+    installed: dict[str, Any], plugin_id: str
+) -> dict[str, Any]:
+    records = installed["plugins"].get(plugin_id)
+    if not isinstance(records, list) or len(records) != 1:
+        raise ValueError("selected plugin must have exactly one installation record")
+    record = records[0]
+    if (
+        not isinstance(record, dict)
+        or not isinstance(record.get("installPath"), str)
+        or not isinstance(record.get("version"), str)
+        or not record["installPath"]
+        or not record["version"]
+    ):
+        raise ValueError("selected plugin installation record is malformed")
+    return record
+
+
+def _validated_plugin_cache_path(source: Path, install_path_value: str) -> Path:
+    install_path = Path(install_path_value)
+    cache_root = source / "plugins/cache"
+    if not install_path.is_absolute():
+        raise ValueError("selected plugin cache path must be absolute")
+    try:
+        relative_path = install_path.relative_to(source)
+    except ValueError:
+        raise ValueError("selected plugin cache path escapes source") from None
+    if any(
+        part in {"", ".", ".."}
+        or any(ord(character) < 32 or ord(character) == 127 for character in part)
+        for part in relative_path.parts
+    ):
+        raise ValueError("selected plugin cache path is malformed")
+    if relative_path.parts[:2] != ("plugins", "cache") or len(relative_path.parts) < 3:
+        raise ValueError("selected plugin cache path is outside plugin cache")
+
+    source_descriptor = _open_absolute_directory_nofollow(source, "source")
+    cache_descriptor = -1
+    install_descriptor = -1
+    try:
+        cache_descriptor = _open_relative_source(
+            source_descriptor, Path("plugins/cache"), is_directory=True
+        )
+        install_descriptor = _open_relative_source(
+            source_descriptor, relative_path, is_directory=True
+        )
+        if not stat.S_ISDIR(os.fstat(install_descriptor).st_mode):
+            raise ValueError("selected plugin cache path must be a directory")
+        resolved_install_path = install_path.resolve(strict=True)
+        if resolved_install_path != install_path:
+            raise ValueError("selected plugin cache path must be canonical")
+        if not resolved_install_path.is_relative_to(cache_root.resolve(strict=True)):
+            raise ValueError("selected plugin cache path is outside plugin cache")
+    except (FileNotFoundError, NotADirectoryError):
+        raise ValueError("selected plugin cache path is missing") from None
+    finally:
+        if install_descriptor >= 0:
+            os.close(install_descriptor)
+        if cache_descriptor >= 0:
+            os.close(cache_descriptor)
+        os.close(source_descriptor)
+    return install_path
+
+
+def _generated_json(relative_path: str, payload: Any) -> GeneratedFile:
+    body = json.dumps(
+        payload, ensure_ascii=False, indent=2, sort_keys=True
+    ).encode("utf-8") + b"\n"
+    return GeneratedFile(Path(relative_path), body)
+
+
+def add_plugin_entries(
+    plan: MigrationPlan, plugin_ids: tuple[str, ...]
+) -> MigrationPlan:
+    if not plugin_ids:
+        return plan
+
+    installed = _read_plugin_metadata(
+        plan.source, Path("plugins/installed_plugins.json")
+    )
+    if (
+        not isinstance(installed, dict)
+        or set(installed) != {"version", "plugins"}
+        or type(installed.get("version")) is not int
+        or installed["version"] != 2
+        or not isinstance(installed.get("plugins"), dict)
+    ):
+        raise ValueError("installed plugin metadata has an unsupported schema")
+
+    selected_ids = tuple(sorted(set(plugin_ids)))
+    selected_plugins: dict[str, Any] = {}
+    selected_marketplaces: set[str] = set()
+    entries = list(plan.entries)
+    skipped = list(plan.skipped)
+    for plugin_id in selected_ids:
+        if plugin_id not in installed["plugins"]:
+            raise ValueError("selected plugin is not installed")
+        name, separator, marketplace = plugin_id.rpartition("@")
+        if (
+            not separator
+            or not name
+            or not marketplace
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in plugin_id
+            )
+        ):
+            raise ValueError("selected plugin identifier is malformed")
+        record = _validated_plugin_record(installed, plugin_id)
+        install_path = _validated_plugin_cache_path(
+            plan.source, record["installPath"]
+        )
+        _walk_allowlisted_directory(plan.source, install_path, entries, skipped)
+        selected_plugins[plugin_id] = installed["plugins"][plugin_id]
+        selected_marketplaces.add(marketplace)
+
+    marketplaces = _read_plugin_metadata(
+        plan.source, Path("plugins/known_marketplaces.json")
+    )
+    if not isinstance(marketplaces, dict):
+        raise ValueError("plugin marketplace metadata has an unsupported schema")
+    filtered_marketplaces: dict[str, Any] = {}
+    for marketplace in sorted(selected_marketplaces):
+        metadata = marketplaces.get(marketplace)
+        if not isinstance(metadata, dict):
+            raise ValueError(
+                "selected plugin marketplace metadata is missing or malformed"
+            )
+        filtered_marketplaces[marketplace] = metadata
+
+    entries_by_path = {entry.relative_path: entry for entry in entries}
+    generated_by_path = {
+        generated.relative_path: generated for generated in plan.generated_files
+    }
+    for generated in (
+        _generated_json(
+            "plugins/installed_plugins.json",
+            {"version": 2, "plugins": selected_plugins},
+        ),
+        _generated_json(
+            "plugins/known_marketplaces.json", filtered_marketplaces
+        ),
+    ):
+        generated_by_path[generated.relative_path] = generated
+    return MigrationPlan(
+        plan.source,
+        plan.destination,
+        tuple(
+            sorted(
+                entries_by_path.values(),
+                key=lambda entry: entry.relative_path.as_posix(),
+            )
+        ),
+        tuple(
+            sorted(
+                generated_by_path.values(),
+                key=lambda generated: generated.relative_path.as_posix(),
+            )
+        ),
+        tuple(sorted(set(skipped), key=Path.as_posix)),
+    )
+
+
 def _validate_planned_source_entry(
     source_descriptor: int, entry: MigrationEntry
 ) -> tuple[int, os.stat_result]:

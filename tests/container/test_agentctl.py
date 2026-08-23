@@ -2,8 +2,9 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
-from tempfile import TemporaryDirectory
+import shutil
 import subprocess
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
@@ -1446,6 +1447,242 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 root,
                 remote_url="https://github.com/example/other.git",
             )
+
+
+class AgentCtlMigrationTest(unittest.TestCase):
+    def _migration_state(self, temp: str) -> tuple[Path, Path]:
+        base = Path(temp).resolve()
+        root = base / "state"
+        project_dir = root / "projects/demo"
+        project_dir.mkdir(parents=True, mode=0o700)
+        root.chmod(0o700)
+        (root / "projects").chmod(0o700)
+        project_dir.chmod(0o700)
+        handovers = base / "handovers"
+        handovers.mkdir()
+        ProjectRecord(
+            Repository("safe", "demo"), handovers.resolve()
+        ).write(project_dir / "project.json")
+
+        source = base / "source"
+        selected = source / "plugins/cache/local-marketplace/issue-ops/1.2.3"
+        unselected = source / "plugins/cache/local-marketplace/unselected/9.9.9"
+        selected.mkdir(parents=True)
+        unselected.mkdir(parents=True)
+        (source / "CLAUDE.md").write_text("safe instructions\n", encoding="utf-8")
+        (selected / "plugin.json").write_text(
+            '{"name": "issue-ops"}\n', encoding="utf-8"
+        )
+        (unselected / "plugin.json").write_text(
+            "DO-NOT-PRINT-CREDENTIAL-BODY", encoding="utf-8"
+        )
+        (source / "plugins/installed_plugins.json").write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "plugins": {
+                        "issue-ops@local-marketplace": [
+                            {
+                                "scope": "user",
+                                "installPath": str(selected),
+                                "version": "1.2.3",
+                            }
+                        ],
+                        "unselected@local-marketplace": [
+                            {
+                                "scope": "user",
+                                "installPath": str(unselected),
+                                "version": "9.9.9",
+                            }
+                        ],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (source / "plugins/known_marketplaces.json").write_text(
+            json.dumps(
+                {
+                    "local-marketplace": {
+                        "source": {"source": "github", "repo": "safe/plugins"}
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return root, source
+
+    def _run_migration(
+        self,
+        root: Path,
+        source: Path,
+        *extra: str,
+    ) -> tuple[int, StringIO, StringIO, list]:
+        stdout = StringIO()
+        stderr = StringIO()
+        calls = []
+        result = main(
+            [
+                "migrate",
+                "claude",
+                "demo",
+                "--from",
+                str(source),
+                "--plugin",
+                "issue-ops@local-marketplace",
+                *extra,
+            ],
+            environment={"AGENT_CONTAINER_HOME": str(root)},
+            runner=lambda spec: calls.append(spec),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        return result, stdout, stderr, calls
+
+    def test_migrate_dry_run_prints_safe_plan_without_creating_destination(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, source = self._migration_state(temp)
+
+            result, stdout, stderr, calls = self._run_migration(root, source)
+
+            destination = root / "projects/demo/claude-config"
+            self.assertEqual(result, 0)
+            self.assertEqual(stderr.getvalue(), "")
+            self.assertEqual(calls, [])
+            self.assertFalse(destination.exists())
+            output = stdout.getvalue()
+            self.assertIn("COPY file CLAUDE.md\n", output)
+            self.assertIn(
+                "COPY file plugins/cache/local-marketplace/issue-ops/1.2.3/plugin.json\n",
+                output,
+            )
+            self.assertIn("COPY file plugins/installed_plugins.json\n", output)
+            self.assertIn("COPY file plugins/known_marketplaces.json\n", output)
+            self.assertIn(f"DESTINATION {destination}\n", output)
+            self.assertTrue(output.endswith("MODE dry-run\n"))
+            self.assertNotIn("unselected", output)
+            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", output)
+
+    def test_migrate_apply_publishes_only_selected_state_without_runner(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, source = self._migration_state(temp)
+
+            result, stdout, stderr, calls = self._run_migration(
+                root, source, "--apply"
+            )
+
+            destination = root / "projects/demo/claude-config"
+            self.assertEqual(result, 0)
+            self.assertEqual(stderr.getvalue(), "")
+            self.assertEqual(calls, [])
+            self.assertTrue((destination / "CLAUDE.md").is_file())
+            self.assertTrue(
+                (
+                    destination
+                    / "plugins/cache/local-marketplace/issue-ops/1.2.3/plugin.json"
+                ).is_file()
+            )
+            self.assertFalse(
+                (destination / "plugins/cache/local-marketplace/unselected").exists()
+            )
+            installed = json.loads(
+                (destination / "plugins/installed_plugins.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                set(installed["plugins"]), {"issue-ops@local-marketplace"}
+            )
+            self.assertTrue(stdout.getvalue().endswith("MODE apply\n"))
+
+    def test_migrate_rejects_invalid_identifiers_before_filesystem_access(self) -> None:
+        cases = (
+            ("../invalid-project", "issue-ops@local-marketplace", "project_id"),
+            ("demo", "invalid-plugin", "plugin"),
+        )
+        for project, plugin, expected_error in cases:
+            with (
+                self.subTest(project=project, plugin=plugin),
+                TemporaryDirectory() as temp,
+            ):
+                root = Path(temp) / "must-not-be-created"
+                calls = []
+                stderr = StringIO()
+
+                result = main(
+                    [
+                        "migrate",
+                        "claude",
+                        project,
+                        "--from",
+                        "/DO-NOT-PRINT-CREDENTIAL-BODY",
+                        "--plugin",
+                        plugin,
+                    ],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec),
+                    stderr=stderr,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertFalse(root.exists())
+                self.assertIn(expected_error, stderr.getvalue())
+                self.assertNotIn(
+                    "DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue()
+                )
+
+    def test_migrate_validates_all_inputs_before_destination_mutation(self) -> None:
+        cases = ("missing-project-metadata", "missing-source", "existing-destination")
+        for case in cases:
+            with self.subTest(case=case), TemporaryDirectory() as temp:
+                root, source = self._migration_state(temp)
+                destination = root / "projects/demo/claude-config"
+                if case == "missing-project-metadata":
+                    (root / "projects/demo/project.json").unlink()
+                elif case == "missing-source":
+                    shutil.rmtree(source)
+                else:
+                    destination.mkdir(mode=0o700)
+                    (destination / "DO-NOT-PRINT-CREDENTIAL-BODY").write_text(
+                        "unchanged", encoding="utf-8"
+                    )
+
+                result, stdout, stderr, calls = self._run_migration(
+                    root, source, "--apply"
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
+                if case != "existing-destination":
+                    self.assertFalse(destination.exists())
+                else:
+                    self.assertEqual(
+                        (destination / "DO-NOT-PRINT-CREDENTIAL-BODY").read_text(
+                            encoding="utf-8"
+                        ),
+                        "unchanged",
+                    )
+
+    def test_migrate_metadata_error_hides_secret_values_and_never_runs_podman(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, source = self._migration_state(temp)
+            (source / "plugins/known_marketplaces.json").write_text(
+                '{"local-marketplace": "DO-NOT-PRINT-CREDENTIAL-BODY"}',
+                encoding="utf-8",
+            )
+
+            result, stdout, stderr, calls = self._run_migration(
+                root, source, "--apply"
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(calls, [])
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
+            self.assertFalse((root / "projects/demo/claude-config").exists())
 
 
 class AgentCtlParserTest(unittest.TestCase):

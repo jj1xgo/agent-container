@@ -10,6 +10,10 @@ from typing import Callable
 from typing import Mapping
 from typing import TextIO
 
+from agent_container.migration import add_plugin_entries
+from agent_container.migration import apply_claude_migration
+from agent_container.migration import plan_claude_migration
+from agent_container.migration import render_migration_plan
 from agent_container.podman import CommandSpec
 from agent_container.podman import auth_codex_spec
 from agent_container.podman import auth_claude_spec
@@ -34,6 +38,7 @@ from agent_container.state import validate_workspace
 from agent_container.state import validate_workspace_origin
 from agent_container.state import validate_agent
 from agent_container.state import validate_plugin_identifier
+from agent_container.state import validate_project_id
 from agent_container.state import validate_version
 
 
@@ -639,6 +644,7 @@ def main(
             validate_agent(arguments.agent, allow_all=True)
         elif arguments.command == "migrate":
             validate_agent(arguments.agent)
+            validate_project_id(arguments.project)
             for plugin in arguments.plugins:
                 validate_plugin_identifier(plugin)
         repository_root = Path(__file__).resolve().parents[2]
@@ -741,6 +747,25 @@ def main(
                     file=stdout,
                 )
             return 1 if any(check.level == "FAIL" for check in checks) else 0
+        if arguments.command == "migrate":
+            layout = StateLayout.from_environment(arguments.project, environment)
+            _ensure_exact_state_root(layout, environment)
+            for directory in (
+                layout.root,
+                layout.project_dir.parent,
+                layout.project_dir,
+            ):
+                ensure_private_directory(directory)
+            _read_runtime_project(layout.project_file)
+            plan = plan_claude_migration(arguments.source, layout.claude_config)
+            plan = add_plugin_entries(plan, tuple(arguments.plugins))
+            rendered = render_migration_plan(plan)
+            if arguments.apply:
+                apply_claude_migration(plan)
+            for line in rendered:
+                print(line, file=stdout)
+            print(f"MODE {'apply' if arguments.apply else 'dry-run'}", file=stdout)
+            return 0
         return 1
     except subprocess.CalledProcessError as error:
         print(f"error: command failed with exit code {error.returncode}", file=stderr)
