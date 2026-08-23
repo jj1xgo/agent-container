@@ -392,6 +392,58 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
             self.assertEqual(result, 17)
             self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", stderr.getvalue())
 
+    def test_claude_auth_propagates_login_failure_before_status(self) -> None:
+        with TemporaryDirectory() as temp:
+            calls = []
+            stderr = StringIO()
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-3:] == ("claude", "auth", "login"):
+                    return subprocess.CompletedProcess(spec.argv, 19)
+                return self._successful_probe(spec)
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=runner,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 19)
+            self.assertEqual(len(calls), 4)
+            self.assertEqual(calls[-1].argv[-3:], ("claude", "auth", "login"))
+            self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", stderr.getvalue())
+
+    def test_claude_auth_revalidates_directory_after_login_before_status(self) -> None:
+        with TemporaryDirectory() as temp:
+            calls = []
+            stderr = StringIO()
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-3:] == ("claude", "auth", "login"):
+                    auth_dir = Path(temp) / "shared-auth/claude"
+                    auth_file = auth_dir / ".credentials.json"
+                    auth_file.write_text(
+                        "DO-NOT-PRINT-CLAUDE-CREDENTIAL", encoding="utf-8"
+                    )
+                    auth_file.chmod(0o600)
+                    auth_dir.chmod(0o755)
+                return self._successful_probe(spec)
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=runner,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(len(calls), 4)
+            self.assertIn("mode 0700", stderr.getvalue())
+            self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", stderr.getvalue())
+
 
 class AgentCtlProjectTest(unittest.TestCase):
     def _authenticated_state(self, root: Path) -> None:
