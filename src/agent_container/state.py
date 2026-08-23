@@ -9,6 +9,30 @@ from typing import Mapping
 
 PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 REPOSITORY_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+AGENTS = frozenset({"codex", "claude"})
+VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,99}$")
+PLUGIN_IDENTIFIER = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}@[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
+)
+
+
+def validate_agent(value: str, allow_all: bool = False) -> str:
+    allowed = AGENTS | ({"all"} if allow_all else set())
+    if value not in allowed:
+        raise ValueError("agent must be codex or claude")
+    return value
+
+
+def validate_version(value: str) -> str:
+    if VERSION.fullmatch(value) is None:
+        raise ValueError("version must be a safe npm version or latest")
+    return value
+
+
+def validate_plugin_identifier(value: str) -> str:
+    if PLUGIN_IDENTIFIER.fullmatch(value) is None:
+        raise ValueError("plugin must be NAME@MARKETPLACE")
+    return value
 
 
 def validate_project_id(value: str) -> str:
@@ -74,12 +98,24 @@ class StateLayout:
         return self.codex_auth_dir / "auth.json"
 
     @property
+    def claude_auth_dir(self) -> Path:
+        return self.root / "shared-auth/claude"
+
+    @property
+    def claude_auth_file(self) -> Path:
+        return self.claude_auth_dir / ".credentials.json"
+
+    @property
     def project_dir(self) -> Path:
         return self.root / "projects" / self.project_id
 
     @property
     def codex_home(self) -> Path:
         return self.project_dir / "codex-home"
+
+    @property
+    def claude_config(self) -> Path:
+        return self.project_dir / "claude-config"
 
     @property
     def cache(self) -> Path:

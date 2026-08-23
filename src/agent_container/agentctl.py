@@ -27,6 +27,9 @@ from agent_container.state import ensure_private_directory
 from agent_container.state import ensure_private_file
 from agent_container.state import validate_workspace
 from agent_container.state import validate_workspace_origin
+from agent_container.state import validate_agent
+from agent_container.state import validate_plugin_identifier
+from agent_container.state import validate_version
 
 
 DEFAULT_IMAGE = "localhost/agent-container:dev"
@@ -58,9 +61,13 @@ def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog="agentctl")
     command.add_argument("--image", default=DEFAULT_IMAGE)
     subcommands = command.add_subparsers(dest="command", required=True)
-    subcommands.add_parser("build")
+    build = subcommands.add_parser("build")
+    build.add_argument("--codex-version", default="latest")
+    build.add_argument("--claude-version", default="latest")
     auth = subcommands.add_parser("auth")
-    auth.add_subparsers(dest="agent", required=True).add_parser("codex")
+    auth_subcommands = auth.add_subparsers(dest="agent", required=True)
+    auth_subcommands.add_parser("codex")
+    auth_subcommands.add_parser("claude")
     project = subcommands.add_parser("project")
     project_subcommands = project.add_subparsers(dest="project_command", required=True)
     add = project_subcommands.add_parser("add")
@@ -69,8 +76,16 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument("--handover-root", type=Path, required=True)
     run = subcommands.add_parser("run")
     run.add_argument("project")
+    run.add_argument("--agent", choices=("codex", "claude"), default="codex")
     doctor = subcommands.add_parser("doctor")
     doctor.add_argument("project")
+    doctor.add_argument("--agent", choices=("codex", "claude", "all"), default="codex")
+    migrate = subcommands.add_parser("migrate")
+    migrate.add_argument("agent", choices=("claude",))
+    migrate.add_argument("project")
+    migrate.add_argument("--from", dest="source", type=Path, required=True)
+    migrate.add_argument("--plugin", dest="plugins", action="append", default=[])
+    migrate.add_argument("--apply", action="store_true")
     return command
 
 
@@ -508,6 +523,19 @@ def main(
     try:
         arguments = parser().parse_args(argv)
         _validate_image(arguments.image)
+        if arguments.command == "build":
+            validate_version(arguments.codex_version)
+            validate_version(arguments.claude_version)
+        elif arguments.command == "auth":
+            validate_agent(arguments.agent)
+        elif arguments.command == "run":
+            validate_agent(arguments.agent)
+        elif arguments.command == "doctor":
+            validate_agent(arguments.agent, allow_all=True)
+        elif arguments.command == "migrate":
+            validate_agent(arguments.agent)
+            for plugin in arguments.plugins:
+                validate_plugin_identifier(plugin)
         repository_root = Path(__file__).resolve().parents[2]
         if arguments.command == "build":
             _podman_preflight(runner)

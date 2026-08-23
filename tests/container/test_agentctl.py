@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_container.agentctl import main
+from agent_container.agentctl import parser
 from agent_container.podman import run_codex_spec
 from agent_container.state import ProjectRecord
 from agent_container.state import Repository
@@ -924,6 +925,28 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 root,
                 remote_url="https://github.com/example/other.git",
             )
+
+
+class AgentCtlParserTest(unittest.TestCase):
+    def test_new_command_contract(self) -> None:
+        build = parser().parse_args(["build"])
+        self.assertEqual((build.codex_version, build.claude_version), ("latest", "latest"))
+        self.assertEqual(parser().parse_args(["run", "p"]).agent, "codex")
+        self.assertEqual(
+            parser().parse_args(["run", "p", "--agent", "claude"]).agent,
+            "claude",
+        )
+        self.assertEqual(
+            parser().parse_args(["doctor", "p", "--agent", "all"]).agent,
+            "all",
+        )
+        migrate = parser().parse_args(
+            ["migrate", "claude", "p", "--from", "/old/.claude",
+             "--plugin", "issue-ops@local-marketplace"]
+        )
+        self.assertEqual(migrate.source, Path("/old/.claude"))
+        self.assertEqual(migrate.plugins, ["issue-ops@local-marketplace"])
+        self.assertFalse(migrate.apply)
 
 
 if __name__ == "__main__":

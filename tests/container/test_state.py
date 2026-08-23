@@ -7,7 +7,10 @@ from agent_container.state import Repository
 from agent_container.state import StateLayout
 from agent_container.state import ensure_private_directory
 from agent_container.state import ensure_private_file
+from agent_container.state import validate_agent
+from agent_container.state import validate_plugin_identifier
 from agent_container.state import validate_project_id
+from agent_container.state import validate_version
 from agent_container.state import validate_workspace_origin
 
 
@@ -31,6 +34,41 @@ class StateValidationTest(unittest.TestCase):
             self.assertEqual(layout.root, Path(temp).resolve())
             self.assertEqual(layout.workspace, Path(temp).resolve() / "workspaces/agent-container")
             self.assertEqual(layout.codex_auth_file, Path(temp).resolve() / "shared-auth/codex/auth.json")
+
+    def test_state_layout_has_claude_paths(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            layout = StateLayout.from_environment(
+                "agent-container", {"AGENT_CONTAINER_HOME": temp}
+            )
+            self.assertEqual(layout.claude_auth_dir, root / "shared-auth/claude")
+            self.assertEqual(
+                layout.claude_auth_file,
+                root / "shared-auth/claude/.credentials.json",
+            )
+            self.assertEqual(
+                layout.claude_config,
+                root / "projects/agent-container/claude-config",
+            )
+
+    def test_agent_version_and_plugin_validation(self) -> None:
+        self.assertEqual(validate_agent("claude"), "claude")
+        self.assertEqual(validate_agent("all", allow_all=True), "all")
+        self.assertEqual(validate_version("latest"), "latest")
+        self.assertEqual(validate_version("2.1.89"), "2.1.89")
+        self.assertEqual(
+            validate_plugin_identifier("issue-ops@local-marketplace"),
+            "issue-ops@local-marketplace",
+        )
+        for value in ("", "all", "../claude", "claude\nnext"):
+            with self.subTest(agent=value), self.assertRaises(ValueError):
+                validate_agent(value)
+        for value in ("", "-latest", "two words", "2.1.89\nnext"):
+            with self.subTest(version=value), self.assertRaises(ValueError):
+                validate_version(value)
+        for value in ("plugin", "../p@m", "p@../m", "p/x@m"):
+            with self.subTest(plugin=value), self.assertRaises(ValueError):
+                validate_plugin_identifier(value)
 
     def test_project_id_rejects_path_traversal(self) -> None:
         for value in ("", ".", "..", "../agent", "family/project"):
