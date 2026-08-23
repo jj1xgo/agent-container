@@ -32,12 +32,12 @@ unit suiteの結果を実host観測として扱いません。実行後は、実
 
 | command/check | expected result | observed result | date |
 | --- | --- | --- | --- |
-| `podman info` | rootless is true | not run | not run |
-| image build and both versions | exit 0; local image; Codex and Claude versions; no credential path/value | not run | not run |
-| pre-auth Claude doctor | explicit missing-state FAIL; no traceback or secret | not run | not run |
-| approved Claude login | credential file exists with owner and `0600`; `claude auth status` only | not run | not run |
-| disposable migration dry-run and apply | reviewed allowlist only; source unchanged; atomic destination | not run | not run |
-| Claude doctor | required checks PASS; documented network WARN | not run | not run |
+| `podman info` | rootless is true | PASS via doctor; exit 0 | 2026-08-23 |
+| image build and both versions | exit 0; local image; Codex and Claude versions; no credential path/value | exit 0; `localhost/agent-container:dev`; Codex `0.149.0`; Claude `2.1.241` | 2026-08-23 |
+| pre-auth Claude doctor | explicit missing-state FAIL; no traceback or secret | exit 1; Claude auth/config missing only, no traceback/secret | 2026-08-23 |
+| approved Claude login | credential file exists with owner and `0600`; `claude auth status` only | user completed; exit 0; metadata only (`0600`), controller did not capture browser code or credential body | 2026-08-23 |
+| disposable migration dry-run and apply | reviewed allowlist only; source unchanged; atomic destination | dry-run/apply exit 0; four allowlist files only; destination created atomically; source unchanged | 2026-08-23 |
+| Claude doctor | required checks PASS; documented network WARN | exit 0; required checks PASS; network policy WARN only | 2026-08-23 |
 | Claude mount inspection | permitted project mounts only; prohibited host paths absent | not run | not run |
 | Claude edit, test, commit | approved non-main test branch; local commit only | not run | not run |
 | Claude restart and resume | same-project session continuity | not run | not run |
