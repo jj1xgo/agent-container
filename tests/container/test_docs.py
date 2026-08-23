@@ -64,6 +64,14 @@ class Phase1DocumentationTest(unittest.TestCase):
 
 
 class Phase2DocumentationTest(unittest.TestCase):
+    def test_operator_guide_documents_codex_default_and_build_only_updates(self) -> None:
+        body = (ROOT / "docs/phase2-claude-code.md").read_text(encoding="utf-8")
+
+        self.assertIn("bin/agentctl doctor PROJECT", body)
+        self.assertIn("既定でCodex", body)
+        self.assertIn("DISABLE_UPDATES=1", body)
+        self.assertIn("version変更はimageの再build時だけ", body)
+
     def test_operator_guide_contains_claude_contracts(self) -> None:
         body = (ROOT / "docs/phase2-claude-code.md").read_text(encoding="utf-8")
         for command in (

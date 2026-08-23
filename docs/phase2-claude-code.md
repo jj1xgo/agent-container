@@ -18,7 +18,7 @@ export AGENT_CONTAINER_HOME="$HOME/.local/share/agent-container"
 
 ## Image build、更新、rollback
 
-通常buildはCodexとClaude Codeの両方をnpmから`latest`でinstallし、毎回CLI install layerを更新します。build後は両CLIの`--version`が成功することを確認します。
+通常buildはCodexとClaude Codeの両方をnpmから`latest`でinstallし、毎回CLI install layerを更新します。build後は両CLIの`--version`が成功することを確認します。runtimeのself-updateは`DISABLE_UPDATES=1`で無効です。version変更はimageの再build時だけに起き、実行中のcontainerでCLI versionは変わりません。
 
 ```bash
 bin/agentctl build
@@ -72,6 +72,12 @@ bin/agentctl migrate claude PROJECT --from ABSOLUTE_OLD_CLAUDE_CONFIG \
 `--apply`はdestinationの`claude-config`が存在したら失敗します。copyはstaging後のdirectory単位renameで公開され、sourceはread-only入力として扱います。dry-runの一覧とsourceをreviewしてからapplyしてください。credentialらしい`settings.json`は拒否されます。旧`claude-containerを変更しません`。旧container、旧state、旧Git repositoryはこのmigrationの対象外です。
 
 ## Doctor
+
+agentを指定しない既存commandは、既定でCodexを診断します。
+
+```bash
+bin/agentctl doctor PROJECT
+```
 
 Claudeだけを診断するには次を実行します。
 
