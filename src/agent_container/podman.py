@@ -7,6 +7,18 @@ from agent_container.state import Repository
 from agent_container.state import StateLayout
 
 
+_CLAUDE_TOKEN_PATH = "/run/secrets/claude-oauth-token"
+_CLAUDE_LAUNCHER_PREFIX = (
+    "python3",
+    "-m",
+    "agent_container.claude_launcher",
+    _CLAUDE_TOKEN_PATH,
+    "--",
+    "claude",
+)
+_CLAUDE_CONFIG_TMPFS = "--tmpfs=/home/agent/.claude:rw,nosuid,nodev,noexec,size=16m"
+
+
 @dataclass(frozen=True)
 class CommandSpec:
     argv: tuple[str, ...]
@@ -107,21 +119,22 @@ def codex_login_status_spec(layout: StateLayout, image: str) -> CommandSpec:
     return CommandSpec(tuple(argv), {})
 
 
-def _claude_auth_prefix(layout: StateLayout) -> list[str]:
+def _claude_setup_prefix() -> list[str]:
     argv = _runtime_prefix(os.getuid(), os.getgid())
-    argv += ["--mount", _mount(layout.claude_auth_dir, "/home/agent/.claude")]
+    argv += [_CLAUDE_CONFIG_TMPFS]
     argv += ["--env", "CLAUDE_CONFIG_DIR=/home/agent/.claude"]
     return argv
 
 
-def auth_claude_spec(layout: StateLayout, image: str) -> CommandSpec:
-    argv = _claude_auth_prefix(layout)
-    argv += [image, "claude", "auth", "login"]
+def claude_setup_token_spec(image: str) -> CommandSpec:
+    argv = _claude_setup_prefix()
+    argv += [image, "claude", "setup-token"]
     return CommandSpec(tuple(argv), {})
 
 
-def claude_login_status_spec(layout: StateLayout, image: str) -> CommandSpec:
-    argv = _claude_auth_prefix(layout)
+def claude_token_status_spec(token_file: Path, image: str) -> CommandSpec:
+    argv = _claude_setup_prefix()
+    argv += ["--mount", _mount(token_file, _CLAUDE_TOKEN_PATH, True)]
     argv += [image, "claude", "auth", "status"]
     return CommandSpec(tuple(argv), {})
 
@@ -184,11 +197,7 @@ def run_claude_spec(
     mounts = (
         (layout.workspace, "/workspace", False),
         (layout.claude_config, "/home/agent/.claude", False),
-        (
-            layout.claude_auth_file,
-            "/home/agent/.claude/.credentials.json",
-            False,
-        ),
+        (layout.claude_token_file, _CLAUDE_TOKEN_PATH, True),
         (layout.cache, "/home/agent/.cache", False),
         (layout.gh_dir, "/home/agent/.config/gh", True),
         (handover_project, f"/handovers/{layout.project_id}", False),
@@ -197,7 +206,8 @@ def run_claude_spec(
         argv += ["--mount", _mount(source, target, read_only)]
     argv += ["--env", "CLAUDE_CONFIG_DIR=/home/agent/.claude"]
     argv += ["--env", "AGENT_HANDOVER_ROOT=/handovers"]
-    argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image, "claude"]
+    argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image]
+    argv += _CLAUDE_LAUNCHER_PREFIX
     return CommandSpec(tuple(argv), {})
 
 

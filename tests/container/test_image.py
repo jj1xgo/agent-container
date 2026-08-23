@@ -40,7 +40,9 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertIn("USER agent", body)
         self.assertIn("WORKDIR /workspace", body)
         self.assertIn("COPY src /opt/agent-container/src", body)
+        self.assertIn("PYTHONPATH=/opt/agent-container/src", body)
         self.assertIn("COPY profiles/codex /opt/agent-container/profiles/codex", body)
+        self.assertNotRegex(body, r"(?m)^COPY\s+.*(?:credentials|oauth-token)")
 
     def test_image_reuses_base_node_identity_for_agent(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")

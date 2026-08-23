@@ -3,10 +3,10 @@ import os
 import unittest
 
 from agent_container.podman import auth_codex_spec
-from agent_container.podman import auth_claude_spec
 from agent_container.podman import codex_login_status_spec
-from agent_container.podman import claude_login_status_spec
 from agent_container.podman import build_image_spec
+from agent_container.podman import claude_setup_token_spec
+from agent_container.podman import claude_token_status_spec
 from agent_container.podman import cli_version_spec
 from agent_container.podman import clone_project_spec
 from agent_container.podman import run_codex_spec
@@ -76,29 +76,32 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertNotIn("/workspace", joined)
         self.assertNotIn("token", joined.lower())
 
-    def test_claude_auth_mounts_only_shared_claude_auth_directory(self) -> None:
-        layout = StateLayout(Path("/state"), "auth")
+    def test_claude_setup_token_uses_only_ephemeral_claude_config(self) -> None:
+        setup = claude_setup_token_spec(IMAGE)
 
-        spec = auth_claude_spec(layout, IMAGE)
+        self.assertEqual(setup.argv[-2:], ("claude", "setup-token"))
+        self.assertIn(
+            "--tmpfs=/home/agent/.claude:rw,nosuid,nodev,noexec,size=16m",
+            setup.argv,
+        )
+        self.assertIn("CLAUDE_CONFIG_DIR=/home/agent/.claude", setup.argv)
+        self.assertNotIn("--mount", setup.argv)
 
-        joined = " ".join(spec.argv)
-        self.assertIn("src=/state/shared-auth/claude,dst=/home/agent/.claude", joined)
+    def test_claude_token_status_mounts_only_the_staged_token_read_only(self) -> None:
+        status = claude_token_status_spec(Path("/private/staged"), IMAGE)
+
+        joined = " ".join(status.argv)
+        self.assertIn(
+            "src=/private/staged,dst=/run/secrets/claude-oauth-token,ro=true",
+            joined,
+        )
+        self.assertIn(
+            "--tmpfs=/home/agent/.claude:rw,nosuid,nodev,noexec,size=16m",
+            status.argv,
+        )
         self.assertIn("CLAUDE_CONFIG_DIR=/home/agent/.claude", joined)
+        self.assertEqual(status.argv[-3:], ("claude", "auth", "status"))
         self.assertNotIn("/workspace", joined)
-        self.assertNotIn("token", joined.lower())
-        self.assertEqual(spec.argv[-3:], ("claude", "auth", "login"))
-
-    def test_claude_login_status_uses_the_same_sanitized_auth_container(self) -> None:
-        layout = StateLayout(Path("/state"), "auth")
-
-        spec = claude_login_status_spec(layout, IMAGE)
-
-        joined = " ".join(spec.argv)
-        self.assertIn("src=/state/shared-auth/claude,dst=/home/agent/.claude", joined)
-        self.assertIn("CLAUDE_CONFIG_DIR=/home/agent/.claude", joined)
-        self.assertNotIn("/workspace", joined)
-        self.assertNotIn("token", joined.lower())
-        self.assertEqual(spec.argv[-3:], ("claude", "auth", "status"))
 
     def test_clone_uses_read_only_gh_config_without_credential_content(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")
@@ -166,19 +169,42 @@ class PodmanCommandTest(unittest.TestCase):
             ("/state/workspaces/agent-container", "/workspace"),
             ("/state/projects/agent-container/claude-config", "/home/agent/.claude"),
             (
-                "/state/shared-auth/claude/.credentials.json",
-                "/home/agent/.claude/.credentials.json",
+                "/state/shared-auth/claude/oauth-token",
+                "/run/secrets/claude-oauth-token",
             ),
             ("/state/projects/agent-container/cache", "/home/agent/.cache"),
             ("/state/gh", "/home/agent/.config/gh"),
             ("/vault/handovers/agent-container", "/handovers/agent-container"),
         ):
             self.assertIn(f"src={source},dst={target}", joined)
+        self.assertIn(
+            "type=bind,src=/state/projects/agent-container/claude-config,dst=/home/agent/.claude",
+            spec.argv,
+        )
         self.assertIn("src=/state/gh,dst=/home/agent/.config/gh,ro=true", joined)
+        self.assertIn(
+            "src=/state/shared-auth/claude/oauth-token,dst=/run/secrets/claude-oauth-token,ro=true",
+            joined,
+        )
         self.assertIn("CLAUDE_CONFIG_DIR=/home/agent/.claude", joined)
         self.assertIn("AGENT_PROJECT_ID=agent-container", joined)
         self.assertIn("AGENT_HANDOVER_ROOT=/handovers", joined)
-        self.assertEqual(spec.argv[-1], "claude")
+        self.assertEqual(
+            spec.argv[-7:],
+            (
+                IMAGE,
+                "python3",
+                "-m",
+                "agent_container.claude_launcher",
+                "/run/secrets/claude-oauth-token",
+                "--",
+                "claude",
+            ),
+        )
+        self.assertNotIn(".credentials.json", joined)
+        self.assertNotIn("s" * 32, joined)
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN=", joined)
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", spec.environment)
         self.assertNotIn("dangerously-skip-permissions", joined)
 
     def test_claude_run_rejects_uid_or_gid_other_than_current_process(self) -> None:
