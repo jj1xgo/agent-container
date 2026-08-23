@@ -289,6 +289,17 @@ class MigrationPlanningTest(MigrationTestCase):
                 plan_claude_migration(source, root / "destination")
             self.assertNotIn("SKIP denied credentials", str(caught.exception))
 
+    def test_render_rejects_control_characters_in_manual_destination(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            source = self.make_source(root)
+            plan = plan_claude_migration(source, root / "destination")
+            plan = replace(plan, destination=root / "forged\nCOPY file secret")
+
+            with self.assertRaisesRegex(ValueError, "control") as caught:
+                render_migration_plan(plan)
+            self.assertNotIn("COPY file secret", str(caught.exception))
+
     def test_existing_destination_is_rejected(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp).resolve()
@@ -362,6 +373,33 @@ class MigrationApplyTest(MigrationTestCase):
             self.assertFalse(destination.exists())
             self.assert_no_stage(destination)
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO requires POSIX")
+    def test_apply_opens_planned_files_nonblocking_before_rejecting_fifo(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            source = self.make_source(root)
+            destination = root / "destination"
+            plan = plan_claude_migration(source, destination)
+            (source / "CLAUDE.md").unlink()
+            os.mkfifo(source / "CLAUDE.md")
+            original_open = os.open
+            saw_nonblocking = False
+
+            def guarded_open(path, flags, *args, **kwargs):
+                nonlocal saw_nonblocking
+                if path == "CLAUDE.md" and kwargs.get("dir_fd") is not None:
+                    if not flags & os.O_NONBLOCK:
+                        raise AssertionError("planned file open would block on FIFO")
+                    saw_nonblocking = True
+                return original_open(path, flags, *args, **kwargs)
+
+            with patch("agent_container.migration.os.open", side_effect=guarded_open):
+                with self.assertRaisesRegex(ValueError, "changed type"):
+                    apply_claude_migration(plan)
+            self.assertTrue(saw_nonblocking)
+            self.assertFalse(destination.exists())
+            self.assert_no_stage(destination)
+
     def test_apply_rejects_settings_that_become_sensitive_after_planning(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp).resolve()
@@ -414,6 +452,67 @@ class MigrationApplyTest(MigrationTestCase):
             self.assertNotIn(
                 SECRET_MARKER,
                 (destination / "CLAUDE.md").read_text(encoding="utf-8"),
+            )
+
+    def test_apply_creates_outer_stage_without_reopening_parent_path(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            source = self.make_source(root)
+            destination = root / "destination"
+            plan = plan_claude_migration(source, destination)
+
+            with patch(
+                "tempfile.mkdtemp",
+                side_effect=AssertionError("destination parent pathname reopened"),
+            ):
+                apply_claude_migration(plan)
+
+            self.assertTrue(destination.is_dir())
+            self.assert_no_stage(destination)
+
+    def test_apply_publishes_held_payload_when_outer_stage_name_is_replaced(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            source = self.make_source(root)
+            destination = root / "destination"
+            plan = plan_claude_migration(source, destination)
+            original_copyfileobj = shutil.copyfileobj
+            replacement: Path | None = None
+
+            def replace_outer_during_copy(source_stream, destination_stream):
+                nonlocal replacement
+                if replacement is None:
+                    outer = next(
+                        destination.parent.glob(f".{destination.name}.migrate-*")
+                    )
+                    outer.rename(root / "original-outer-moved")
+                    outer.mkdir()
+                    replacement = outer
+                    (outer / "payload").mkdir()
+                    (outer / "payload/CLAUDE.md").write_text(
+                        SECRET_MARKER, encoding="utf-8"
+                    )
+                return original_copyfileobj(source_stream, destination_stream)
+
+            with patch(
+                "agent_container.migration.shutil.copyfileobj",
+                side_effect=replace_outer_during_copy,
+            ):
+                apply_claude_migration(plan)
+
+            self.assertEqual(
+                (destination / "CLAUDE.md").read_text(encoding="utf-8"),
+                "safe instructions\n",
+            )
+            self.assertNotIn(
+                SECRET_MARKER,
+                (destination / "CLAUDE.md").read_text(encoding="utf-8"),
+            )
+            self.assertIsNotNone(replacement)
+            assert replacement is not None
+            self.assertEqual(
+                (replacement / "payload/CLAUDE.md").read_text(encoding="utf-8"),
+                SECRET_MARKER,
             )
 
     def test_apply_leaves_late_existing_destination_unchanged(self) -> None:
@@ -478,6 +577,24 @@ class MigrationApplyTest(MigrationTestCase):
                     apply_claude_migration(plan)
             self.assertEqual(str(caught.exception), "migration filesystem operation failed")
             self.assertNotIn("DO-NOT-PRINT-COPY-FAILURE", str(caught.exception))
+            self.assertFalse(destination.exists())
+            self.assert_no_stage(destination)
+
+    def test_apply_sanitizes_unexpected_file_exists_error(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            source = self.make_source(root)
+            destination = root / "destination"
+            plan = plan_claude_migration(source, destination)
+
+            with patch(
+                "agent_container.migration.shutil.copyfileobj",
+                side_effect=FileExistsError("DO-NOT-PRINT-FILE-EXISTS"),
+            ):
+                with self.assertRaises(RuntimeError) as caught:
+                    apply_claude_migration(plan)
+            self.assertEqual(str(caught.exception), "migration filesystem operation failed")
+            self.assertNotIn("DO-NOT-PRINT-FILE-EXISTS", str(caught.exception))
             self.assertFalse(destination.exists())
             self.assert_no_stage(destination)
 

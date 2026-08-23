@@ -5,9 +5,9 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import stat
-import tempfile
 from typing import Any
 
 
@@ -58,6 +58,10 @@ class MigrationPlan:
     skipped: tuple[Path, ...]
 
 
+class _DestinationExistsError(FileExistsError):
+    pass
+
+
 def _lstat_if_present(path: Path) -> os.stat_result | None:
     try:
         return path.lstat()
@@ -81,7 +85,7 @@ def _validate_source_root(source: Path) -> Path:
     return resolved
 
 
-def _validate_destination(destination: Path) -> None:
+def _validate_destination_text(destination: Path) -> None:
     if not destination.is_absolute():
         raise ValueError("destination must be absolute")
     if any(
@@ -89,8 +93,12 @@ def _validate_destination(destination: Path) -> None:
         for character in destination.as_posix()
     ):
         raise ValueError("destination name must not contain control characters")
+
+
+def _validate_destination(destination: Path) -> None:
+    _validate_destination_text(destination)
     if _lstat_if_present(destination) is not None:
-        raise FileExistsError(destination)
+        raise _DestinationExistsError("migration destination already exists")
 
 
 def _safe_relative_path(relative_path: Path) -> Path:
@@ -225,6 +233,8 @@ def _open_relative_source(
             flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
             if not final or is_directory:
                 flags |= os.O_DIRECTORY
+            elif final:
+                flags |= os.O_NONBLOCK
             next_descriptor = os.open(part, flags, dir_fd=descriptor)
             os.close(descriptor)
             descriptor = next_descriptor
@@ -423,8 +433,52 @@ def _remove_known_stage(
         return
 
 
+def _create_outer_stage(
+    parent_descriptor: int, destination_name: str
+) -> tuple[str, int, os.stat_result]:
+    prefix = f".{destination_name}.migrate-"
+    for _ in range(128):
+        stage_name = f"{prefix}{secrets.token_hex(16)}"
+        try:
+            os.mkdir(stage_name, mode=0o700, dir_fd=parent_descriptor)
+        except FileExistsError:
+            continue
+
+        created_identity = os.stat(
+            stage_name, dir_fd=parent_descriptor, follow_symlinks=False
+        )
+        stage_descriptor = -1
+        try:
+            stage_descriptor = os.open(
+                stage_name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_descriptor,
+            )
+            opened_identity = os.fstat(stage_descriptor)
+            if not _same_identity(created_identity, opened_identity):
+                raise RuntimeError("migration staging directory identity changed")
+            os.fchmod(stage_descriptor, 0o700)
+            return stage_name, stage_descriptor, opened_identity
+        except BaseException:
+            if stage_descriptor >= 0:
+                os.close(stage_descriptor)
+            try:
+                current_identity = os.stat(
+                    stage_name, dir_fd=parent_descriptor, follow_symlinks=False
+                )
+                if _same_identity(created_identity, current_identity):
+                    os.rmdir(stage_name, dir_fd=parent_descriptor)
+            except OSError:
+                pass
+            raise
+    raise RuntimeError("unable to create private migration staging directory")
+
+
 def _rename_noreplace(
-    parent_descriptor: int, source_name: str, destination_name: str
+    source_parent_descriptor: int,
+    source_name: str,
+    destination_parent_descriptor: int,
+    destination_name: str,
 ) -> None:
     # Publishing is intentionally Linux-specific: libc renameat2 with
     # RENAME_NOREPLACE is the only atomic directory no-overwrite primitive
@@ -441,9 +495,9 @@ def _rename_noreplace(
     )
     renameat2.restype = ctypes.c_int
     result = renameat2(
-        parent_descriptor,
+        source_parent_descriptor,
         os.fsencode(source_name),
-        parent_descriptor,
+        destination_parent_descriptor,
         os.fsencode(destination_name),
         1,
     )
@@ -451,7 +505,7 @@ def _rename_noreplace(
         return
     error_number = ctypes.get_errno()
     if error_number == errno.EEXIST:
-        raise FileExistsError("migration destination already exists")
+        raise _DestinationExistsError("migration destination already exists")
     if error_number in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP}:
         raise RuntimeError("atomic no-replace migration publish is unavailable")
     raise OSError(error_number, "atomic migration publish failed")
@@ -462,6 +516,7 @@ def apply_claude_migration(plan: MigrationPlan) -> Path:
     source_descriptor = -1
     parent_descriptor = -1
     stage_descriptor = -1
+    payload_descriptor = -1
     stage_name: str | None = None
     stage_identity: os.stat_result | None = None
     published = False
@@ -472,25 +527,16 @@ def apply_claude_migration(plan: MigrationPlan) -> Path:
         parent_descriptor = _open_absolute_directory_nofollow(
             plan.destination.parent, "destination parent"
         )
-        stage = Path(
-            tempfile.mkdtemp(
-                prefix=f".{plan.destination.name}.migrate-",
-                dir=plan.destination.parent,
-            )
+        stage_name, stage_descriptor, stage_identity = _create_outer_stage(
+            parent_descriptor, plan.destination.name
         )
-        stage_name = stage.name
-        stage_descriptor = os.open(
-            stage_name,
+        os.mkdir("payload", mode=0o700, dir_fd=stage_descriptor)
+        payload_descriptor = os.open(
+            "payload",
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-            dir_fd=parent_descriptor,
+            dir_fd=stage_descriptor,
         )
-        stage_identity = os.fstat(stage_descriptor)
-        named_identity = os.stat(
-            stage_name, dir_fd=parent_descriptor, follow_symlinks=False
-        )
-        if not _same_identity(stage_identity, named_identity):
-            raise RuntimeError("migration staging directory identity changed")
-        os.fchmod(stage_descriptor, 0o700)
+        os.fchmod(payload_descriptor, 0o700)
 
         for entry in plan.entries:
             entry_descriptor, _ = _validate_planned_source_entry(
@@ -500,14 +546,14 @@ def apply_claude_migration(plan: MigrationPlan) -> Path:
             try:
                 if entry.is_directory:
                     directory_descriptor = _open_stage_directory(
-                        stage_descriptor, relative_path
+                        payload_descriptor, relative_path
                     )
                     os.close(directory_descriptor)
                     continue
 
                 mode = 0o700 if entry.executable else 0o600
                 target_descriptor = _open_staged_file(
-                    stage_descriptor, relative_path, mode
+                    payload_descriptor, relative_path, mode
                 )
                 try:
                     if relative_path == Path("settings.json"):
@@ -531,7 +577,7 @@ def apply_claude_migration(plan: MigrationPlan) -> Path:
             relative_path = _safe_relative_path(generated.relative_path)
             mode = 0o700 if generated.executable else 0o600
             target_descriptor = _open_staged_file(
-                stage_descriptor, relative_path, mode
+                payload_descriptor, relative_path, mode
             )
             try:
                 _write_all(target_descriptor, generated.body)
@@ -540,10 +586,18 @@ def apply_claude_migration(plan: MigrationPlan) -> Path:
                 os.close(target_descriptor)
 
         _validate_destination(plan.destination)
-        _rename_noreplace(parent_descriptor, stage_name, plan.destination.name)
+        _rename_noreplace(
+            stage_descriptor,
+            "payload",
+            parent_descriptor,
+            plan.destination.name,
+        )
         published = True
+        _remove_known_stage(
+            parent_descriptor, stage_name, stage_descriptor, stage_identity
+        )
         return plan.destination
-    except FileExistsError:
+    except _DestinationExistsError:
         if (
             not published
             and parent_descriptor >= 0
@@ -554,7 +608,7 @@ def apply_claude_migration(plan: MigrationPlan) -> Path:
             _remove_known_stage(
                 parent_descriptor, stage_name, stage_descriptor, stage_identity
             )
-        raise
+        raise FileExistsError("migration destination already exists") from None
     except OSError:
         if (
             not published
@@ -580,6 +634,8 @@ def apply_claude_migration(plan: MigrationPlan) -> Path:
             )
         raise
     finally:
+        if payload_descriptor >= 0:
+            os.close(payload_descriptor)
         if stage_descriptor >= 0:
             os.close(stage_descriptor)
         if parent_descriptor >= 0:
@@ -589,6 +645,7 @@ def apply_claude_migration(plan: MigrationPlan) -> Path:
 
 
 def render_migration_plan(plan: MigrationPlan) -> tuple[str, ...]:
+    _validate_destination_text(plan.destination)
     lines = []
     for entry in plan.entries:
         relative_path = _safe_relative_path(entry.relative_path)
