@@ -107,6 +107,25 @@ def codex_login_status_spec(layout: StateLayout, image: str) -> CommandSpec:
     return CommandSpec(tuple(argv), {})
 
 
+def _claude_auth_prefix(layout: StateLayout) -> list[str]:
+    argv = _runtime_prefix(os.getuid(), os.getgid())
+    argv += ["--mount", _mount(layout.claude_auth_dir, "/home/agent/.claude")]
+    argv += ["--env", "CLAUDE_CONFIG_DIR=/home/agent/.claude"]
+    return argv
+
+
+def auth_claude_spec(layout: StateLayout, image: str) -> CommandSpec:
+    argv = _claude_auth_prefix(layout)
+    argv += [image, "claude", "auth", "login"]
+    return CommandSpec(tuple(argv), {})
+
+
+def claude_login_status_spec(layout: StateLayout, image: str) -> CommandSpec:
+    argv = _claude_auth_prefix(layout)
+    argv += [image, "claude", "auth", "status"]
+    return CommandSpec(tuple(argv), {})
+
+
 def clone_project_spec(
     layout: StateLayout, repository: Repository, image: str
 ) -> CommandSpec:

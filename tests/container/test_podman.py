@@ -3,7 +3,9 @@ import os
 import unittest
 
 from agent_container.podman import auth_codex_spec
+from agent_container.podman import auth_claude_spec
 from agent_container.podman import codex_login_status_spec
+from agent_container.podman import claude_login_status_spec
 from agent_container.podman import build_image_spec
 from agent_container.podman import cli_version_spec
 from agent_container.podman import clone_project_spec
@@ -72,6 +74,30 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertEqual(spec.argv[-3:], ("codex", "login", "status"))
         self.assertNotIn("/workspace", joined)
         self.assertNotIn("token", joined.lower())
+
+    def test_claude_auth_mounts_only_shared_claude_auth_directory(self) -> None:
+        layout = StateLayout(Path("/state"), "auth")
+
+        spec = auth_claude_spec(layout, IMAGE)
+
+        joined = " ".join(spec.argv)
+        self.assertIn("src=/state/shared-auth/claude,dst=/home/agent/.claude", joined)
+        self.assertIn("CLAUDE_CONFIG_DIR=/home/agent/.claude", joined)
+        self.assertNotIn("/workspace", joined)
+        self.assertNotIn("token", joined.lower())
+        self.assertEqual(spec.argv[-3:], ("claude", "auth", "login"))
+
+    def test_claude_login_status_uses_the_same_sanitized_auth_container(self) -> None:
+        layout = StateLayout(Path("/state"), "auth")
+
+        spec = claude_login_status_spec(layout, IMAGE)
+
+        joined = " ".join(spec.argv)
+        self.assertIn("src=/state/shared-auth/claude,dst=/home/agent/.claude", joined)
+        self.assertIn("CLAUDE_CONFIG_DIR=/home/agent/.claude", joined)
+        self.assertNotIn("/workspace", joined)
+        self.assertNotIn("token", joined.lower())
+        self.assertEqual(spec.argv[-3:], ("claude", "auth", "status"))
 
     def test_clone_uses_read_only_gh_config_without_credential_content(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")

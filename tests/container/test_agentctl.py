@@ -265,6 +265,133 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
             self.assertIn("mode 0600", stderr.getvalue())
             self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
 
+    def test_claude_auth_creates_private_state_and_runs_login_status(self) -> None:
+        with TemporaryDirectory() as temp:
+            calls = []
+            environment = {"AGENT_CONTAINER_HOME": temp}
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-3:] == ("claude", "auth", "login"):
+                    auth_file = Path(temp) / "shared-auth/claude/.credentials.json"
+                    auth_file.write_text("fixture-not-a-token", encoding="utf-8")
+                    auth_file.chmod(0o600)
+                return self._successful_probe(spec)
+
+            result = main(["auth", "claude"], environment=environment, runner=runner)
+
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                (Path(temp) / "shared-auth/claude").stat().st_mode & 0o777, 0o700
+            )
+            self.assertEqual(len(calls), 5)
+            self.assertEqual(calls[3].argv[-3:], ("claude", "auth", "login"))
+            self.assertEqual(calls[4].argv[-3:], ("claude", "auth", "status"))
+
+    def test_claude_auth_missing_image_does_not_create_state(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "new-state"
+            calls = []
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[:3] == ("podman", "image", "exists"):
+                    return subprocess.CompletedProcess(spec.argv, 31)
+                return self._successful_probe(spec)
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 31)
+            self.assertEqual(len(calls), 3)
+            self.assertFalse(root.exists())
+
+    def test_claude_auth_rejects_broad_credential_file_before_status(self) -> None:
+        with TemporaryDirectory() as temp:
+            calls = []
+            stderr = StringIO()
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-3:] == ("claude", "auth", "login"):
+                    auth_file = Path(temp) / "shared-auth/claude/.credentials.json"
+                    auth_file.write_text(
+                        "DO-NOT-PRINT-CLAUDE-CREDENTIAL", encoding="utf-8"
+                    )
+                    auth_file.chmod(0o644)
+                return self._successful_probe(spec)
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=runner,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(len(calls), 4)
+            self.assertIn("mode 0600", stderr.getvalue())
+            self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", stderr.getvalue())
+
+    def test_claude_auth_rejects_symlinked_credential_before_status(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            auth_dir = root / "shared-auth/claude"
+            auth_dir.mkdir(parents=True, mode=0o700)
+            root.chmod(0o700)
+            auth_dir.parent.chmod(0o700)
+            credential_target = root / "credential-target"
+            credential_target.write_text(
+                "DO-NOT-PRINT-CLAUDE-CREDENTIAL", encoding="utf-8"
+            )
+            credential_target.chmod(0o600)
+            (auth_dir / ".credentials.json").symlink_to(credential_target)
+            calls = []
+            stderr = StringIO()
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=lambda spec: calls.append(spec),
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(calls, [])
+            self.assertIn("must not be a symlink", stderr.getvalue())
+            self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", stderr.getvalue())
+
+    def test_claude_auth_propagates_login_status_failure(self) -> None:
+        with TemporaryDirectory() as temp:
+            calls = []
+            stderr = StringIO()
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-3:] == ("claude", "auth", "login"):
+                    auth_file = Path(temp) / "shared-auth/claude/.credentials.json"
+                    auth_file.write_text(
+                        "DO-NOT-PRINT-CLAUDE-CREDENTIAL", encoding="utf-8"
+                    )
+                    auth_file.chmod(0o600)
+                if spec.argv[-3:] == ("claude", "auth", "status"):
+                    return subprocess.CompletedProcess(spec.argv, 17)
+                return self._successful_probe(spec)
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=runner,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 17)
+            self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", stderr.getvalue())
+
 
 class AgentCtlProjectTest(unittest.TestCase):
     def _authenticated_state(self, root: Path) -> None:

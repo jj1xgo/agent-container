@@ -12,10 +12,12 @@ from typing import TextIO
 
 from agent_container.podman import CommandSpec
 from agent_container.podman import auth_codex_spec
+from agent_container.podman import auth_claude_spec
 from agent_container.podman import build_image_spec
 from agent_container.podman import clone_project_spec
 from agent_container.podman import cli_version_spec
 from agent_container.podman import codex_login_status_spec
+from agent_container.podman import claude_login_status_spec
 from agent_container.podman import podman_image_exists_spec
 from agent_container.podman import podman_rootless_spec
 from agent_container.podman import podman_version_spec
@@ -138,6 +140,26 @@ def _validate_existing_codex_auth(layout: StateLayout) -> None:
             ensure_private_directory(directory)
     if layout.codex_auth_file.exists() or layout.codex_auth_file.is_symlink():
         ensure_private_file(layout.codex_auth_file)
+
+
+def _prepare_claude_auth(layout: StateLayout) -> None:
+    ensure_private_directory(layout.root, create=True)
+    ensure_private_directory(layout.root / "shared-auth", create=True)
+    ensure_private_directory(layout.claude_auth_dir, create=True)
+    if layout.claude_auth_file.exists() or layout.claude_auth_file.is_symlink():
+        ensure_private_file(layout.claude_auth_file)
+
+
+def _validate_existing_claude_auth(layout: StateLayout) -> None:
+    for directory in (
+        layout.root,
+        layout.root / "shared-auth",
+        layout.claude_auth_dir,
+    ):
+        if directory.exists() or directory.is_symlink():
+            ensure_private_directory(directory)
+    if layout.claude_auth_file.exists() or layout.claude_auth_file.is_symlink():
+        ensure_private_file(layout.claude_auth_file)
 
 
 def _resolve_handover_root(handover_root: Path, project_id: str) -> Path:
@@ -570,6 +592,17 @@ def main(
             runner(auth_codex_spec(layout, arguments.image))
             ensure_private_file(layout.codex_auth_file)
             status_spec = codex_login_status_spec(layout, arguments.image)
+            _require_success(runner(status_spec), status_spec)
+            return 0
+        if arguments.command == "auth" and arguments.agent == "claude":
+            layout = StateLayout.from_environment("auth", environment)
+            _ensure_exact_state_root(layout, environment)
+            _validate_existing_claude_auth(layout)
+            _podman_preflight(runner, image_required=arguments.image)
+            _prepare_claude_auth(layout)
+            runner(auth_claude_spec(layout, arguments.image))
+            ensure_private_file(layout.claude_auth_file)
+            status_spec = claude_login_status_spec(layout, arguments.image)
             _require_success(runner(status_spec), status_spec)
             return 0
         if arguments.command == "project" and arguments.project_command == "add":
