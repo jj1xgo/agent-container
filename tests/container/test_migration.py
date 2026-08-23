@@ -106,6 +106,51 @@ class MigrationPlanningTest(MigrationTestCase):
                 }.issubset(rendered)
             )
 
+    def test_plan_skips_denied_names_at_every_depth(self) -> None:
+        nested_denied = (
+            ".credentials.json",
+            ".claude.json",
+            ".git",
+            "projects",
+            "sessions",
+            "transcripts",
+            "handovers",
+            "plans",
+            "state",
+            "cache",
+            "logs",
+            "test-results",
+            "scratchpad",
+        )
+        with TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            source = self.make_source(root)
+            nested_root = source / "skills/demo"
+            for name in nested_denied:
+                denied = nested_root / name
+                if name.endswith(".json"):
+                    denied.write_text(SECRET_MARKER, encoding="utf-8")
+                else:
+                    denied.mkdir()
+                    (denied / "secret").write_text(SECRET_MARKER, encoding="utf-8")
+
+            plan = plan_claude_migration(source, root / "destination")
+
+            selected = {entry.relative_path.as_posix() for entry in plan.entries}
+            self.assertFalse(
+                any(
+                    f"/{name}" in f"/{relative_path}"
+                    for name in nested_denied
+                    for relative_path in selected
+                )
+            )
+            self.assertTrue(
+                {
+                    Path("skills/demo") / name for name in nested_denied
+                }.issubset(set(plan.skipped))
+            )
+            self.assertNotIn(SECRET_MARKER, "\n".join(render_migration_plan(plan)))
+
     def test_settings_must_be_an_object(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp).resolve()
@@ -152,6 +197,23 @@ class MigrationPlanningTest(MigrationTestCase):
                 with self.assertRaises(ValueError) as caught:
                     plan_claude_migration(source, root / "destination")
                 self.assertIn(name, str(caught.exception))
+                self.assertNotIn("do-not-leak", str(caught.exception))
+
+    def test_settings_reject_duplicate_keys_without_values(self) -> None:
+        payloads = (
+            '{"parent": "safe", "parent": "do-not-leak"}',
+            '{"env": {"SAFE": "safe", "SAFE": "do-not-leak"}}',
+            '{"apiKeyHelper": "safe", "apiKeyHelper": "do-not-leak"}',
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload), TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                source = self.make_source(root)
+                (source / "settings.json").write_text(payload, encoding="utf-8")
+
+                with self.assertRaises(ValueError) as caught:
+                    plan_claude_migration(source, root / "destination")
+                self.assertIn("duplicate", str(caught.exception))
                 self.assertNotIn("do-not-leak", str(caught.exception))
 
     def test_source_must_be_absolute(self) -> None:
@@ -214,6 +276,18 @@ class MigrationPlanningTest(MigrationTestCase):
             with patch.object(Path, "iterdir", escaping_iterdir):
                 with self.assertRaisesRegex(ValueError, "escapes source"):
                     plan_claude_migration(source, root / "destination")
+
+    def test_control_characters_in_allowlisted_names_are_rejected(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            source = self.make_source(root)
+            (source / "hooks/forged\nSKIP denied credentials").write_text(
+                "safe", encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(ValueError, "control") as caught:
+                plan_claude_migration(source, root / "destination")
+            self.assertNotIn("SKIP denied credentials", str(caught.exception))
 
     def test_existing_destination_is_rejected(self) -> None:
         with TemporaryDirectory() as temp:
@@ -304,6 +378,44 @@ class MigrationApplyTest(MigrationTestCase):
             self.assertFalse(destination.exists())
             self.assert_no_stage(destination)
 
+    def test_apply_copies_from_same_descriptor_when_source_name_becomes_symlink(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            source = self.make_source(root)
+            destination = root / "destination"
+            outside = root / "outside"
+            outside.write_text(SECRET_MARKER, encoding="utf-8")
+            plan = plan_claude_migration(source, destination)
+            original_copyfileobj = shutil.copyfileobj
+            mutated = False
+
+            def mutate_during_copy(source_stream, destination_stream, *args, **kwargs):
+                nonlocal mutated
+                if not mutated:
+                    claude_file = source / "CLAUDE.md"
+                    claude_file.unlink()
+                    claude_file.symlink_to(outside)
+                    mutated = True
+                return original_copyfileobj(
+                    source_stream, destination_stream, *args, **kwargs
+                )
+
+            with patch(
+                "agent_container.migration.shutil.copyfileobj",
+                side_effect=mutate_during_copy,
+            ):
+                apply_claude_migration(plan)
+
+            self.assertTrue(mutated)
+            self.assertEqual(
+                (destination / "CLAUDE.md").read_text(encoding="utf-8"),
+                "safe instructions\n",
+            )
+            self.assertNotIn(
+                SECRET_MARKER,
+                (destination / "CLAUDE.md").read_text(encoding="utf-8"),
+            )
+
     def test_apply_leaves_late_existing_destination_unchanged(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp).resolve()
@@ -319,6 +431,35 @@ class MigrationApplyTest(MigrationTestCase):
             self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
             self.assert_no_stage(destination)
 
+    def test_apply_does_not_replace_destination_created_at_publish(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            source = self.make_source(root)
+            destination = root / "destination"
+            plan = plan_claude_migration(source, destination)
+            from agent_container import migration
+
+            original_validate = migration._validate_destination
+            validations = 0
+
+            def create_destination_after_final_check(path: Path) -> None:
+                nonlocal validations
+                original_validate(path)
+                validations += 1
+                if validations == 2:
+                    destination.mkdir()
+
+            with patch.object(
+                migration,
+                "_validate_destination",
+                side_effect=create_destination_after_final_check,
+            ):
+                with self.assertRaises(FileExistsError):
+                    apply_claude_migration(plan)
+            self.assertTrue(destination.is_dir())
+            self.assertEqual(list(destination.iterdir()), [])
+            self.assert_no_stage(destination)
+
     def test_apply_cleans_stage_after_copy_failure(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp).resolve()
@@ -328,12 +469,54 @@ class MigrationApplyTest(MigrationTestCase):
 
             with patch(
                 "agent_container.migration.shutil.copyfile",
-                side_effect=OSError("copy failed"),
+                side_effect=OSError("DO-NOT-PRINT-COPY-FAILURE"),
+            ), patch(
+                "agent_container.migration.shutil.copyfileobj",
+                side_effect=OSError("DO-NOT-PRINT-COPY-FAILURE"),
             ):
-                with self.assertRaisesRegex(OSError, "copy failed"):
+                with self.assertRaises(RuntimeError) as caught:
                     apply_claude_migration(plan)
+            self.assertEqual(str(caught.exception), "migration filesystem operation failed")
+            self.assertNotIn("DO-NOT-PRINT-COPY-FAILURE", str(caught.exception))
             self.assertFalse(destination.exists())
             self.assert_no_stage(destination)
+
+    def test_cleanup_does_not_delete_a_replacement_stage_directory(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            source = self.make_source(root)
+            destination = root / "destination"
+            plan = plan_claude_migration(source, destination)
+            replacement: Path | None = None
+
+            def replace_stage_and_fail(*args, **kwargs):
+                nonlocal replacement
+                stage = next(
+                    destination.parent.glob(f".{destination.name}.migrate-*")
+                )
+                stage.rename(root / "original-stage-moved")
+                stage.mkdir()
+                replacement = stage
+                (stage / "replacement-marker").write_text("keep", encoding="utf-8")
+                raise OSError("DO-NOT-PRINT-CLEANUP-FAILURE")
+
+            with patch(
+                "agent_container.migration.shutil.copyfile",
+                side_effect=replace_stage_and_fail,
+            ), patch(
+                "agent_container.migration.shutil.copyfileobj",
+                side_effect=replace_stage_and_fail,
+            ):
+                with self.assertRaises(RuntimeError):
+                    apply_claude_migration(plan)
+
+            self.assertIsNotNone(replacement)
+            assert replacement is not None
+            self.assertEqual(
+                (replacement / "replacement-marker").read_text(encoding="utf-8"),
+                "keep",
+            )
+            self.assertFalse(destination.exists())
 
 
 if __name__ == "__main__":
