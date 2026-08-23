@@ -1172,6 +1172,38 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", rendered)
             self.assertNotIn("DO-NOT-PRINT-PROBE-STDERR", rendered)
 
+    def test_doctor_does_not_print_state_root_in_claude_validation_failures(self) -> None:
+        marker = "DO-NOT-PRINT-STATE-ROOT"
+        cases = (
+            ("claude-auth", "shared-auth/claude/.credentials.json"),
+            ("claude-config", "projects/agent-container/claude-config"),
+        )
+        for failed_check, relative_path in cases:
+            with self.subTest(check=failed_check), TemporaryDirectory() as temp:
+                state_parent = Path(temp) / marker
+                state_parent.mkdir()
+                root, _ = self._runtime_state(str(state_parent))
+                config = root / "projects/agent-container/claude-config"
+                config.mkdir(mode=0o700)
+                if failed_check == "claude-auth":
+                    (root / relative_path).unlink()
+                else:
+                    config.rmdir()
+                output = StringIO()
+
+                result = main(
+                    ["doctor", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=self._successful_doctor_runner,
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stdout=output,
+                )
+
+                rendered = output.getvalue()
+                self.assertEqual(result, 1)
+                self.assertIn(f"FAIL  {failed_check}:", rendered)
+                self.assertNotIn(marker, rendered)
+
     def test_doctor_failure_is_nonzero_and_does_not_print_secret_values(self) -> None:
         with TemporaryDirectory() as temp:
             root, _ = self._runtime_state(temp)

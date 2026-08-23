@@ -431,11 +431,13 @@ def _podman_preflight(
 
 
 def _check_failure_detail(error: Exception) -> str:
-    if isinstance(error, OSError) and not isinstance(
-        error, (PermissionError, FileNotFoundError)
-    ):
+    if isinstance(error, OSError):
         return "filesystem operation failed"
-    return str(error)
+    if isinstance(error, ValueError):
+        return "state validation failed"
+    if isinstance(error, subprocess.CalledProcessError):
+        return "command failed"
+    return "check failed"
 
 
 def _doctor(
