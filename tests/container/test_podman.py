@@ -49,6 +49,8 @@ class PodmanCommandTest(unittest.TestCase):
                     "--read-only",
                     "--cap-drop=all",
                     "--security-opt=no-new-privileges",
+                    "--userns=keep-id:uid=1000,gid=1000",
+                    "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
                 ):
                     self.assertIn(required, spec.argv)
 
