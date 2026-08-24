@@ -116,6 +116,20 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
                 self.assertEqual(result, 1)
                 self.assertEqual(calls, [])
 
+    def test_build_rejects_invalid_node_version_before_any_runner_call(self) -> None:
+        calls = []
+        stderr = StringIO()
+
+        result = main(
+            ["build", "--node-version", "../bad"],
+            runner=lambda spec: calls.append(spec),
+            stderr=stderr,
+        )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(calls, [])
+        self.assertIn("version", stderr.getvalue())
+
     def test_build_uses_requested_versions_and_prints_ordered_cli_probes(self) -> None:
         calls = []
         stdout = StringIO()
@@ -129,13 +143,22 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
             return self._successful_probe(spec)
 
         result = main(
-            ["build", "--codex-version", "0.149.0", "--claude-version", "1.2.3"],
+            [
+                "build",
+                "--node-version",
+                "22.23.1",
+                "--codex-version",
+                "0.149.0",
+                "--claude-version",
+                "1.2.3",
+            ],
             runner=runner,
             stdout=stdout,
             cachebuster_reader=lambda: "12345",
         )
 
         self.assertEqual(result, 0)
+        self.assertIn("NODE_VERSION=22.23.1", calls[2].argv)
         self.assertIn("CODEX_VERSION=0.149.0", calls[2].argv)
         self.assertIn("CLAUDE_VERSION=1.2.3", calls[2].argv)
         self.assertIn("AGENT_CLI_CACHEBUST=12345", calls[2].argv)
@@ -2295,7 +2318,14 @@ class AgentCtlMigrationTest(unittest.TestCase):
 class AgentCtlParserTest(unittest.TestCase):
     def test_new_command_contract(self) -> None:
         build = parser().parse_args(["build"])
-        self.assertEqual((build.codex_version, build.claude_version), ("latest", "latest"))
+        self.assertEqual(
+            (
+                getattr(build, "node_version", None),
+                build.codex_version,
+                build.claude_version,
+            ),
+            ("latest", "latest", "latest"),
+        )
         self.assertEqual(parser().parse_args(["run", "p"]).agent, "codex")
         self.assertEqual(
             parser().parse_args(["run", "p", "--agent", "claude"]).agent,

@@ -67,6 +67,7 @@ def _git_environment_args(
 def build_image_spec(
     repo_root: Path,
     image: str,
+    node_version: str,
     codex_version: str,
     claude_version: str,
     cachebuster: str,
@@ -76,6 +77,8 @@ def build_image_spec(
         (
             "podman",
             "build",
+            "--build-arg",
+            f"NODE_VERSION={node_version}",
             "--build-arg",
             f"CODEX_VERSION={codex_version}",
             "--build-arg",

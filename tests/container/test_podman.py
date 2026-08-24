@@ -20,12 +20,16 @@ IMAGE = "localhost/agent-container:dev"
 
 class PodmanCommandTest(unittest.TestCase):
     def test_build_uses_versions_cachebuster_and_repository_context(self) -> None:
-        spec = build_image_spec(Path("/repo"), IMAGE, "0.149.0", "1.2.3", "12345")
+        spec = build_image_spec(
+            Path("/repo"), IMAGE, "22.23.1", "0.149.0", "1.2.3", "12345"
+        )
         self.assertEqual(
             spec.argv,
             (
                 "podman",
                 "build",
+                "--build-arg",
+                "NODE_VERSION=22.23.1",
                 "--build-arg",
                 "CODEX_VERSION=0.149.0",
                 "--build-arg",

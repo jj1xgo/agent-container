@@ -92,6 +92,7 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--image", default=DEFAULT_IMAGE)
     subcommands = command.add_subparsers(dest="command", required=True)
     build = subcommands.add_parser("build")
+    build.add_argument("--node-version", default="latest")
     build.add_argument("--codex-version", default="latest")
     build.add_argument("--claude-version", default="latest")
     auth = subcommands.add_parser("auth")
@@ -757,6 +758,7 @@ def main(
         arguments = parser().parse_args(argv)
         _validate_image(arguments.image)
         if arguments.command == "build":
+            validate_version(arguments.node_version)
             validate_version(arguments.codex_version)
             validate_version(arguments.claude_version)
         elif arguments.command == "auth":
@@ -777,6 +779,7 @@ def main(
                 build_image_spec(
                     repository_root,
                     arguments.image,
+                    arguments.node_version,
                     arguments.codex_version,
                     arguments.claude_version,
                     cachebuster_reader(),
