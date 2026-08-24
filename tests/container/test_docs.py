@@ -143,3 +143,24 @@ class Phase2DocumentationTest(unittest.TestCase):
             self.assertIn(expected, body)
 
         self.assertIn("即座に停止", body)
+
+    def test_operator_docs_define_final_nested_claude_constraints(self) -> None:
+        phase2 = (ROOT / "docs/phase2-claude-code.md").read_text(encoding="utf-8")
+        codex = (ROOT / "docs/codex-operations.md").read_text(encoding="utf-8")
+
+        for expected in (
+            "global scrubは意図的に設定しません",
+            "強いsandboxを強制",
+            "hooksとMCPは初期状態で無効",
+            "review済みHTTP MCP",
+            "stdio MCP",
+            "parent_token_via_proc_readable=true",
+            "運用を停止",
+            "--read-only",
+            "--cap-drop=all",
+            "no-new-privileges",
+        ):
+            self.assertIn(expected, phase2)
+
+        self.assertIn("Claudeのmanaged sandbox", codex)
+        self.assertIn("Codexのhook設定とは別", codex)

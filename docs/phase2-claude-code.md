@@ -127,7 +127,7 @@ CodexとClaudeの状態を一度に診断する場合は、共通checkを一回�
 bin/agentctl doctor PROJECT --agent all
 ```
 
-`doctor`はrootless Podman、image、CLI version、private state、認証file、Claude config、専用`gh`設定、workspaceのHTTPS origin、project handover境界を診断します。Claudeでは`claude-auth`がtokenの通常file・owner・mode・format、`claude-auth-status`がlauncher経由のlocal status、`claude-config`がproject config directory、`claude-project-credentials`がproject config内の`.credentials.json`不在を表します。`WARN network-policy`は既知のnetwork制約であり、`FAIL`が一つでもあれば非zeroで終了します。出力は存在・mode・check結果だけで、credential本文や環境変数値を出しません。
+`doctor`はrootless Podman、image、CLI version、private state、認証file、Claude config、専用`gh`設定、workspaceのHTTPS origin、project handover境界を診断します。Claudeでは`claude-managed-policy`がimage内のimmutable policy、`claude-auth`がtokenの通常file・owner・mode・format、`claude-auth-status`がlauncher経由のlocal status、`claude-config`がproject config directory、`claude-project-credentials`がproject config内の`.credentials.json`不在を表します。`WARN network-policy`は既知のnetwork制約であり、`FAIL`が一つでもあれば非zeroで終了します。出力は存在・mode・check結果だけで、policy本文、credential本文、環境変数値を出しません。
 
 `claude-auth-status`のPASSだけではtokenが現在のAPI inferenceに使える証明になりません。staleまたはrevoked tokenでもlocal statusが成功し、実inferenceがHTTP 401になる可能性があるため、host smokeでは必ず最小の実API応答も確認します。
 
@@ -163,7 +163,11 @@ Claudeを通常終了した後は同じprojectを同じ`run --agent claude`で�
 
 containerは`--read-only`、`--cap-drop=all`、`no-new-privileges`、host userと一致するkeep-id namespace、bounded `/tmp` tmpfs、Linuxのcontainer PID namespaceを使います。Claude向けpermission bypass optionは渡しません。`CLAUDE_CONFIG_DIR=/home/agent/.claude`、`AGENT_PROJECT_ID`、`AGENT_HANDOVER_ROOT=/handovers`を設定します。
 
-専用launcherだけがsecret fileを`O_NOFOLLOW`で開いてtokenをClaude processへ渡します。tokenはPodman argvにもhost環境にも入りません。launcherは`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`を必須設定し、ClaudeのBash、hooks、MCP stdio serverなどのsubprocessへ`CLAUDE_CODE_OAUTH_TOKEN`やAnthropic/cloud credential環境変数を継承させません。確認時も環境一覧、値、prefix、長さ、process environment、secret file本文を表示せず、「存在しない」というbooleanだけを記録します。
+専用launcherだけがsecret fileを`O_NOFOLLOW`で開いてtokenをClaude親processへ渡します。tokenはPodman argvにもhost環境にも入りません。現在のClaude Codeでは`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`がrootless Podman内で利用できない強いsandboxを強制し、新しい`/proc`のmountに失敗するため、global scrubは意図的に設定しません。
+
+代わりに、image内のEnterprise managed settingsでweaker nested sandboxを有効にし、unsandboxed fallbackを禁止します。credential環境変数とtoken fileへのsubprocess access、built-in Readによるtoken path参照を拒否し、hooksとMCPは初期状態で無効にします。review済みHTTP MCPは将来managed policyへ追加できますが、stdio MCPはglobal scrubとnested modeが安全に共存できるまで無効のままです。
+
+外側のPodman制約である`--read-only`、`--cap-drop=all`、`no-new-privileges`、keep-id、狭いmount、container PID namespace、bounded tmpfsは変更しません。weaker nested modeではClaude親processが既存`/proc`に見える可能性があるため、実hostでは専用probeの`parent_token_via_proc_readable=false`を必須にします。`parent_token_via_proc_readable=true`、token fileを読める、またはBash環境にtokenが見える場合は運用を停止し、sandboxを無効化して再試行しません。確認時も環境一覧、値、prefix、長さ、hash、process environment、secret fileや`/proc/*/environ`の本文を表示しません。
 
 ## 障害時
 
