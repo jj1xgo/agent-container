@@ -44,9 +44,9 @@ def exec_claude(
         raise ValueError("Claude command arguments must not be empty")
     token = load_token(token_path)
     environment = os.environ.copy()
+    environment.pop("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", None)
     environment["IS_DEMO"] = "1"
     environment["CLAUDE_CODE_OAUTH_TOKEN"] = token
-    environment["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1"
     execvpe(argv[0], argv, environment)
 
 
