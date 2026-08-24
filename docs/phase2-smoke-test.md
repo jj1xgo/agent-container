@@ -83,29 +83,38 @@ setup command、hidden prompt、token format、staged `claude auth status`、act
 
    doctorの必須checkがPASSであることを確認する。local statusだけでは不十分なので、launcher経由のClaudeでcredential値を含まない最小promptを送り、実API responseが成功することを必須とする。HTTP 401を含むinference失敗は停止条件とする。clean projectを用意できない場合は回復を先行せず停止する。
 
-3. 同じclean projectのClaude Bash subprocessから、値や環境一覧を表示せず次のbooleanだけを確認する。
+3. Claude内で`/status`を確認した後、`/sandbox`の`Config`を開く。managed settingsが読み込まれ、sandboxが有効、`enableWeakerNestedSandbox`が有効、unsandboxed fallbackが禁止されていることを確認する。続けて`/hooks`と`/mcp`を開き、hookとMCP serverがどちらも空であることを確認する。managed policyを確認できない、sandboxが無効、fallback可能、hookまたはMCPが1件でも読み込まれている場合は即座に停止し、sandboxを無効化して再試行しない。
 
-   ```text
-   CLAUDE_CODE_OAUTH_TOKEN present: false
-   Anthropic/cloud credential variables present: false
+4. 同じclean projectで、ClaudeへBash toolを使って次のcommandだけを実行するよう依頼する。
+
+   ```bash
+   python3 -m agent_container.claude_security_probe
    ```
 
-   `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`の効果とLinux subprocess PID isolationを確認する。環境entry、値、prefix、長さ、process environment、`/run/secrets/claude-oauth-token`本文は出力せず、containerの`--read-only`、`--cap-drop=all`、`no-new-privileges`、keep-id、tmpfsを弱めない。
+   正常時の出力は次の3行だけである。
 
-4. 新auth、clean-project status、最小inference、subprocess scrubがすべて成功した後だけ、failed smokeで生成されたexact artifact `<state-root>/projects/agent-container/claude-config/.credentials.json`を回復する。sourceと新しいtarget `<state-root>/quarantine/claude-project/<run-id>/.credentials.json`の全ancestorを`lstat`相当で確認し、sourceが通常fileでない場合、またはsource/target/ancestorがsymlinkなら停止する。新しい`<state-root>/quarantine/claude-project/<run-id>/`をmode `0700`で作り、この1 fileだけを本文を読まずに移し、mode `0600`にする。project `.claude.json`、project backups、project cache、sessions、plugins、memoryは移動しない。quarantineは削除しない。
+   ```text
+   oauth_token_visible=false
+   token_file_readable=false
+   parent_token_via_proc_readable=false
+   ```
 
-5. recovery後に次を実行し、`claude-project-credentials`を含む必須checkがPASSで、既知の`WARN network-policy`だけが残ること、実inferenceが成功することを確認する。
+   いずれかが`true`、commandがsandbox内で実行不能、または3行以外のcredential由来情報が出た場合は即座に停止する。特に`parent_token_via_proc_readable=true`ならこの方式を不採用とし、Phase 2完了を宣言しない。確認時はcredentialの値、長さ、prefix、hash、環境一覧、環境entry、process environment、`/proc/*/environ`の内容、`/run/secrets/claude-oauth-token`本文を表示・記録しない。containerの`--read-only`、`--cap-drop=all`、`no-new-privileges`、keep-id、tmpfsも弱めない。
+
+5. 新auth、clean-project status、最小inference、managed sandbox確認、security probeがすべて成功した後だけ、failed smokeで生成されたexact artifact `<state-root>/projects/agent-container/claude-config/.credentials.json`を回復する。sourceと新しいtarget `<state-root>/quarantine/claude-project/<run-id>/.credentials.json`の全ancestorを`lstat`相当で確認し、sourceが通常fileでない場合、またはsource/target/ancestorがsymlinkなら停止する。新しい`<state-root>/quarantine/claude-project/<run-id>/`をmode `0700`で作り、この1 fileだけを本文を読まずに移し、mode `0600`にする。project `.claude.json`、project backups、project cache、sessions、plugins、memoryは移動しない。quarantineは削除しない。
+
+6. recovery後に次を実行し、`claude-project-credentials`と`claude-managed-policy`を含む必須checkがPASSで、既知の`WARN network-policy`だけが残ること、実inferenceが成功することを確認する。
 
    ```bash
    bin/agentctl doctor agent-container --agent claude
    bin/agentctl run agent-container --agent claude
    ```
 
-6. 非mainの専用test branchで、Claudeに承認済みの小さな変更、focused test、local commitを行わせる。通常終了後に同じprojectを再起動し、同じprojectのsessionをresumeできることを確認する。push、PR、merge、force-push、releaseは行わない。
+7. 非mainの専用test branchで、Claudeに承認済みの小さな変更、focused test、local commitを行わせる。通常終了後に同じprojectを再起動し、同じprojectのsessionをresumeできることを確認する。push、PR、merge、force-push、releaseは行わない。
 
-7. project configに`.credentials.json`がないこと、共有されるClaude credentialは`oauth-token`だけであること、別projectからこのprojectのconfig/sessionを観測できないことをmetadataとbooleanだけで確認する。
+8. project configに`.credentials.json`がないこと、共有されるClaude credentialは`oauth-token`だけであること、別projectからこのprojectのconfig/sessionを観測できないことをmetadataとbooleanだけで確認する。
 
-8. `bin/agentctl doctor agent-container --agent all`、Codex auth status、Codex runtime、全test suiteを実行してCodex regressionがないことを確認する。最後に旧container/image invariantを再確認する。
+9. `bin/agentctl doctor agent-container --agent all`、Codex auth status、Codex runtime、全test suiteを実行してCodex regressionがないことを確認する。最後に旧container/image invariantを再確認する。
 
 ## 旧nested-mount checklist（historical diagnosis）
 
@@ -128,11 +137,11 @@ unit suiteの結果を実host観測として扱いません。実行後は、実
 
 | command/check | expected result | observed result | date |
 | --- | --- | --- | --- |
-| setup-token automated preflight | complete suite PASS; no whitespace errors | unittest exit 0; `Ran 194 tests`; `OK`; `git diff --check` exit 0 | 2026-08-24 |
-| normal latest rebuild | no fixed version flags; cachebuster invalidates CLI install; both public versions resolve | `bin/agentctl build` exit 0; CLI install step executed; `localhost/agent-container:dev` image `f9741ac54634779a6ec86b78c458c05c35143691b0a74d29f4d1c1321602d75c`; Codex `0.149.1`; Claude `2.1.241` | 2026-08-24 |
+| setup-token automated preflight | complete suite PASS; no whitespace errors | unittest exit 0; `Ran 232 tests`; `OK`; `git diff --check` exit 0 | 2026-08-24 |
+| normal latest rebuild | no fixed version flags; cachebuster invalidates CLI install; both public versions resolve | `bin/agentctl build` exit 0; CLI install step executed; `localhost/agent-container:dev` image `ed588166e3d0af1a1c45bb1884237170eaa5201d2eb9ef46b477d003e30b5a25`; Node `v26.7.0`; Codex `0.149.1`; Claude `2.1.241` | 2026-08-24 |
 | private setup-token ceremony | user-only private terminal; exit status and sanitized result only | user reported exit 0; controller received no token value; active `oauth-token` metadata is regular file, mode `0600`, owner `1000:1000`; shared legacy names absent; new private quarantine tree has `0700` directories and `0600` files | 2026-08-24 |
 | post-auth Claude doctor | authenticated status; expected failed-project credential identified separately | exit 1; every required check PASS except `claude-project-credentials`; expected network-policy WARN only | 2026-08-24 |
-| real inference and subprocess scrub | successful API response; both credential-presence booleans false | not run; blocked because `agent-container` is the only registered project and its exact legacy credential entry is present; no clean-project candidate exists | 2026-08-24 |
+| real inference and managed sandbox gate | successful API response; managed sandbox/hook/MCP checks; three security booleans false | clean project doctor exit 0 including `claude-managed-policy`; inference succeeded; Enterprise managed settings loaded; sandbox setting locally immutable; hooks managed-disabled with 0 configured; MCP 0 configured; dedicated probe exit 0 with all three booleans false; stdio MCP registration rejected by enterprise policy; Write/Read/Edit/Bash smoke PASS and temporary file removed; TUI exit 0 | 2026-08-24 |
 | failed-project credential quarantine | exact artifact only; private metadata; no deletion | not run | not run |
 | `podman info` | rootless is true | PASS via doctor; exit 0 | 2026-08-23 |
 | image build and both versions | exit 0; local image; Codex and Claude versions; no credential path/value | exit 0; `localhost/agent-container:dev`; Codex `0.149.0`; Claude `2.1.241` | 2026-08-23 |

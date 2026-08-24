@@ -120,3 +120,26 @@ class Phase2DocumentationTest(unittest.TestCase):
             "旧claude-container",
         ):
             self.assertIn(expected, body)
+
+    def test_smoke_guide_contains_claude_sandbox_security_gate(self) -> None:
+        body = (ROOT / "docs/phase2-smoke-test.md").read_text(encoding="utf-8")
+
+        for expected in (
+            "oauth_token_visible=false",
+            "token_file_readable=false",
+            "parent_token_via_proc_readable=false",
+            "/sandbox",
+            "Config",
+            "/hooks",
+            "/mcp",
+            "parent_token_via_proc_readable=true",
+            "値",
+            "長さ",
+            "prefix",
+            "hash",
+            "環境一覧",
+            "/proc/*/environ",
+        ):
+            self.assertIn(expected, body)
+
+        self.assertIn("即座に停止", body)
