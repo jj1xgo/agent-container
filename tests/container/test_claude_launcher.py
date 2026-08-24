@@ -145,6 +145,21 @@ class ClaudeLauncherTest(unittest.TestCase):
                 },
             )
 
+    def test_exec_claude_forces_demo_mode_over_caller_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            token_file = self.write_token(Path(temporary))
+            observed: dict[str, str] = {}
+
+            def fake_execvpe(program, argv, environment):
+                observed["is_demo"] = environment["IS_DEMO"]
+                raise ExecObserved
+
+            with patch.dict(os.environ, {"IS_DEMO": "0"}):
+                with self.assertRaises(ExecObserved):
+                    exec_claude(token_file, ("claude",), fake_execvpe)
+
+            self.assertEqual(observed, {"is_demo": "1"})
+
     def test_exec_claude_rejects_empty_command_arguments_without_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             token_file = self.write_token(Path(temporary))
