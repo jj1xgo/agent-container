@@ -232,11 +232,15 @@ class PodmanCommandTest(unittest.TestCase):
         )
 
         home_tmpfs = (
-            "--tmpfs=/home/agent:rw,nosuid,nodev,noexec,size=16m,"
-            "mode=0700,uid=1000,gid=1000"
+            "type=tmpfs,dst=/home/agent,tmpfs-size=16777216,"
+            "tmpfs-mode=0700,U=true"
         )
         self.assertIn(home_tmpfs, spec.argv)
         home_index = spec.argv.index(home_tmpfs)
+        self.assertEqual(spec.argv[home_index - 1], "--mount")
+        self.assertFalse(
+            any(argument.startswith("--tmpfs=/home/agent:") for argument in spec.argv)
+        )
         nested_mounts = (
             "type=bind,src=/state/projects/agent-container/claude-config,"
             "dst=/home/agent/.claude",
