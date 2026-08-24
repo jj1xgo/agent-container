@@ -5,12 +5,15 @@ import json
 import os
 import re
 import stat
+from typing import Literal
 
 
 _PACKAGE_RE = re.compile(
     r"[a-z0-9][a-z0-9+.-]*(?::[a-z0-9]+)?(?:=[A-Za-z0-9.+:~_-]+)?"
 )
-_NODE_VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+_NODE_VERSION_RE = re.compile(
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+)
 _ALLOWED_FILES = frozenset({"packages.txt", "node-version.txt"})
 _MAX_CONFIG_BYTES = 64 * 1024
 _HASH_INPUT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/+-]*")
@@ -28,6 +31,13 @@ class ProjectImageConfig:
     @property
     def is_empty(self) -> bool:
         return not self.packages and self.node_version is None
+
+
+@dataclass(frozen=True)
+class ProjectImageResolution:
+    image: str
+    state: Literal["unconfigured", "current", "stale", "missing"]
+    key: str | None
 
 
 def project_image_key(

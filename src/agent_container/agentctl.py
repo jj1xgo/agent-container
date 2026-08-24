@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Callable
 from typing import Mapping
@@ -23,6 +24,7 @@ from agent_container.migration import render_migration_plan
 from agent_container.podman import CommandSpec
 from agent_container.podman import auth_codex_spec
 from agent_container.podman import build_image_spec
+from agent_container.podman import build_project_image_spec
 from agent_container.podman import clone_project_spec
 from agent_container.podman import cli_version_spec
 from agent_container.podman import codex_login_status_spec
@@ -30,12 +32,20 @@ from agent_container.podman import claude_setup_token_spec
 from agent_container.podman import claude_token_status_spec
 from agent_container.podman import node_version_spec
 from agent_container.podman import podman_image_exists_spec
+from agent_container.podman import podman_architecture_spec
+from agent_container.podman import podman_image_id_spec
+from agent_container.podman import podman_project_images_spec
 from agent_container.podman import podman_rootless_spec
 from agent_container.podman import podman_version_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.podman import run_command
 from agent_container.profile import seed_codex_home
+from agent_container.project_image import ProjectImageResolution
+from agent_container.project_image import load_project_image_config
+from agent_container.project_image import project_image_key
+from agent_container.project_image import project_image_name
+from agent_container.project_image import write_project_build_context
 from agent_container.state import ProjectRecord
 from agent_container.state import Repository
 from agent_container.state import StateLayout
@@ -507,6 +517,45 @@ def _podman_preflight(
         _required_probe_run(runner, podman_image_exists_spec(image_required))
 
 
+def _resolve_project_image(
+    layout: StateLayout,
+    base_image: str,
+    runner: Callable[[CommandSpec], subprocess.CompletedProcess],
+    build_missing: bool,
+    stdout: TextIO,
+) -> ProjectImageResolution:
+    config = load_project_image_config(layout.workspace)
+    if config.is_empty:
+        return ProjectImageResolution(base_image, "unconfigured", None)
+
+    base_id_result = _required_probe_run(runner, podman_image_id_spec(base_image))
+    architecture_result = _required_probe_run(runner, podman_architecture_spec())
+    base_id = (base_id_result.stdout or "").strip()
+    architecture = (architecture_result.stdout or "").strip()
+    key = project_image_key(base_id, config, architecture)
+    image = project_image_name(layout.project_id, key)
+
+    present = _doctor_run(runner, podman_image_exists_spec(image))
+    if present.returncode == 0:
+        return ProjectImageResolution(image, "current", key)
+
+    if not build_missing:
+        prior = _doctor_run(runner, podman_project_images_spec(layout.project_id))
+        has_prior = prior.returncode == 0 and bool((prior.stdout or "").strip())
+        state = "stale" if has_prior else "missing"
+        return ProjectImageResolution(image, state, key)
+
+    print("project image missing; building", file=stdout)
+    with tempfile.TemporaryDirectory(prefix="agent-container-project-") as temporary:
+        context = Path(temporary)
+        containerfile = write_project_build_context(context, base_image, config)
+        build_spec = build_project_image_spec(
+            context, containerfile, base_image, image
+        )
+        _require_success(runner(build_spec), build_spec)
+    return ProjectImageResolution(image, "current", key)
+
+
 def _check_failure_detail(error: Exception) -> str:
     if isinstance(error, OSError):
         return "filesystem operation failed"
@@ -558,10 +607,41 @@ def _doctor(
         )
     )
 
+    runtime_image: str | None = None
+    if image_check.returncode != 0:
+        checks.append(
+            CheckResult("FAIL", "project-image", "base image unavailable")
+        )
+    else:
+        try:
+            resolution = _resolve_project_image(
+                layout,
+                image,
+                runner,
+                build_missing=False,
+                stdout=sys.stdout,
+            )
+            usable = resolution.state in ("unconfigured", "current")
+            checks.append(
+                CheckResult(
+                    "PASS" if usable else "FAIL",
+                    "project-image",
+                    resolution.state,
+                )
+            )
+            if usable:
+                runtime_image = resolution.image
+        except (ValueError, OSError, subprocess.CalledProcessError) as error:
+            checks.append(
+                CheckResult(
+                    "FAIL", "project-image", _check_failure_detail(error)
+                )
+            )
+
     for selected_agent in agents:
-        if image_check.returncode == 0:
+        if runtime_image is not None:
             cli_version = _doctor_run(
-                runner, cli_version_spec(image, selected_agent)
+                runner, cli_version_spec(runtime_image, selected_agent)
             )
             version_ok = cli_version.returncode == 0
             version_detail = "available" if version_ok else "unavailable"
@@ -867,6 +947,13 @@ def main(
                 identity_reader,
             )
             _podman_preflight(runner, image_required=arguments.image)
+            resolution = _resolve_project_image(
+                layout,
+                arguments.image,
+                runner,
+                build_missing=True,
+                stdout=stdout,
+            )
             if arguments.agent == "claude":
                 _prepare_claude_project_state(layout)
             builders = (
@@ -879,7 +966,7 @@ def main(
             spec = builders[arguments.agent](
                 layout,
                 handover_project,
-                arguments.image,
+                resolution.image,
                 uid,
                 gid,
             )

@@ -13,6 +13,9 @@ from agent_container.agentctl import main
 from agent_container.agentctl import parser
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
+from agent_container.project_image import ProjectImageConfig
+from agent_container.project_image import project_image_key
+from agent_container.project_image import project_image_name
 from agent_container.state import ProjectRecord
 from agent_container.state import Repository
 
@@ -983,6 +986,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "podman-version",
         "podman-rootless",
         "image",
+        "project-image",
         "codex-version",
         "private-state",
         "codex-auth",
@@ -996,6 +1000,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "podman-version",
         "podman-rootless",
         "image",
+        "project-image",
         "claude-version",
         "private-state",
         "claude-auth",
@@ -1012,6 +1017,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "podman-version",
         "podman-rootless",
         "image",
+        "project-image",
         "codex-version",
         "claude-version",
         "private-state",
@@ -1149,6 +1155,109 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             )
             self.assertNotIn(str(root / "shared-auth/codex/auth.json"), output.getvalue())
             self.assertEqual(os.getuid(), root.stat().st_uid)
+
+    def test_run_builds_and_uses_missing_project_image(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            config_dir = root / "workspaces/agent-container/.agent-container.d"
+            config_dir.mkdir()
+            (config_dir / "packages.txt").write_text("make\n", encoding="utf-8")
+            calls = []
+            builder_calls = []
+            output = StringIO()
+            expected_key = project_image_key(
+                "sha256:base", ProjectImageConfig(("make",), None), "amd64"
+            )
+            expected_image = project_image_name("agent-container", expected_key)
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[:5] == (
+                    "podman", "image", "inspect", "--format", "{{.Id}}"
+                ):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Arch}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="amd64\n")
+                if spec.argv[:3] == ("podman", "image", "exists") and spec.argv[-1] == expected_image:
+                    return subprocess.CompletedProcess(spec.argv, 1)
+                return successful_podman_result(spec)
+
+            def runtime_builder(*args):
+                builder_calls.append(args)
+                return run_codex_spec(*args)
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                runtime_spec_builder=runtime_builder,
+                stdout=output,
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(builder_calls[0][2], expected_image)
+            self.assertEqual(sum(call.argv[:2] == ("podman", "build") for call in calls), 1)
+            self.assertIn("project image missing; building", output.getvalue())
+
+    def test_run_uses_current_project_image_without_build(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            config_dir = root / "workspaces/agent-container/.agent-container.d"
+            config_dir.mkdir()
+            (config_dir / "packages.txt").write_text("make\n", encoding="utf-8")
+            calls = []
+            builder_calls = []
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[:3] == ("podman", "image", "inspect"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Arch}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="amd64\n")
+                return successful_podman_result(spec)
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                runtime_spec_builder=lambda *args: builder_calls.append(args) or run_codex_spec(*args),
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(sum(call.argv[:2] == ("podman", "build") for call in calls), 0)
+            self.assertIn("localhost/agent-container-project:", builder_calls[0][2])
+
+    def test_run_project_image_build_failure_never_starts_runtime(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            config_dir = root / "workspaces/agent-container/.agent-container.d"
+            config_dir.mkdir()
+            (config_dir / "packages.txt").write_text("make\n", encoding="utf-8")
+            builder_calls = []
+
+            def runner(spec):
+                if spec.argv[:3] == ("podman", "image", "inspect"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Arch}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="amd64\n")
+                if spec.argv[:3] == ("podman", "image", "exists") and "project:" in spec.argv[-1]:
+                    return subprocess.CompletedProcess(spec.argv, 1)
+                if spec.argv[:2] == ("podman", "build"):
+                    return subprocess.CompletedProcess(spec.argv, 17)
+                return successful_podman_result(spec)
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                runtime_spec_builder=lambda *args: builder_calls.append(args) or run_codex_spec(*args),
+            )
+
+            self.assertEqual(result, 17)
+            self.assertEqual(builder_calls, [])
 
     def test_run_missing_image_preserves_exit_code_without_starting_codex(self) -> None:
         with TemporaryDirectory() as temp:
@@ -1862,6 +1971,67 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self._assert_private_values_absent(
                 output.getvalue(), "DO-NOT-PRINT-CREDENTIAL-BODY"
             )
+
+    def test_doctor_reports_project_image_states_without_building(self) -> None:
+        for state, exists_code, prior in (
+            ("current", 0, ""),
+            ("stale", 1, "localhost/agent-container-project:agent-container-old"),
+            ("missing", 1, ""),
+        ):
+            with self.subTest(state=state), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                config_dir = root / "workspaces/agent-container/.agent-container.d"
+                config_dir.mkdir()
+                (config_dir / "packages.txt").write_text("make\n", encoding="utf-8")
+                calls = []
+                output = StringIO()
+
+                def runner(spec):
+                    calls.append(spec)
+                    if spec.argv[:3] == ("podman", "image", "inspect"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                    if spec.argv == ("podman", "info", "--format", "{{.Host.Arch}}"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout="amd64\n")
+                    if spec.argv[:3] == ("podman", "image", "exists") and "project:" in spec.argv[-1]:
+                        return subprocess.CompletedProcess(spec.argv, exists_code)
+                    if spec.argv[:2] == ("podman", "images"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout=prior)
+                    return self._successful_doctor_runner(spec)
+
+                result = main(
+                    ["doctor", "agent-container"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stdout=output,
+                )
+
+                self.assertIn(f"project-image: {state}", output.getvalue())
+                self.assertEqual(result, 0 if state == "current" else 1)
+                self.assertFalse(any(call.argv[:2] == ("podman", "build") for call in calls))
+
+    def test_doctor_rejects_invalid_project_image_config_without_content(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            config_dir = root / "workspaces/agent-container/.agent-container.d"
+            config_dir.mkdir()
+            secret = "make;DO-NOT-PRINT-PROJECT-CONFIG"
+            (config_dir / "packages.txt").write_text(secret, encoding="utf-8")
+            calls = []
+            output = StringIO()
+
+            result = main(
+                ["doctor", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec) or self._successful_doctor_runner(spec),
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=output,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertIn("FAIL  project-image: state validation failed", output.getvalue())
+            self.assertNotIn(secret, output.getvalue())
+            self.assertFalse(any(call.argv[:2] == ("podman", "build") for call in calls))
 
     def test_doctor_converts_filesystem_oserrors_to_ordered_failures(self) -> None:
         cases = (
