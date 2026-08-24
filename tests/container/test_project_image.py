@@ -5,6 +5,9 @@ import unittest
 
 from agent_container.project_image import ProjectImageConfig
 from agent_container.project_image import load_project_image_config
+from agent_container.project_image import project_image_key
+from agent_container.project_image import project_image_name
+from agent_container.project_image import write_project_build_context
 
 
 class ProjectImageConfigTest(unittest.TestCase):
@@ -58,6 +61,7 @@ class ProjectImageConfigTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_project_image_config(workspace)
 
+
     def test_rejects_workspace_and_configuration_symlinks(self) -> None:
         real_workspace = Path(self.temporary.name) / "real-workspace"
         real_workspace.mkdir()
@@ -86,6 +90,7 @@ class ProjectImageConfigTest(unittest.TestCase):
 
                 with self.assertRaises(ValueError):
                     load_project_image_config(workspace)
+
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO requires POSIX")
     def test_rejects_fifo_configuration_file(self) -> None:
@@ -117,6 +122,116 @@ class ProjectImageConfigTest(unittest.TestCase):
 
                 with self.assertRaises(ValueError):
                     load_project_image_config(workspace)
+
+
+class ProjectImageIdentityTest(unittest.TestCase):
+    def test_identity_is_deterministic_and_covers_all_inputs(self) -> None:
+        config = ProjectImageConfig(("gcc", "make"), "22.23.1")
+        first = project_image_key("sha256:base", config, "amd64")
+        same = project_image_key("sha256:base", config, "amd64")
+
+        self.assertEqual(first, same)
+        self.assertRegex(first, r"^[0-9a-f]{64}$")
+        for changed in (
+            project_image_key("sha256:other", config, "amd64"),
+            project_image_key(
+                "sha256:base", ProjectImageConfig(("make",), "22.23.1"), "amd64"
+            ),
+            project_image_key("sha256:base", config, "arm64"),
+        ):
+            self.assertNotEqual(first, changed)
+        self.assertEqual(
+            project_image_name("sotlas-frontend", first),
+            f"localhost/agent-container-project:sotlas-frontend-{first[:16]}",
+        )
+
+    def test_identity_rejects_values_unsafe_for_hashing_or_image_names(self) -> None:
+        config = ProjectImageConfig((), None)
+        bad_keys = (
+            ("", "amd64"),
+            ("sha256:base\nother", "amd64"),
+            ("sha256:base", "../amd64"),
+        )
+        for base, architecture in bad_keys:
+            with self.subTest(base=base, architecture=architecture):
+                with self.assertRaises(ValueError):
+                    project_image_key(base, config, architecture)
+
+        for project_id, key in (("../project", "a" * 64), ("project", "bad")):
+            with self.subTest(project_id=project_id, key=key):
+                with self.assertRaises(ValueError):
+                    project_image_name(project_id, key)
+
+
+class ProjectImageBuildContextTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "context"
+        self.root.mkdir()
+
+    def test_writes_minimal_packages_and_node_context(self) -> None:
+        sentinel = Path(self.temporary.name) / "DO-NOT-COPY-SECRET"
+        sentinel.write_text("secret sentinel", encoding="utf-8")
+        config = ProjectImageConfig(("gcc", "make"), "22.23.1")
+
+        containerfile = write_project_build_context(
+            self.root, "localhost/agent-container:dev", config
+        )
+
+        self.assertEqual(containerfile, self.root / "Containerfile")
+        self.assertEqual(
+            {path.name for path in self.root.iterdir()},
+            {"Containerfile", "packages.txt"},
+        )
+        self.assertEqual(
+            (self.root / "packages.txt").read_text(encoding="utf-8"),
+            "gcc\nmake\n",
+        )
+        body = containerfile.read_text(encoding="utf-8")
+        self.assertTrue(body.startswith("ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n"))
+        self.assertIn("USER root", body)
+        self.assertIn("USER agent", body)
+        self.assertIn(
+            "xargs --no-run-if-empty apt-get install -y --no-install-recommends",
+            body,
+        )
+        self.assertIn("https://nodejs.org/dist/v22.23.1/", body)
+        self.assertIn("SHASUMS256.txt", body)
+        self.assertIn("sha256sum --check --strict", body)
+        self.assertIn("/opt/project-node", body)
+        self.assertIn(
+            "PATH=/opt/project-node/bin:/usr/local/bin:/opt/agent-node/bin:", body
+        )
+        self.assertNotIn("secret sentinel", body)
+        self.assertEqual(self.root.stat().st_mode & 0o777, 0o700)
+        for generated in self.root.iterdir():
+            self.assertEqual(generated.stat().st_mode & 0o777, 0o600)
+
+    def test_omits_optional_files_and_node_layer_for_empty_config(self) -> None:
+        containerfile = write_project_build_context(
+            self.root, "localhost/agent-container:dev", ProjectImageConfig((), None)
+        )
+
+        self.assertEqual({path.name for path in self.root.iterdir()}, {"Containerfile"})
+        body = containerfile.read_text(encoding="utf-8")
+        self.assertNotIn("packages.txt", body)
+        self.assertNotIn("/opt/project-node", body)
+
+    def test_rejects_unsafe_context_or_constructed_config(self) -> None:
+        occupied = Path(self.temporary.name) / "occupied"
+        occupied.mkdir()
+        (occupied / "existing").write_text("x", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            write_project_build_context(
+                occupied, "localhost/agent-container:dev", ProjectImageConfig((), None)
+            )
+        with self.assertRaises(ValueError):
+            write_project_build_context(
+                self.root,
+                "localhost/agent-container:dev",
+                ProjectImageConfig(("make;id",), None),
+            )
 
 
 if __name__ == "__main__":

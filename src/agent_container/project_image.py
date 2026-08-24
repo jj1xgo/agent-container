@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
+import json
 import os
 import re
 import stat
@@ -11,6 +13,11 @@ _PACKAGE_RE = re.compile(
 _NODE_VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 _ALLOWED_FILES = frozenset({"packages.txt", "node-version.txt"})
 _MAX_CONFIG_BYTES = 64 * 1024
+_HASH_INPUT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/+-]*")
+_ARCHITECTURE_RE = re.compile(r"[a-z0-9][a-z0-9._-]*")
+_PROJECT_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]*")
+_KEY_RE = re.compile(r"[0-9a-f]{64}")
+DERIVED_IMAGE_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -21,6 +28,136 @@ class ProjectImageConfig:
     @property
     def is_empty(self) -> bool:
         return not self.packages and self.node_version is None
+
+
+def project_image_key(
+    base_image_id: str, config: ProjectImageConfig, architecture: str
+) -> str:
+    if _HASH_INPUT_RE.fullmatch(base_image_id) is None:
+        raise ValueError("invalid base image identity")
+    if _ARCHITECTURE_RE.fullmatch(architecture) is None:
+        raise ValueError("invalid image architecture")
+    payload = {
+        "architecture": architecture,
+        "base_image_id": base_image_id,
+        "node_version": config.node_version,
+        "packages": list(config.packages),
+        "schema": DERIVED_IMAGE_SCHEMA_VERSION,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def project_image_name(project_id: str, key: str) -> str:
+    if _PROJECT_ID_RE.fullmatch(project_id) is None or len(project_id) > 63:
+        raise ValueError("invalid project ID for image name")
+    if _KEY_RE.fullmatch(key) is None:
+        raise ValueError("invalid project image key")
+    return f"localhost/agent-container-project:{project_id}-{key[:16]}"
+
+
+def _write_generated_file(directory_fd: int, name: str, contents: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        file_fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
+    except OSError as error:
+        raise ValueError("project build context is not safely writable") from error
+    try:
+        payload = contents.encode("utf-8")
+        written = 0
+        while written < len(payload):
+            written += os.write(file_fd, payload[written:])
+        os.fchmod(file_fd, 0o600)
+    finally:
+        os.close(file_fd)
+
+
+def write_project_build_context(
+    root: Path, base_image: str, config: ProjectImageConfig
+) -> Path:
+    root = Path(root)
+    metadata = _lstat_or_none(root)
+    if (
+        metadata is None
+        or not stat.S_ISDIR(metadata.st_mode)
+        or root.resolve(strict=True) != Path(os.path.abspath(root))
+    ):
+        raise ValueError("project build context must be a real directory")
+    if _HASH_INPUT_RE.fullmatch(base_image) is None:
+        raise ValueError("invalid base image")
+    if any(_PACKAGE_RE.fullmatch(package) is None for package in config.packages):
+        raise ValueError("invalid project package configuration")
+    if config.node_version is not None and _NODE_VERSION_RE.fullmatch(
+        config.node_version
+    ) is None:
+        raise ValueError("invalid project Node version configuration")
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory_fd = os.open(root, directory_flags)
+    except OSError as error:
+        raise ValueError("project build context is not safely accessible") from error
+    try:
+        if os.listdir(directory_fd):
+            raise ValueError("project build context must be empty")
+        os.fchmod(directory_fd, 0o700)
+
+        lines = ["ARG BASE_IMAGE", "FROM ${BASE_IMAGE}", "", "USER root"]
+        if config.packages:
+            lines.extend(
+                (
+                    "COPY packages.txt /tmp/project-packages.txt",
+                    "RUN apt-get update \\",
+                    "    && xargs --no-run-if-empty apt-get install -y "
+                    "--no-install-recommends < /tmp/project-packages.txt \\",
+                    "    && rm -f /tmp/project-packages.txt \\",
+                    "    && rm -rf /var/lib/apt/lists/*",
+                )
+            )
+            normalized = "".join(
+                f"{package}\n" for package in sorted(set(config.packages))
+            )
+            _write_generated_file(directory_fd, "packages.txt", normalized)
+
+        if config.node_version is not None:
+            version = config.node_version
+            lines.extend(
+                (
+                    "RUN set -eux; \\",
+                    "    case \"$(dpkg --print-architecture)\" in \\",
+                    "      amd64) node_arch=x64 ;; \\",
+                    "      arm64) node_arch=arm64 ;; \\",
+                    "      *) echo \"unsupported project Node architecture\" >&2; "
+                    "exit 1 ;; \\",
+                    "    esac; \\",
+                    f'    archive="node-v{version}-linux-${{node_arch}}.tar.xz"; \\',
+                    f'    curl -fsSLO "https://nodejs.org/dist/v{version}/'
+                    '${archive}"; \\',
+                    f'    curl -fsSLO "https://nodejs.org/dist/v{version}/'
+                    'SHASUMS256.txt"; \\',
+                    '    grep "  ${archive}$" SHASUMS256.txt | sha256sum '
+                    "--check --strict -; \\",
+                    "    mkdir -p /opt/project-node; \\",
+                    '    tar -xJf "${archive}" -C /opt/project-node '
+                    "--strip-components=1; \\",
+                    '    rm -f "${archive}" SHASUMS256.txt',
+                    "RUN printf '%s\\n' 'PATH=/opt/project-node/bin:$PATH' "
+                    "'export PATH' > /etc/profile.d/20-project-node.sh",
+                    "ENV PATH=/opt/project-node/bin:/usr/local/bin:"
+                    "/opt/agent-node/bin:/usr/local/sbin:/usr/sbin:"
+                    "/usr/bin:/sbin:/bin",
+                )
+            )
+
+        lines.extend(("", "USER agent", ""))
+        _write_generated_file(directory_fd, "Containerfile", "\n".join(lines))
+    finally:
+        os.close(directory_fd)
+    return root / "Containerfile"
 
 
 def _lstat_or_none(path: Path) -> os.stat_result | None:
