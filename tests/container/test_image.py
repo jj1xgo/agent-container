@@ -1,5 +1,6 @@
 from fnmatch import fnmatchcase
 from pathlib import Path
+import json
 import re
 import subprocess
 import unittest
@@ -19,6 +20,48 @@ def containerignore_includes(path: str, patterns: list[str]) -> bool:
 
 
 class ContainerImageContractTest(unittest.TestCase):
+    def test_image_copies_exact_claude_managed_policy(self) -> None:
+        settings_path = ROOT / "profiles/claude/managed-settings.json"
+        mcp_path = ROOT / "profiles/claude/managed-mcp.json"
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(settings["sandbox"]["enabled"])
+        self.assertTrue(settings["sandbox"]["enableWeakerNestedSandbox"])
+        self.assertFalse(settings["sandbox"]["allowUnsandboxedCommands"])
+        self.assertTrue(settings["sandbox"]["failIfUnavailable"])
+        self.assertIn(
+            {"name": "CLAUDE_CODE_OAUTH_TOKEN", "mode": "deny"},
+            settings["sandbox"]["credentials"]["envVars"],
+        )
+        self.assertIn(
+            {"path": "/run/secrets/claude-oauth-token", "mode": "deny"},
+            settings["sandbox"]["credentials"]["files"],
+        )
+        self.assertIn(
+            "Read(//run/secrets/claude-oauth-token)",
+            settings["permissions"]["deny"],
+        )
+        self.assertEqual(
+            settings["permissions"]["disableBypassPermissionsMode"], "disable"
+        )
+        self.assertTrue(settings["disableAllHooks"])
+        self.assertTrue(settings["allowManagedHooksOnly"])
+        self.assertEqual(settings["allowedMcpServers"], [])
+        self.assertTrue(settings["allowManagedMcpServersOnly"])
+        self.assertEqual(
+            json.loads(mcp_path.read_text(encoding="utf-8")), {"mcpServers": {}}
+        )
+
+        body = (ROOT / "Containerfile").read_text(encoding="utf-8")
+        self.assertIn(
+            "COPY profiles/claude/managed-settings.json /etc/claude-code/managed-settings.json",
+            body,
+        )
+        self.assertIn(
+            "COPY profiles/claude/managed-mcp.json /etc/claude-code/managed-mcp.json",
+            body,
+        )
+
     def test_image_installs_claude_sandbox_dependencies(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
         install = re.search(
@@ -121,6 +164,9 @@ class ContainerImageContractTest(unittest.TestCase):
                 "!profiles/",
                 "!profiles/codex/",
                 "!profiles/codex/**",
+                "!profiles/claude/",
+                "!profiles/claude/managed-settings.json",
+                "!profiles/claude/managed-mcp.json",
                 "!container/",
                 "!container/bin/",
                 "!container/bin/codex",
