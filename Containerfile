@@ -5,7 +5,7 @@ ARG CLAUDE_VERSION=latest
 ARG AGENT_CLI_CACHEBUST=0
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bubblewrap ca-certificates gh git python3 \
+    && apt-get install -y --no-install-recommends bubblewrap ca-certificates gh git python3 socat \
     && rm -rf /var/lib/apt/lists/*
 
 RUN test -n "${AGENT_CLI_CACHEBUST}" \

@@ -19,7 +19,7 @@ def containerignore_includes(path: str, patterns: list[str]) -> bool:
 
 
 class ContainerImageContractTest(unittest.TestCase):
-    def test_image_installs_system_bubblewrap(self) -> None:
+    def test_image_installs_claude_sandbox_dependencies(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
         install = re.search(
             r"apt-get install -y --no-install-recommends (?P<packages>[^\n]+)",
@@ -27,7 +27,8 @@ class ContainerImageContractTest(unittest.TestCase):
         )
 
         self.assertIsNotNone(install)
-        self.assertIn("bubblewrap", install.group("packages").split())
+        installed = set(install.group("packages").split())
+        self.assertEqual({"bubblewrap", "socat"} - installed, set())
 
     def test_image_installs_latest_agent_clis_and_runs_as_agent(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
