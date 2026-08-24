@@ -5,6 +5,7 @@ import subprocess
 
 from agent_container.state import Repository
 from agent_container.state import StateLayout
+from agent_container.state import validate_project_id
 
 
 _CLAUDE_TOKEN_PATH = "/run/secrets/claude-oauth-token"
@@ -90,6 +91,59 @@ def build_image_spec(
             "--file",
             str(root / "Containerfile"),
             str(root),
+        ),
+        {},
+    )
+
+
+def podman_image_id_spec(image: str) -> CommandSpec:
+    return CommandSpec(
+        ("podman", "image", "inspect", "--format", "{{.Id}}", image), {}
+    )
+
+
+def podman_architecture_spec() -> CommandSpec:
+    return CommandSpec(("podman", "info", "--format", "{{.Host.Arch}}"), {})
+
+
+def podman_project_images_spec(project_id: str) -> CommandSpec:
+    project_id = validate_project_id(project_id)
+    reference = f"localhost/agent-container-project:{project_id}-*"
+    return CommandSpec(
+        (
+            "podman",
+            "images",
+            "--filter",
+            f"reference={reference}",
+            "--format",
+            "{{.Repository}}:{{.Tag}}",
+        ),
+        {},
+    )
+
+
+def build_project_image_spec(
+    context: Path,
+    containerfile: Path,
+    base_image: str,
+    image: str,
+) -> CommandSpec:
+    resolved_context = context.resolve()
+    resolved_containerfile = containerfile.resolve()
+    if resolved_containerfile.parent != resolved_context:
+        raise ValueError("project Containerfile must be inside its build context")
+    return CommandSpec(
+        (
+            "podman",
+            "build",
+            "--pull=never",
+            "--build-arg",
+            f"BASE_IMAGE={base_image}",
+            "--tag",
+            image,
+            "--file",
+            str(resolved_containerfile),
+            str(resolved_context),
         ),
         {},
     )

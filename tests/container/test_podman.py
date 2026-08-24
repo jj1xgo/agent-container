@@ -5,10 +5,14 @@ import unittest
 from agent_container.podman import auth_codex_spec
 from agent_container.podman import codex_login_status_spec
 from agent_container.podman import build_image_spec
+from agent_container.podman import build_project_image_spec
 from agent_container.podman import claude_setup_token_spec
 from agent_container.podman import claude_token_status_spec
 from agent_container.podman import cli_version_spec
 from agent_container.podman import clone_project_spec
+from agent_container.podman import podman_architecture_spec
+from agent_container.podman import podman_image_id_spec
+from agent_container.podman import podman_project_images_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.state import Repository
@@ -16,9 +20,51 @@ from agent_container.state import StateLayout
 
 
 IMAGE = "localhost/agent-container:dev"
+DERIVED = "localhost/agent-container-project:sotlas-frontend-0123456789abcdef"
 
 
 class PodmanCommandTest(unittest.TestCase):
+    def test_project_image_inspection_and_build_commands(self) -> None:
+        self.assertEqual(
+            podman_image_id_spec(IMAGE).argv,
+            ("podman", "image", "inspect", "--format", "{{.Id}}", IMAGE),
+        )
+        self.assertEqual(
+            podman_architecture_spec().argv,
+            ("podman", "info", "--format", "{{.Host.Arch}}"),
+        )
+        self.assertEqual(
+            podman_project_images_spec("sotlas-frontend").argv,
+            (
+                "podman",
+                "images",
+                "--filter",
+                "reference=localhost/agent-container-project:sotlas-frontend-*",
+                "--format",
+                "{{.Repository}}:{{.Tag}}",
+            ),
+        )
+
+        spec = build_project_image_spec(
+            Path("/ctx"), Path("/ctx/Containerfile"), IMAGE, DERIVED
+        )
+        self.assertEqual(
+            spec.argv,
+            (
+                "podman",
+                "build",
+                "--pull=never",
+                "--build-arg",
+                f"BASE_IMAGE={IMAGE}",
+                "--tag",
+                DERIVED,
+                "--file",
+                "/ctx/Containerfile",
+                "/ctx",
+            ),
+        )
+        self.assertEqual(spec.environment, {})
+
     def test_build_uses_versions_cachebuster_and_repository_context(self) -> None:
         spec = build_image_spec(
             Path("/repo"), IMAGE, "22.23.1", "0.149.0", "1.2.3", "12345"
