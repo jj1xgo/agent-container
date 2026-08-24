@@ -49,10 +49,12 @@ def _runtime_prefix(uid: int, gid: int) -> list[str]:
     ]
 
 
-def _git_environment_args() -> list[str]:
+def _git_environment_args(
+    gh_config_dir: str = "/home/agent/.config/gh",
+) -> list[str]:
     return [
         "--env",
-        "GH_CONFIG_DIR=/home/agent/.config/gh",
+        f"GH_CONFIG_DIR={gh_config_dir}",
         "--env",
         "GIT_CONFIG_COUNT=1",
         "--env",
@@ -196,15 +198,16 @@ def run_claude_spec(
 ) -> CommandSpec:
     if uid != os.getuid() or gid != os.getgid():
         raise ValueError("runtime uid and gid must match the current user")
+    gh_config_dir = "/home/agent/gh-config"
     argv = _runtime_prefix(uid, gid)
     argv += ["--mount", _CLAUDE_RUNTIME_HOME_TMPFS_MOUNT]
-    argv += _git_environment_args()
+    argv += _git_environment_args(gh_config_dir)
     mounts = (
         (layout.workspace, "/workspace", False),
         (layout.claude_config, "/home/agent/.claude", False),
         (layout.claude_token_file, _CLAUDE_TOKEN_PATH, True),
         (layout.cache, "/home/agent/.cache", False),
-        (layout.gh_dir, "/home/agent/.config/gh", True),
+        (layout.gh_dir, gh_config_dir, True),
         (handover_project, f"/handovers/{layout.project_id}", False),
     )
     for source, target, read_only in mounts:

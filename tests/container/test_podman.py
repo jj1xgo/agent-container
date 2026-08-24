@@ -144,6 +144,38 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertNotIn("/vault,dst=", joined)
         self.assertNotIn("token", joined.lower())
 
+    def test_claude_relocates_gh_config_without_changing_codex(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        handover_project = Path("/vault/handovers/agent-container")
+
+        claude = run_claude_spec(
+            layout,
+            handover_project,
+            IMAGE,
+            os.getuid(),
+            os.getgid(),
+        )
+        codex = run_codex_spec(
+            layout,
+            handover_project,
+            IMAGE,
+            os.getuid(),
+            os.getgid(),
+        )
+
+        claude_joined = " ".join(claude.argv)
+        self.assertIn("GH_CONFIG_DIR=/home/agent/gh-config", claude.argv)
+        self.assertIn(
+            "type=bind,src=/state/gh,dst=/home/agent/gh-config,ro=true",
+            claude.argv,
+        )
+        self.assertNotIn("/home/agent/.config/gh", claude_joined)
+        self.assertIn("GH_CONFIG_DIR=/home/agent/.config/gh", codex.argv)
+        self.assertIn(
+            "type=bind,src=/state/gh,dst=/home/agent/.config/gh,ro=true",
+            codex.argv,
+        )
+
     def test_run_rejects_uid_or_gid_other_than_current_process(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")
         handover_project = Path("/vault/handovers/agent-container")
@@ -186,7 +218,7 @@ class PodmanCommandTest(unittest.TestCase):
                 "/run/secrets/claude-oauth-token",
             ),
             ("/state/projects/agent-container/cache", "/home/agent/.cache"),
-            ("/state/gh", "/home/agent/.config/gh"),
+            ("/state/gh", "/home/agent/gh-config"),
             ("/vault/handovers/agent-container", "/handovers/agent-container"),
         ):
             self.assertIn(f"src={source},dst={target}", joined)
@@ -194,7 +226,7 @@ class PodmanCommandTest(unittest.TestCase):
             "type=bind,src=/state/projects/agent-container/claude-config,dst=/home/agent/.claude",
             spec.argv,
         )
-        self.assertIn("src=/state/gh,dst=/home/agent/.config/gh,ro=true", joined)
+        self.assertIn("src=/state/gh,dst=/home/agent/gh-config,ro=true", joined)
         self.assertIn(
             "src=/state/shared-auth/claude/oauth-token,dst=/run/secrets/claude-oauth-token,ro=true",
             joined,
@@ -246,7 +278,7 @@ class PodmanCommandTest(unittest.TestCase):
             "dst=/home/agent/.claude",
             "type=bind,src=/state/projects/agent-container/cache,"
             "dst=/home/agent/.cache",
-            "type=bind,src=/state/gh,dst=/home/agent/.config/gh,ro=true",
+            "type=bind,src=/state/gh,dst=/home/agent/gh-config,ro=true",
         )
         self.assertTrue(
             all(home_index < spec.argv.index(mount) for mount in nested_mounts)
