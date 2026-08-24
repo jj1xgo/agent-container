@@ -233,7 +233,7 @@ class PodmanCommandTest(unittest.TestCase):
 
         home_tmpfs = (
             "type=tmpfs,dst=/home/agent,tmpfs-size=16777216,"
-            "tmpfs-mode=0700,U=true"
+            "tmpfs-mode=0700,U=true,noexec,nosuid,nodev"
         )
         self.assertIn(home_tmpfs, spec.argv)
         home_index = spec.argv.index(home_tmpfs)

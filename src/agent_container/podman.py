@@ -19,7 +19,7 @@ _CLAUDE_LAUNCHER_PREFIX = (
 _CLAUDE_CONFIG_TMPFS = "--tmpfs=/home/agent/.claude:rw,nosuid,nodev,noexec,size=16m"
 _CLAUDE_RUNTIME_HOME_TMPFS_MOUNT = (
     "type=tmpfs,dst=/home/agent,tmpfs-size=16777216,"
-    "tmpfs-mode=0700,U=true"
+    "tmpfs-mode=0700,U=true,noexec,nosuid,nodev"
 )
 
 
