@@ -22,21 +22,33 @@ class ContainerImageContractTest(unittest.TestCase):
     def test_image_installs_claude_sandbox_dependencies(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
         install = re.search(
-            r"apt-get install -y --no-install-recommends (?P<packages>[^\n]+)",
+            r"apt-get install -y --no-install-recommends\s+"
+            r"(?P<packages>.*?)\s+&& rm -rf /var/lib/apt/lists/\*",
             body,
+            re.DOTALL,
         )
 
         self.assertIsNotNone(install)
-        installed = set(install.group("packages").split())
-        self.assertEqual({"bubblewrap", "socat"} - installed, set())
+        installed = set(install.group("packages").replace("\\", "").split())
+        self.assertEqual(
+            {"bubblewrap", "ca-certificates", "curl", "gh", "git", "python3", "socat", "xz-utils"}
+            - installed,
+            set(),
+        )
 
     def test_image_installs_latest_agent_clis_and_runs_as_agent(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
+        self.assertIn("FROM docker.io/library/debian:testing-slim", body)
+        self.assertNotIn("FROM docker.io/library/node:", body)
+        self.assertIn("ARG NODE_VERSION=latest", body)
         self.assertIn("ARG CODEX_VERSION=latest", body)
         self.assertIn("ARG CLAUDE_VERSION=latest", body)
         self.assertIn("ARG AGENT_CLI_CACHEBUST=0", body)
         self.assertIn("@openai/codex@${CODEX_VERSION}", body)
         self.assertIn("@anthropic-ai/claude-code@${CLAUDE_VERSION}", body)
+        self.assertIn("https://nodejs.org/dist/", body)
+        self.assertIn("SHASUMS256.txt", body)
+        self.assertIn("/opt/agent-node", body)
         self.assertIn("DISABLE_UPDATES=1", body)
         self.assertIn("USER agent", body)
         self.assertIn("WORKDIR /workspace", body)
@@ -45,19 +57,20 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertIn("COPY profiles/codex /opt/agent-container/profiles/codex", body)
         self.assertNotRegex(body, r"(?m)^COPY\s+.*(?:credentials|oauth-token)")
 
-    def test_image_reuses_base_node_identity_for_agent(self) -> None:
+        for wrapper in ("codex", "claude"):
+            wrapper_body = (ROOT / f"container/bin/{wrapper}").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("exec /opt/agent-node/bin/node", wrapper_body)
+            self.assertNotIn("/usr/bin/env node", wrapper_body)
+
+    def test_image_creates_fixed_agent_identity(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
 
-        self.assertNotRegex(body, r"useradd[^\n]*--uid\s+1000")
-        self.assertNotRegex(body, r"groupadd[^\n]*--gid\s+1000")
-        self.assertRegex(body, r"groupmod[^\n]*--new-name\s+agent\s+node")
-        self.assertRegex(
-            body,
-            re.compile(
-                r"usermod[^\n]*--login\s+agent[^\n]*"
-                r"--home\s+/home/agent[^\n]*--move-home[^\n]*\snode"
-            ),
-        )
+        self.assertRegex(body, r"groupadd[^\n]*--gid\s+1000\s+agent")
+        self.assertRegex(body, r"useradd[^\n]*--uid\s+1000[^\n]*--gid\s+1000")
+        self.assertNotIn("groupmod", body)
+        self.assertNotIn("usermod", body)
 
     def test_containerignore_is_an_allowlist_for_build_inputs_only(self) -> None:
         patterns = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()
@@ -72,6 +85,10 @@ class ContainerImageContractTest(unittest.TestCase):
                 "!profiles/",
                 "!profiles/codex/",
                 "!profiles/codex/**",
+                "!container/",
+                "!container/bin/",
+                "!container/bin/codex",
+                "!container/bin/claude",
                 "**/auth.json",
                 "**/hosts.yml",
                 "**/.git",
@@ -106,7 +123,15 @@ class ContainerImageContractTest(unittest.TestCase):
     def test_containerignore_includes_every_tracked_copy_input(self) -> None:
         patterns = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()
         tracked = subprocess.run(
-            ("git", "ls-files", "--", "Containerfile", "src", "profiles/codex"),
+            (
+                "git",
+                "ls-files",
+                "--",
+                "Containerfile",
+                "src",
+                "profiles/codex",
+                "container/bin",
+            ),
             cwd=ROOT,
             capture_output=True,
             text=True,

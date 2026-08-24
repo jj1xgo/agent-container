@@ -5,6 +5,10 @@
 !profiles/
 !profiles/codex/
 !profiles/codex/**
+!container/
+!container/bin/
+!container/bin/codex
+!container/bin/claude
 **/auth.json
 **/hosts.yml
 **/.git
