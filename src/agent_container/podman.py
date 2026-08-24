@@ -17,6 +17,10 @@ _CLAUDE_LAUNCHER_PREFIX = (
     "claude",
 )
 _CLAUDE_CONFIG_TMPFS = "--tmpfs=/home/agent/.claude:rw,nosuid,nodev,noexec,size=16m"
+_CLAUDE_RUNTIME_HOME_TMPFS = (
+    "--tmpfs=/home/agent:rw,nosuid,nodev,noexec,size=16m,"
+    "mode=0700,uid=1000,gid=1000"
+)
 
 
 @dataclass(frozen=True)
@@ -193,6 +197,7 @@ def run_claude_spec(
     if uid != os.getuid() or gid != os.getgid():
         raise ValueError("runtime uid and gid must match the current user")
     argv = _runtime_prefix(uid, gid)
+    argv += [_CLAUDE_RUNTIME_HOME_TMPFS]
     argv += _git_environment_args()
     mounts = (
         (layout.workspace, "/workspace", False),

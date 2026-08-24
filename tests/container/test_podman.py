@@ -220,6 +220,34 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", spec.environment)
         self.assertNotIn("dangerously-skip-permissions", joined)
 
+    def test_claude_run_layers_private_home_tmpfs_before_nested_mounts(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+
+        spec = run_claude_spec(
+            layout=layout,
+            handover_project=Path("/vault/handovers/agent-container"),
+            image=IMAGE,
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
+
+        home_tmpfs = (
+            "--tmpfs=/home/agent:rw,nosuid,nodev,noexec,size=16m,"
+            "mode=0700,uid=1000,gid=1000"
+        )
+        self.assertIn(home_tmpfs, spec.argv)
+        home_index = spec.argv.index(home_tmpfs)
+        nested_mounts = (
+            "type=bind,src=/state/projects/agent-container/claude-config,"
+            "dst=/home/agent/.claude",
+            "type=bind,src=/state/projects/agent-container/cache,"
+            "dst=/home/agent/.cache",
+            "type=bind,src=/state/gh,dst=/home/agent/.config/gh,ro=true",
+        )
+        self.assertTrue(
+            all(home_index < spec.argv.index(mount) for mount in nested_mounts)
+        )
+
     def test_claude_run_rejects_uid_or_gid_other_than_current_process(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")
         handover_project = Path("/vault/handovers/agent-container")
