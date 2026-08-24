@@ -376,14 +376,33 @@ def _runtime_agent_auth_file(layout: StateLayout, agent: str) -> Path:
     if agent == "codex":
         return layout.codex_auth_file
     if agent == "claude":
-        return layout.claude_auth_file
+        return layout.claude_token_file
     raise ValueError("agent must be codex or claude")
+
+
+def _validate_claude_token_file(path: Path) -> None:
+    ensure_private_file(path)
+    try:
+        token = path.read_text(encoding="ascii")
+    except UnicodeError:
+        raise ValueError("Claude OAuth token has invalid format") from None
+    validate_claude_oauth_token(token)
+
+
+def _validate_claude_project_config(layout: StateLayout) -> None:
+    credentials = layout.claude_config / ".credentials.json"
+    if credentials.exists() or credentials.is_symlink():
+        raise ValueError("unsupported legacy Claude project credentials")
 
 
 def _validate_runtime_agent_state(layout: StateLayout, agent: str) -> None:
     for directory in _runtime_agent_directories(layout, agent):
         ensure_private_directory(directory)
-    ensure_private_file(_runtime_agent_auth_file(layout, agent))
+    if agent == "claude":
+        _validate_claude_token_file(layout.claude_token_file)
+        _validate_claude_project_config(layout)
+    else:
+        ensure_private_file(_runtime_agent_auth_file(layout, agent))
 
 
 def _private_state_directories(
@@ -560,16 +579,51 @@ def _doctor(
             CheckResult("FAIL", "private-state", _check_failure_detail(error))
         )
 
+    claude_token_ok = False
     for selected_agent in agents:
         name = f"{selected_agent}-auth"
         path = _runtime_agent_auth_file(layout, selected_agent)
         try:
-            ensure_private_file(path)
+            if selected_agent == "claude":
+                _validate_claude_token_file(path)
+                claude_token_ok = True
+            else:
+                ensure_private_file(path)
             checks.append(CheckResult("PASS", name, "present, mode 0600"))
         except (ValueError, OSError) as error:
             checks.append(CheckResult("FAIL", name, _check_failure_detail(error)))
 
     if "claude" in agents:
+        if not claude_token_ok:
+            checks.append(
+                CheckResult(
+                    "FAIL",
+                    "claude-auth-status",
+                    "not run: token invalid",
+                )
+            )
+        elif image_check.returncode != 0:
+            checks.append(
+                CheckResult(
+                    "FAIL",
+                    "claude-auth-status",
+                    "not run: image unavailable",
+                )
+            )
+        else:
+            auth_status = _doctor_run(
+                runner,
+                claude_token_status_spec(layout.claude_token_file, image),
+            )
+            authenticated = auth_status.returncode == 0
+            checks.append(
+                CheckResult(
+                    "PASS" if authenticated else "FAIL",
+                    "claude-auth-status",
+                    "authenticated" if authenticated else "command failed",
+                )
+            )
+
         try:
             ensure_private_directory(layout.claude_config)
             checks.append(
@@ -578,6 +632,22 @@ def _doctor(
         except (ValueError, OSError) as error:
             checks.append(
                 CheckResult("FAIL", "claude-config", _check_failure_detail(error))
+            )
+
+        try:
+            _validate_claude_project_config(layout)
+            checks.append(
+                CheckResult(
+                    "PASS", "claude-project-credentials", "absent"
+                )
+            )
+        except (ValueError, OSError) as error:
+            checks.append(
+                CheckResult(
+                    "FAIL",
+                    "claude-project-credentials",
+                    _check_failure_detail(error),
+                )
             )
 
     try:

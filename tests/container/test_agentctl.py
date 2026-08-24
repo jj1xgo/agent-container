@@ -968,7 +968,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "claude-version",
         "private-state",
         "claude-auth",
+        "claude-auth-status",
         "claude-config",
+        "claude-project-credentials",
         "gh-hosts",
         "project-metadata",
         "workspace-origin",
@@ -984,7 +986,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "private-state",
         "codex-auth",
         "claude-auth",
+        "claude-auth-status",
         "claude-config",
+        "claude-project-credentials",
         "gh-hosts",
         "project-metadata",
         "workspace-origin",
@@ -1018,11 +1022,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         auth_file = root / "shared-auth/codex/auth.json"
         auth_file.write_text("DO-NOT-PRINT-CREDENTIAL-BODY", encoding="utf-8")
         auth_file.chmod(0o600)
-        claude_auth_file = root / "shared-auth/claude/.credentials.json"
-        claude_auth_file.write_text(
-            "DO-NOT-PRINT-CLAUDE-CREDENTIAL", encoding="utf-8"
-        )
-        claude_auth_file.chmod(0o600)
+        claude_token_file = root / "shared-auth/claude/oauth-token"
+        claude_token_file.write_text("x" * 32, encoding="ascii")
+        claude_token_file.chmod(0o600)
         hosts_file = root / "gh/hosts.yml"
         hosts_file.write_text("github.com:\n", encoding="utf-8")
         hosts_file.chmod(0o600)
@@ -1035,6 +1037,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         self,
         root: Path,
         *,
+        agent: str = "codex",
         environment_root: Path | None = None,
         remote_url: str = "https://github.com/jj1xgo/agent-container.git",
     ) -> None:
@@ -1043,7 +1046,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         stderr = StringIO()
 
         result = main(
-            ["run", "agent-container"],
+            ["run", "agent-container", "--agent", agent],
             environment={
                 "AGENT_CONTAINER_HOME": str(
                     root if environment_root is None else environment_root
@@ -1059,7 +1062,21 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertEqual(calls, [])
         rendered = stdout.getvalue() + stderr.getvalue()
-        self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", rendered)
+        self._assert_private_values_absent(
+            rendered, "DO-NOT-PRINT-CREDENTIAL-BODY"
+        )
+
+    def _is_claude_status_spec(self, spec) -> bool:
+        return spec.argv[-8:] == (
+            "python3",
+            "-m",
+            "agent_container.claude_launcher",
+            "/run/secrets/claude-oauth-token",
+            "--",
+            "claude",
+            "auth",
+            "status",
+        )
 
     def _successful_doctor_runner(self, spec):
         if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
@@ -1068,6 +1085,11 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
 
     def _doctor_check_names(self, rendered: str) -> list[str]:
         return [line.split()[1].removesuffix(":") for line in rendered.splitlines()]
+
+    def _assert_private_values_absent(
+        self, rendered: str, *private_values: str
+    ) -> None:
+        self.assertTrue(all(value not in rendered for value in private_values))
 
     def test_run_validates_then_starts_codex(self) -> None:
         with TemporaryDirectory() as temp:
@@ -1122,7 +1144,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(result, 29)
             self.assertEqual(len(calls), 3)
             self.assertNotIn("Starting Codex", stdout.getvalue())
-            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
+            self._assert_private_values_absent(
+                stderr.getvalue(), "DO-NOT-PRINT-CREDENTIAL-BODY"
+            )
 
     def test_run_claude_creates_project_config_after_image_preflight(self) -> None:
         with TemporaryDirectory() as temp:
@@ -1185,14 +1209,91 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(len(calls), 3)
             self.assertFalse(config.exists())
 
+    def test_run_claude_rejects_legacy_project_credentials_before_podman(self) -> None:
+        marker = "DO-NOT-PRINT-CLAUDE-PROJECT-CREDENTIAL"
+        cases = ("empty", "non-empty", "symlink")
+        for entry_kind in cases:
+            with self.subTest(entry=entry_kind), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                config = root / "projects/agent-container/claude-config"
+                config.mkdir(mode=0o700)
+                credentials = config / ".credentials.json"
+                if entry_kind == "symlink":
+                    target = Path(temp) / marker
+                    target.write_text(marker, encoding="utf-8")
+                    credentials.symlink_to(target)
+                else:
+                    credentials.write_text(
+                        "" if entry_kind == "empty" else marker,
+                        encoding="utf-8",
+                    )
+                    credentials.chmod(0o600)
+                calls = []
+                stderr = StringIO()
+
+                result = main(
+                    ["run", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stderr=stderr,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                rendered = stderr.getvalue()
+                self.assertIn("unsupported legacy Claude project credential", rendered)
+                self.assertEqual(rendered.find(marker), -1)
+
+    def test_run_claude_rejects_invalid_active_token_before_podman(self) -> None:
+        marker = "DO-NOT-PRINT-INVALID-CLAUDE-TOKEN"
+        cases = ("format", "mode", "symlink")
+        for failure in cases:
+            with self.subTest(failure=failure), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                legacy_auth = root / "shared-auth/claude/.credentials.json"
+                legacy_auth.write_text("{}", encoding="ascii")
+                legacy_auth.chmod(0o600)
+                token = root / "shared-auth/claude/oauth-token"
+                if failure == "format":
+                    token.write_text("invalid", encoding="ascii")
+                elif failure == "mode":
+                    token.chmod(0o644)
+                else:
+                    target = Path(temp) / marker
+                    target.write_text("x" * 32, encoding="ascii")
+                    target.chmod(0o600)
+                    token.unlink()
+                    token.symlink_to(target)
+                calls = []
+                stderr = StringIO()
+
+                result = main(
+                    ["run", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stderr=stderr,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertEqual(stderr.getvalue().find(marker), -1)
+
     def test_run_claude_rejects_broad_auth_or_config_without_secret_output(self) -> None:
         cases = (
-            ("auth", "shared-auth/claude/.credentials.json", 0o644),
+            ("auth", "shared-auth/claude/oauth-token", 0o644),
             ("config", "projects/agent-container/claude-config", 0o755),
         )
         for name, relative_path, mode in cases:
             with self.subTest(boundary=name), TemporaryDirectory() as temp:
                 root, _ = self._runtime_state(temp)
+                if name == "auth":
+                    legacy_auth = root / "shared-auth/claude/.credentials.json"
+                    legacy_auth.write_text("{}", encoding="ascii")
+                    legacy_auth.chmod(0o600)
                 path = root / relative_path
                 if name == "config":
                     path.mkdir(mode=0o700)
@@ -1212,16 +1313,22 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 self.assertEqual(result, 1)
                 self.assertEqual(calls, [])
                 self.assertIn("mode", stderr.getvalue())
-                self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", stderr.getvalue())
+                self._assert_private_values_absent(
+                    stderr.getvalue(), "DO-NOT-PRINT-CLAUDE-CREDENTIAL"
+                )
 
     def test_run_claude_rejects_symlinked_auth_or_config_without_secret_output(self) -> None:
         cases = (
-            ("auth", "shared-auth/claude/.credentials.json", "auth-target"),
+            ("auth", "shared-auth/claude/oauth-token", "auth-target"),
             ("config", "projects/agent-container/claude-config", "config-target"),
         )
         for name, relative_path, target_name in cases:
             with self.subTest(boundary=name), TemporaryDirectory() as temp:
                 root, _ = self._runtime_state(temp)
+                if name == "auth":
+                    legacy_auth = root / "shared-auth/claude/.credentials.json"
+                    legacy_auth.write_text("{}", encoding="ascii")
+                    legacy_auth.chmod(0o600)
                 path = root / relative_path
                 target = Path(temp) / target_name
                 if name == "auth":
@@ -1248,7 +1355,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 self.assertEqual(result, 1)
                 self.assertEqual(calls, [])
                 self.assertIn("must not be a symlink", stderr.getvalue())
-                self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", stderr.getvalue())
+                self._assert_private_values_absent(
+                    stderr.getvalue(), "DO-NOT-PRINT-CLAUDE-CREDENTIAL"
+                )
 
     def test_run_rejects_identity_mismatch_before_building_runtime_spec(self) -> None:
         with TemporaryDirectory() as temp:
@@ -1307,7 +1416,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 "WARN  network-policy: outbound network is not domain-restricted in Phase 2",
                 rendered,
             )
-            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", rendered)
+            self._assert_private_values_absent(
+                rendered, "DO-NOT-PRINT-CREDENTIAL-BODY"
+            )
             self.assertEqual(
                 [call.argv for call in calls],
                 [
@@ -1333,6 +1444,160 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 self._doctor_check_names(rendered),
                 self.CODEX_DOCTOR,
             )
+
+    def test_doctor_claude_reports_authenticated_launcher_status(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            (root / "projects/agent-container/claude-config").mkdir(mode=0o700)
+            calls = []
+            output = StringIO()
+
+            def doctor_runner(spec):
+                calls.append(spec)
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="ignored\n")
+
+            result = main(
+                ["doctor", "agent-container", "--agent", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=doctor_runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=output,
+            )
+
+            self.assertEqual(result, 0)
+            rendered = output.getvalue()
+            self.assertIn("PASS  claude-auth: present, mode 0600", rendered)
+            self.assertIn("PASS  claude-auth-status: authenticated", rendered)
+            status_calls = [spec for spec in calls if self._is_claude_status_spec(spec)]
+            self.assertEqual(len(status_calls), 1)
+            self.assertIn(
+                f"type=bind,src={root / 'shared-auth/claude/oauth-token'},"
+                "dst=/run/secrets/claude-oauth-token,ro=true",
+                status_calls[0].argv,
+            )
+
+    def test_doctor_claude_status_failure_is_generic_and_secret_safe(self) -> None:
+        marker = "DO-NOT-PRINT-CLAUDE-STATUS-OUTPUT"
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            (root / "projects/agent-container/claude-config").mkdir(mode=0o700)
+            output = StringIO()
+
+            def doctor_runner(spec):
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+                if self._is_claude_status_spec(spec):
+                    return subprocess.CompletedProcess(
+                        spec.argv, 17, stdout=marker, stderr=marker
+                    )
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="ignored\n")
+
+            result = main(
+                ["doctor", "agent-container", "--agent", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=doctor_runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=output,
+            )
+
+            rendered = output.getvalue()
+            self.assertEqual(result, 1)
+            self.assertIn("PASS  claude-auth: present, mode 0600", rendered)
+            self.assertIn("FAIL  claude-auth-status: command failed", rendered)
+            self.assertEqual(
+                [line for line in rendered.splitlines() if line.startswith("FAIL")],
+                ["FAIL  claude-auth-status: command failed"],
+            )
+            self.assertEqual(rendered.find(marker), -1)
+
+    def test_doctor_claude_skips_status_when_token_is_invalid(self) -> None:
+        cases = ("missing", "format", "mode")
+        for failure in cases:
+            with self.subTest(failure=failure), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                (root / "projects/agent-container/claude-config").mkdir(mode=0o700)
+                token = root / "shared-auth/claude/oauth-token"
+                if failure == "missing":
+                    token.unlink()
+                elif failure == "format":
+                    token.write_text("invalid", encoding="ascii")
+                else:
+                    token.chmod(0o644)
+                calls = []
+                output = StringIO()
+
+                result = main(
+                    ["doctor", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or self._successful_doctor_runner(spec),
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stdout=output,
+                )
+
+                rendered = output.getvalue()
+                self.assertEqual(result, 1)
+                self.assertIn("FAIL  claude-auth:", rendered)
+                self.assertIn(
+                    "FAIL  claude-auth-status: not run: token invalid", rendered
+                )
+                self.assertFalse(any(self._is_claude_status_spec(spec) for spec in calls))
+
+    def test_doctor_claude_skips_status_when_image_is_missing(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            (root / "projects/agent-container/claude-config").mkdir(mode=0o700)
+            calls = []
+            output = StringIO()
+
+            def doctor_runner(spec):
+                calls.append(spec)
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+                if spec.argv[:3] == ("podman", "image", "exists"):
+                    return subprocess.CompletedProcess(spec.argv, 1)
+                return subprocess.CompletedProcess(spec.argv, 0)
+
+            result = main(
+                ["doctor", "agent-container", "--agent", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=doctor_runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=output,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertIn(
+                "FAIL  claude-auth-status: not run: image unavailable",
+                output.getvalue(),
+            )
+            self.assertFalse(any(self._is_claude_status_spec(spec) for spec in calls))
+
+    def test_doctor_claude_reports_legacy_project_credentials_without_body(self) -> None:
+        marker = "DO-NOT-PRINT-CLAUDE-PROJECT-CREDENTIAL"
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            config = root / "projects/agent-container/claude-config"
+            config.mkdir(mode=0o700)
+            credentials = config / ".credentials.json"
+            credentials.write_text(marker, encoding="utf-8")
+            credentials.chmod(0o600)
+            output = StringIO()
+
+            result = main(
+                ["doctor", "agent-container", "--agent", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=self._successful_doctor_runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=output,
+            )
+
+            rendered = output.getvalue()
+            self.assertEqual(result, 1)
+            self.assertIn("FAIL  claude-project-credentials:", rendered)
+            self.assertEqual(rendered.find(marker), -1)
 
     def test_doctor_reports_checks_in_selected_agent_order(self) -> None:
         cases = (
@@ -1363,7 +1628,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
     def test_doctor_all_runs_common_probes_once_and_reports_missing_claude_state(self) -> None:
         with TemporaryDirectory() as temp:
             root, _ = self._runtime_state(temp)
-            claude_auth = root / "shared-auth/claude/.credentials.json"
+            claude_auth = root / "shared-auth/claude/oauth-token"
             claude_auth.unlink()
             output = StringIO()
             calls = []
@@ -1416,13 +1681,16 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertFalse(
                 (root / "projects/agent-container/claude-config").exists()
             )
-            self.assertNotIn("DO-NOT-PRINT-CLAUDE-CREDENTIAL", rendered)
-            self.assertNotIn("DO-NOT-PRINT-PROBE-STDERR", rendered)
+            self._assert_private_values_absent(
+                rendered,
+                "DO-NOT-PRINT-CLAUDE-CREDENTIAL",
+                "DO-NOT-PRINT-PROBE-STDERR",
+            )
 
     def test_doctor_does_not_print_state_root_in_claude_validation_failures(self) -> None:
         marker = "DO-NOT-PRINT-STATE-ROOT"
         cases = (
-            ("claude-auth", "shared-auth/claude/.credentials.json"),
+            ("claude-auth", "shared-auth/claude/oauth-token"),
             ("claude-config", "projects/agent-container/claude-config"),
         )
         for failed_check, relative_path in cases:
@@ -1449,7 +1717,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 rendered = output.getvalue()
                 self.assertEqual(result, 1)
                 self.assertIn(f"FAIL  {failed_check}:", rendered)
-                self.assertNotIn(marker, rendered)
+                self.assertEqual(rendered.find(marker), -1)
 
     def test_doctor_failure_is_nonzero_and_does_not_print_secret_values(self) -> None:
         with TemporaryDirectory() as temp:
@@ -1473,7 +1741,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertIn("FAIL  codex-auth:", output.getvalue())
             self.assertIn("WARN  network-policy:", output.getvalue())
-            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", output.getvalue())
+            self._assert_private_values_absent(
+                output.getvalue(), "DO-NOT-PRINT-CREDENTIAL-BODY"
+            )
 
     def test_doctor_converts_filesystem_oserrors_to_ordered_failures(self) -> None:
         cases = (
@@ -1506,7 +1776,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                     self._doctor_check_names(rendered),
                     self.CODEX_DOCTOR,
                 )
-                self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", rendered)
+                self._assert_private_values_absent(
+                    rendered, "DO-NOT-PRINT-CREDENTIAL-BODY"
+                )
 
     def test_run_converts_filesystem_oserror_without_running_container(self) -> None:
         with TemporaryDirectory() as temp:
@@ -1529,7 +1801,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertEqual(runner_calls, [])
             self.assertIn("error: filesystem operation failed", stderr.getvalue())
-            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
+            self._assert_private_values_absent(
+                stderr.getvalue(), "DO-NOT-PRINT-CREDENTIAL-BODY"
+            )
 
     def test_run_rejects_symlinked_configured_state_root_before_runner(self) -> None:
         with TemporaryDirectory() as temp:

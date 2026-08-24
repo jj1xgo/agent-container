@@ -110,10 +110,6 @@ class StateLayout:
         return self.root / "shared-auth/claude"
 
     @property
-    def claude_auth_file(self) -> Path:
-        return self.claude_legacy_credentials_file
-
-    @property
     def claude_token_file(self) -> Path:
         return self.claude_auth_dir / "oauth-token"
 
