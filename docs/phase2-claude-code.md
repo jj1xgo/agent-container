@@ -35,6 +35,30 @@ bin/agentctl build \
 
 build contextにcredentialや状態rootは入れません。buildはnetwork accessと現在のpackage取得を伴うため、実hostでの実行前に利用者承認を得ます。
 
+## Project固有のpackageとNode.js
+
+project固有の依存はworkspace rootの`.agent-container.d/`で宣言します。許可するfileは`.agent-container.d/packages.txt`と`.agent-container.d/node-version.txt`だけです。旧名`.claude-container.d`、任意Containerfile、script、symlink、未知file、shell構文は拒否します。
+
+Debian packageは1行1個で指定します。空行と`#`から始まるcommentを使用できます。
+
+```text
+# .agent-container.d/packages.txt
+gcc
+libc6-dev
+make
+```
+
+project Nodeが必要な場合は、nodejs.orgで公開されている完全なversion番号を1行だけ指定します。archiveは公式checksumと照合されます。
+
+```text
+# .agent-container.d/node-version.txt
+22.23.1
+```
+
+設定があるprojectは`bin/agentctl run PROJECT`のrun時に自動buildされ、base image ID、設定内容、architectureが同じ間は同じderived imageを再利用します。buildに失敗した場合は古いderived imageやbase imageへfallbackせず、runtimeを開始しません。`doctorはread-only`で、`project-image`を`unconfigured`、`current`、`stale`、`missing`として報告し、buildしません。
+
+依存はimage build時だけに導入し、runtime中にpackageをinstallしません。`findsummits`には現時点でproject Nodeの固定要件が確認できないため、設定を追加しません。`sotlas-frontend`は上流要件のNode versionを、そのrepository自身の`.agent-container.d/node-version.txt`へ記録します。
+
 ## Claude setup-token認証
 
 初回操作は次の順で行います。

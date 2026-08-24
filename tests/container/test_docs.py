@@ -64,6 +64,21 @@ class Phase1DocumentationTest(unittest.TestCase):
 
 
 class Phase2DocumentationTest(unittest.TestCase):
+    def test_operator_guide_documents_project_derived_images(self) -> None:
+        body = (ROOT / "docs/phase2-claude-code.md").read_text(encoding="utf-8")
+
+        for expected in (
+            ".agent-container.d/packages.txt",
+            ".agent-container.d/node-version.txt",
+            ".claude-container.d",
+            "run時に自動build",
+            "doctorはread-only",
+            "runtime中にpackageをinstallしません",
+            "findsummits",
+            "sotlas-frontend",
+        ):
+            self.assertIn(expected, body)
+
     def test_operator_guide_documents_codex_default_and_build_only_updates(self) -> None:
         body = (ROOT / "docs/phase2-claude-code.md").read_text(encoding="utf-8")
 
