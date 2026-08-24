@@ -1001,6 +1001,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "podman-rootless",
         "image",
         "project-image",
+        "claude-managed-policy",
         "claude-version",
         "private-state",
         "claude-auth",
@@ -1018,6 +1019,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "podman-rootless",
         "image",
         "project-image",
+        "claude-managed-policy",
         "codex-version",
         "claude-version",
         "private-state",
@@ -2032,6 +2034,70 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertIn("FAIL  project-image: state validation failed", output.getvalue())
             self.assertNotIn(secret, output.getvalue())
             self.assertFalse(any(call.argv[:2] == ("podman", "build") for call in calls))
+
+    def test_doctor_reports_claude_managed_policy_without_command_output(self) -> None:
+        for returncode, level in ((0, "PASS"), (9, "FAIL")):
+            with self.subTest(returncode=returncode), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                (root / "projects/agent-container/claude-config").mkdir(mode=0o700)
+                calls = []
+                output = StringIO()
+
+                def runner(spec):
+                    calls.append(spec)
+                    if spec.argv[-3:] == (
+                        "python3", "-m", "agent_container.claude_policy"
+                    ):
+                        return subprocess.CompletedProcess(
+                            spec.argv,
+                            returncode,
+                            stdout="DO-NOT-PRINT-POLICY-OUTPUT",
+                            stderr="DO-NOT-PRINT-POLICY-ERROR",
+                        )
+                    return self._successful_doctor_runner(spec)
+
+                main(
+                    ["doctor", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stdout=output,
+                )
+
+                self.assertIn(
+                    f"{level}  claude-managed-policy: "
+                    f"{'valid' if returncode == 0 else 'invalid'}",
+                    output.getvalue(),
+                )
+                self.assertNotIn("DO-NOT-PRINT-POLICY", output.getvalue())
+                self.assertEqual(
+                    sum(
+                        call.argv[-3:]
+                        == ("python3", "-m", "agent_container.claude_policy")
+                        for call in calls
+                    ),
+                    1,
+                )
+
+    def test_codex_doctor_does_not_probe_claude_policy(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            calls = []
+
+            main(
+                ["doctor", "agent-container", "--agent", "codex"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec) or self._successful_doctor_runner(spec),
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+            )
+
+            self.assertFalse(
+                any(
+                    call.argv[-3:]
+                    == ("python3", "-m", "agent_container.claude_policy")
+                    for call in calls
+                )
+            )
 
     def test_doctor_converts_filesystem_oserrors_to_ordered_failures(self) -> None:
         cases = (

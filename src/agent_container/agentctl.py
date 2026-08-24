@@ -30,6 +30,7 @@ from agent_container.podman import cli_version_spec
 from agent_container.podman import codex_login_status_spec
 from agent_container.podman import claude_setup_token_spec
 from agent_container.podman import claude_token_status_spec
+from agent_container.podman import claude_policy_status_spec
 from agent_container.podman import node_version_spec
 from agent_container.podman import podman_image_exists_spec
 from agent_container.podman import podman_architecture_spec
@@ -637,6 +638,24 @@ def _doctor(
                     "FAIL", "project-image", _check_failure_detail(error)
                 )
             )
+
+    if "claude" in agents:
+        if runtime_image is None:
+            policy_ok = False
+            policy_detail = "image unavailable"
+        else:
+            policy_status = _doctor_run(
+                runner, claude_policy_status_spec(runtime_image)
+            )
+            policy_ok = policy_status.returncode == 0
+            policy_detail = "valid" if policy_ok else "invalid"
+        checks.append(
+            CheckResult(
+                "PASS" if policy_ok else "FAIL",
+                "claude-managed-policy",
+                policy_detail,
+            )
+        )
 
     for selected_agent in agents:
         if runtime_image is not None:

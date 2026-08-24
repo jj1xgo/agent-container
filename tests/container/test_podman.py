@@ -7,6 +7,7 @@ from agent_container.podman import codex_login_status_spec
 from agent_container.podman import build_image_spec
 from agent_container.podman import build_project_image_spec
 from agent_container.podman import claude_setup_token_spec
+from agent_container.podman import claude_policy_status_spec
 from agent_container.podman import claude_token_status_spec
 from agent_container.podman import cli_version_spec
 from agent_container.podman import clone_project_spec
@@ -24,6 +25,23 @@ DERIVED = "localhost/agent-container-project:sotlas-frontend-0123456789abcdef"
 
 
 class PodmanCommandTest(unittest.TestCase):
+    def test_claude_policy_probe_is_hardened_and_mount_free(self) -> None:
+        spec = claude_policy_status_spec(IMAGE)
+
+        self.assertEqual(
+            spec.argv[-3:],
+            ("python3", "-m", "agent_container.claude_policy"),
+        )
+        self.assertNotIn("--mount", spec.argv)
+        for required in (
+            "--rm",
+            "--read-only",
+            "--cap-drop=all",
+            "--security-opt=no-new-privileges",
+            "--userns=keep-id:uid=1000,gid=1000",
+        ):
+            self.assertIn(required, spec.argv)
+
     def test_project_image_inspection_and_build_commands(self) -> None:
         self.assertEqual(
             podman_image_id_spec(IMAGE).argv,
