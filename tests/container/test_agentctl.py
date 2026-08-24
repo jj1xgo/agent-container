@@ -136,6 +136,8 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
 
         def runner(spec):
             calls.append(spec)
+            if spec.argv[-2:] == ("node", "--version"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="v22.23.1\n")
             if spec.argv[-2:] == ("codex", "--version"):
                 return subprocess.CompletedProcess(spec.argv, 0, stdout="codex 0.149.0\n")
             if spec.argv[-2:] == ("claude", "--version"):
@@ -164,11 +166,17 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
         self.assertIn("AGENT_CLI_CACHEBUST=12345", calls[2].argv)
         self.assertEqual(
             [call.argv[-2:] for call in calls[3:]],
-            [("codex", "--version"), ("claude", "--version")],
+            [
+                ("node", "--version"),
+                ("codex", "--version"),
+                ("claude", "--version"),
+            ],
         )
         self.assertEqual(
             stdout.getvalue(),
-            "Codex version: codex 0.149.0\nClaude version: claude 1.2.3\n",
+            "Node version: v22.23.1\n"
+            "Codex version: codex 0.149.0\n"
+            "Claude version: claude 1.2.3\n",
         )
 
     def test_build_returns_claude_probe_exit_without_printing_probe_stderr(self) -> None:

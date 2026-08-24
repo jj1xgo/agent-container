@@ -1,3 +1,3 @@
 #!/bin/sh
 set -eu
-exec /opt/agent-node/bin/node /opt/agent-node/bin/claude "$@"
+exec /opt/agent-node/bin/claude "$@"

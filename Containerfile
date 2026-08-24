@@ -7,8 +7,28 @@ ARG AGENT_CLI_CACHEBUST=0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-      bubblewrap ca-certificates curl gh git passwd python3 socat xz-utils \
+      bubblewrap ca-certificates curl git libatomic1 passwd python3 socat xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) gh_arch=amd64 ;; \
+      arm64) gh_arch=arm64 ;; \
+      *) echo "unsupported GitHub CLI architecture" >&2; exit 1 ;; \
+    esac; \
+    release_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+      https://github.com/cli/cli/releases/latest)"; \
+    gh_version="$(printf '%s\n' "${release_url}" \
+      | python3 -c 'import re, sys; match = re.fullmatch(r"https://github\.com/cli/cli/releases/tag/v(\d+\.\d+\.\d+)", sys.stdin.read().strip()); print(match.group(1) if match else (_ for _ in ()).throw(SystemExit("invalid GitHub CLI release URL")))')"; \
+    archive="gh_${gh_version}_linux_${gh_arch}.tar.gz"; \
+    checksums="gh_${gh_version}_checksums.txt"; \
+    release="https://github.com/cli/cli/releases/download/v${gh_version}"; \
+    curl -fsSLO "${release}/${archive}"; \
+    curl -fsSLO "${release}/${checksums}"; \
+    grep "  ${archive}$" "${checksums}" | sha256sum --check --strict -; \
+    tar -xzf "${archive}"; \
+    install -m 0755 "gh_${gh_version}_linux_${gh_arch}/bin/gh" /usr/local/bin/gh; \
+    rm -rf "${archive}" "${checksums}" "gh_${gh_version}_linux_${gh_arch}"
 
 RUN set -eux; \
     case "$(dpkg --print-architecture)" in \
@@ -31,7 +51,7 @@ RUN set -eux; \
     rm -f "${archive}" SHASUMS256.txt
 
 RUN test -n "${AGENT_CLI_CACHEBUST}" \
-    && /opt/agent-node/bin/npm install --global \
+    && PATH=/opt/agent-node/bin:$PATH /opt/agent-node/bin/npm install --global \
       "@openai/codex@${CODEX_VERSION}" \
       "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
 
@@ -42,6 +62,7 @@ RUN groupadd --gid 1000 agent \
 
 COPY --chmod=0755 container/bin/codex /usr/local/bin/codex
 COPY --chmod=0755 container/bin/claude /usr/local/bin/claude
+COPY container/profile.d/10-agent-node.sh /etc/profile.d/10-agent-node.sh
 COPY src /opt/agent-container/src
 COPY profiles/codex /opt/agent-container/profiles/codex
 

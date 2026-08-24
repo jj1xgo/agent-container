@@ -28,6 +28,7 @@ from agent_container.podman import cli_version_spec
 from agent_container.podman import codex_login_status_spec
 from agent_container.podman import claude_setup_token_spec
 from agent_container.podman import claude_token_status_spec
+from agent_container.podman import node_version_spec
 from agent_container.podman import podman_image_exists_spec
 from agent_container.podman import podman_rootless_spec
 from agent_container.podman import podman_version_spec
@@ -785,10 +786,13 @@ def main(
                     cachebuster_reader(),
                 )
             )
-            for label, agent in (("Codex", "codex"), ("Claude", "claude")):
-                version = _required_probe_run(
-                    runner, cli_version_spec(arguments.image, agent)
-                )
+            probes = (
+                ("Node", node_version_spec(arguments.image)),
+                ("Codex", cli_version_spec(arguments.image, "codex")),
+                ("Claude", cli_version_spec(arguments.image, "claude")),
+            )
+            for label, probe in probes:
+                version = _required_probe_run(runner, probe)
                 print(f"{label} version: {(version.stdout or '').strip()}", file=stdout)
             return 0
         if arguments.command == "auth" and arguments.agent == "codex":

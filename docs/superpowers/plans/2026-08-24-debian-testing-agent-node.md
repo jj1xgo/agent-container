@@ -157,10 +157,12 @@ self.assertIn("SHASUMS256.txt", body)
 self.assertIn("/opt/agent-node", body)
 self.assertNotIn("FROM docker.io/library/node:", body)
 
-for wrapper in ("codex", "claude"):
-    wrapper_body = (ROOT / f"container/bin/{wrapper}").read_text(encoding="utf-8")
-    self.assertIn("exec /opt/agent-node/bin/node", wrapper_body)
-    self.assertNotIn("/usr/bin/env node", wrapper_body)
+codex_wrapper = (ROOT / "container/bin/codex").read_text(encoding="utf-8")
+self.assertIn("exec /opt/agent-node/bin/node /opt/agent-node/bin/codex", codex_wrapper)
+
+claude_wrapper = (ROOT / "container/bin/claude").read_text(encoding="utf-8")
+self.assertIn("exec /opt/agent-node/bin/claude", claude_wrapper)
+self.assertNotIn("/opt/agent-node/bin/node", claude_wrapper)
 ```
 
 Also replace `test_image_reuses_base_node_identity_for_agent` with assertions for explicit UID/GID 1000 creation because Debian no longer provides the `node` user.
@@ -184,10 +186,10 @@ exec /opt/agent-node/bin/node /opt/agent-node/bin/codex "$@"
 # container/bin/claude
 #!/bin/sh
 set -eu
-exec /opt/agent-node/bin/node /opt/agent-node/bin/claude "$@"
+exec /opt/agent-node/bin/claude "$@"
 ```
 
-The wrapper path differs from the npm-created CLI symlink, so Node can follow `/opt/agent-node/bin/<agent>` without recursion.
+The wrapper paths differ from the npm-created CLI symlinks. Codex is launched with the fixed agent Node; current Claude Code packages expose a native executable and are launched directly from the fixed agent install path.
 
 - [ ] **Step 4: Implement the Debian testing Containerfile**
 

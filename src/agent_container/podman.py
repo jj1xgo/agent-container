@@ -114,6 +114,25 @@ def cli_version_spec(image: str, agent: str) -> CommandSpec:
     )
 
 
+def node_version_spec(image: str) -> CommandSpec:
+    return CommandSpec(
+        (
+            "podman",
+            "run",
+            "--rm",
+            "--read-only",
+            "--cap-drop=all",
+            "--security-opt=no-new-privileges",
+            "--userns=keep-id:uid=1000,gid=1000",
+            "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
+            image,
+            "node",
+            "--version",
+        ),
+        {},
+    )
+
+
 def auth_codex_spec(layout: StateLayout, image: str) -> CommandSpec:
     argv = _runtime_prefix(os.getuid(), os.getgid())
     argv += ["--mount", _mount(layout.codex_auth_dir, "/home/agent/.codex")]

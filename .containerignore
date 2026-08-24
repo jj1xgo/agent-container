@@ -9,6 +9,8 @@
 !container/bin/
 !container/bin/codex
 !container/bin/claude
+!container/profile.d/
+!container/profile.d/10-agent-node.sh
 **/auth.json
 **/hosts.yml
 **/.git

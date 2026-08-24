@@ -61,6 +61,23 @@ class PodmanCommandTest(unittest.TestCase):
                 ):
                     self.assertIn(required, spec.argv)
 
+    def test_node_version_probe_is_hardened_and_mount_free(self) -> None:
+        from agent_container.podman import node_version_spec
+
+        spec = node_version_spec(IMAGE)
+
+        self.assertEqual(spec.argv[-2:], ("node", "--version"))
+        self.assertNotIn("--mount", spec.argv)
+        for required in (
+            "--rm",
+            "--read-only",
+            "--cap-drop=all",
+            "--security-opt=no-new-privileges",
+            "--userns=keep-id:uid=1000,gid=1000",
+            "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
+        ):
+            self.assertIn(required, spec.argv)
+
     def test_auth_mounts_only_shared_codex_auth_directory(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")
         spec = auth_codex_spec(layout, IMAGE)

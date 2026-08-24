@@ -71,7 +71,7 @@ baseは`debian:testing-slim`とする。不足packageは実際のbuild/testで�
 
 agent runtime Nodeはnodejs.orgの公式Linux binary archiveから導入し、公開checksumと照合する。CodexとClaude Codeもagent runtime Node配下へinstallする。通常buildは`latest`を意味し、cachebusterを使う明示的なrebuildでは最新versionを解決する。既存の`--codex-version`と`--claude-version`に加え、agent runtime Nodeも明示versionへ固定できる入力を用意するが、defaultはlatest stableとする。
 
-agent CLIのentrypoint wrapperは`/opt/agent-node/bin/node`とinstall済みCLI entrypointを明示して起動する。`/usr/bin/env node`やruntime `PATH`へ依存させない。
+agent CLIのentrypoint wrapperはinstall済みCLIを固定pathで起動する。CodexのJavaScript entrypointは`/opt/agent-node/bin/node`を明示し、native executableとして配布されるClaude Codeは`/opt/agent-node/bin/claude`を直接実行する。`/usr/bin/env node`やruntime `PATH`へ依存させない。
 
 ## Project configuration
 
@@ -84,7 +84,7 @@ canonical directoryはworkspace rootの`.agent-container.d/`だけとする。`.
 
 directory、file、親directoryのsymlink、特殊file、path traversal、追加fileは拒否する。`packages.txt`ではleading option、whitespaceを含む1行、shell metacharacter、command substitutionを拒否する。package名と、必要な場合に限りDebianの`name=version`形式を許可する。buildは`apt-get update`後に`--no-install-recommends`でinstallし、APT metadataを削除する。
 
-`node-version.txt`のarchiveはnodejs.org公式配布元だけから取得し、公式checksumと照合する。project Nodeは`/opt/project-node`へ置く。対話的なBashとproject commandでは`/opt/project-node/bin`をagent Nodeより先に`PATH`へ置くが、Codex/Claude wrapperは常にagent Nodeを直接使う。
+`node-version.txt`のarchiveはnodejs.org公式配布元だけから取得し、公式checksumと照合する。project Nodeは`/opt/project-node`へ置く。対話的なBashとproject commandでは`/opt/project-node/bin`をagent Nodeより先に`PATH`へ置くが、Codex/Claude wrapperは常にagent installの固定pathを使う。
 
 `findsummits`で確認されたNode 22.14.0はCodex MCPをnpm installする目的で追加されたもので、project自体のNode依存は確認できなかった。そのため現時点ではproject Nodeを指定しない。`sotlas-frontend`は上流要件に従い、`.agent-container.d/node-version.txt`でversionを指定する。
 

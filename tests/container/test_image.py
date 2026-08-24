@@ -31,10 +31,29 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertIsNotNone(install)
         installed = set(install.group("packages").replace("\\", "").split())
         self.assertEqual(
-            {"bubblewrap", "ca-certificates", "curl", "gh", "git", "python3", "socat", "xz-utils"}
+            {
+                "bubblewrap",
+                "ca-certificates",
+                "curl",
+                "git",
+                "libatomic1",
+                "python3",
+                "socat",
+                "xz-utils",
+            }
             - installed,
             set(),
         )
+
+    def test_image_installs_checksum_verified_official_github_cli(self) -> None:
+        body = (ROOT / "Containerfile").read_text(encoding="utf-8")
+
+        self.assertNotIn("api.github.com/repos/cli/cli/releases/latest", body)
+        self.assertIn("https://github.com/cli/cli/releases/latest", body)
+        self.assertIn("%{url_effective}", body)
+        self.assertIn("https://github.com/cli/cli/releases/download/", body)
+        self.assertIn('gh_${gh_version}_checksums.txt', body)
+        self.assertRegex(body, r"sha256sum\s+--check\s+--strict")
 
     def test_image_installs_latest_agent_clis_and_runs_as_agent(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
@@ -46,6 +65,10 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertIn("ARG AGENT_CLI_CACHEBUST=0", body)
         self.assertIn("@openai/codex@${CODEX_VERSION}", body)
         self.assertIn("@anthropic-ai/claude-code@${CLAUDE_VERSION}", body)
+        self.assertIn(
+            "PATH=/opt/agent-node/bin:$PATH /opt/agent-node/bin/npm install --global",
+            body,
+        )
         self.assertIn("https://nodejs.org/dist/", body)
         self.assertIn("SHASUMS256.txt", body)
         self.assertIn("/opt/agent-node", body)
@@ -55,14 +78,27 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertIn("COPY src /opt/agent-container/src", body)
         self.assertIn("PYTHONPATH=/opt/agent-container/src", body)
         self.assertIn("COPY profiles/codex /opt/agent-container/profiles/codex", body)
+        self.assertIn(
+            "COPY container/profile.d/10-agent-node.sh /etc/profile.d/10-agent-node.sh",
+            body,
+        )
         self.assertNotRegex(body, r"(?m)^COPY\s+.*(?:credentials|oauth-token)")
 
-        for wrapper in ("codex", "claude"):
-            wrapper_body = (ROOT / f"container/bin/{wrapper}").read_text(
-                encoding="utf-8"
-            )
-            self.assertIn("exec /opt/agent-node/bin/node", wrapper_body)
-            self.assertNotIn("/usr/bin/env node", wrapper_body)
+        profile = (ROOT / "container/profile.d/10-agent-node.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("PATH=/opt/agent-node/bin:$PATH", profile)
+
+        codex_wrapper = (ROOT / "container/bin/codex").read_text(encoding="utf-8")
+        self.assertIn(
+            "exec /opt/agent-node/bin/node /opt/agent-node/bin/codex",
+            codex_wrapper,
+        )
+        self.assertNotIn("/usr/bin/env node", codex_wrapper)
+
+        claude_wrapper = (ROOT / "container/bin/claude").read_text(encoding="utf-8")
+        self.assertIn("exec /opt/agent-node/bin/claude", claude_wrapper)
+        self.assertNotIn("/opt/agent-node/bin/node", claude_wrapper)
 
     def test_image_creates_fixed_agent_identity(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
@@ -89,6 +125,8 @@ class ContainerImageContractTest(unittest.TestCase):
                 "!container/bin/",
                 "!container/bin/codex",
                 "!container/bin/claude",
+                "!container/profile.d/",
+                "!container/profile.d/10-agent-node.sh",
                 "**/auth.json",
                 "**/hosts.yml",
                 "**/.git",

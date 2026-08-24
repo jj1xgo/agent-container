@@ -6,7 +6,7 @@ Phase 2では、既存のrootless Podmanとproject別workspaceを維持したま
 
 - Linux上のrootless Podmanが必要です。host network、Podman socket、通常のhost workspace、他projectのhandoverはcontainerへ渡しません。
 - 状態rootは既定で`${XDG_DATA_HOME:-~/.local/share}/agent-container`です。必要なら、実在する絶対pathを`AGENT_CONTAINER_HOME`へ設定します。state directoryは`0700`、credential fileは`0600`、いずれも実行user所有で、symlinkは使えません。
-- hostの`~/.claude`はmountしません。Claudeの共有認証は状態rootの`shared-auth/claude/.credentials.json`だけです。credential本文を表示しません。
+- hostの`~/.claude`はmountしません。Claudeの共有認証は状態rootの`shared-auth/claude/oauth-token`だけです。directoryは`0700`、token fileは通常file・`0600`・非symlink・実行user所有でなければなりません。credential本文を表示しません。
 - Phase 2では`外向き通信はドメイン制限されていません`。package取得、Claude、GitHubへ通常のrootless Podman networkで接続します。domain allowlist済みとは扱いません。
 - GitHub CLI（`gh`）認証は専用state rootの`gh`へあらかじめ用意します。認証更新やscope変更は通常runの外で行います。
 
@@ -18,31 +18,43 @@ export AGENT_CONTAINER_HOME="$HOME/.local/share/agent-container"
 
 ## Image build、更新、rollback
 
-通常buildはCodexとClaude Codeの両方をnpmから`latest`でinstallし、毎回CLI install layerを更新します。build後は両CLIの`--version`が成功することを確認します。runtimeのself-updateは`DISABLE_UPDATES=1`で無効です。version変更はimageの再build時だけに起き、実行中のcontainerでCLI versionは変わりません。
+通常buildは`debian:testing-slim`をbaseにし、agent用Node.jsをnodejs.orgの公式配布物から`latest`で取得してchecksumを検証します。CodexとClaude Codeもnpmから`latest`でinstallします。3つの既定値が`latest`であり、毎回新しいcachebusterをbuild argumentへ渡してCLI install layerを無効化するため、通常buildのたびに現在公開されている最新versionを解決します。build後は出力されたNode、Codex、Claude Codeのversionを記録します。runtimeのself-updateは`DISABLE_UPDATES=1`で無効です。version変更はimageの再build時だけに起き、実行中のcontainerでversionは変わりません。
 
 ```bash
 bin/agentctl build
 ```
 
-問題調査またはrollbackでは、既知の安全なversionを両方明示してimageを再buildします。versionは空白、control character、optionに見える値を受け付けません。
+問題調査またはrollbackでだけ、既知の安全なversionを明示してimageを再buildします。通常の更新に固定version optionを使いません。versionは空白、control character、optionに見える値を受け付けません。
 
 ```bash
 bin/agentctl build \
+  --node-version VERSION \
   --codex-version VERSION \
   --claude-version VERSION
 ```
 
 build contextにcredentialや状態rootは入れません。buildはnetwork accessと現在のpackage取得を伴うため、実hostでの実行前に利用者承認を得ます。
 
-## Claude login
+## Claude setup-token認証
 
-image build後、利用者同席でClaude認証を行います。Claude.ai/Consoleの対話選択はClaude CLIに任せ、API keyやOAuth tokenをcommand lineへ渡しません。
+初回操作は次の順で行います。
+
+```bash
+bin/agentctl build
+bin/agentctl auth claude
+bin/agentctl doctor agent-container --agent claude
+bin/agentctl run agent-container --agent claude
+```
+
+`bin/agentctl auth claude`は必ず利用者本人がscreen recordingやcaptured automationのないprivate terminalで実行します。内部で起動する`claude setup-token`は、Claude subscriptionで使う1年間有効なinference専用tokenをそのterminalに一度表示します。その後のhost promptは入力を表示しません。表示されたtokenはそのhidden promptにだけ貼り付け、chat、この会話、handover、shell history、screenshot、log、command line、環境変数へ貼り付けたり記録したりしません。このcredentialではClaude Remote Controlを利用できません。
 
 ```bash
 bin/agentctl auth claude
 ```
 
-このcommandは認証専用containerへ`shared-auth/claude`だけをread-write mountし、`CLAUDE_CONFIG_DIR=/home/agent/.claude`で`claude auth login`を起動します。終了後、`.credentials.json`が通常file・`0600`・実行user所有であることを検証し、同じ限定mountで`claude auth status`を実行します。browser code、token、credential本文は表示・記録しません。
+setup containerはhostのClaude configをmountせず、tmpfs上の一時`CLAUDE_CONFIG_DIR`だけを使用します。hidden promptで受け取ったtokenは同じprivate directoryのstaging fileへ保存され、そのstaging tokenをread-only mountしたlauncher経由の`claude auth status`が成功した後だけ、`shared-auth/claude/oauth-token`へatomic replaceされます。setup、prompt、format、staging、status、activationのどこで失敗または取消になっても、それまで有効だったtokenは変更されず、legacy stateも移動しません。statusのstdout/stderrとtoken本文は表示・記録しません。
+
+新tokenのactivationが成功した後だけ、旧shared authの`.credentials.json`、`.claude.json`、`backups`が`<state-root>/quarantine/claude/<run-id>/`へ移されます。quarantine directoryは`0700`、fileは`0600`に正規化され、symlinkや特殊fileは拒否されます。quarantineは自動削除も自動復元もしません。
 
 ## 初回Claude run前のmigration
 
@@ -91,7 +103,9 @@ CodexとClaudeの状態を一度に診断する場合は、共通checkを一回�
 bin/agentctl doctor PROJECT --agent all
 ```
 
-`doctor`はrootless Podman、image、CLI version、private state、認証file、Claude config、専用`gh`設定、workspaceのHTTPS origin、project handover境界を診断します。`WARN network-policy`は既知のnetwork制約であり、`FAIL`が一つでもあれば非zeroで終了します。出力は存在・mode・check結果だけで、credential本文や環境変数値を出しません。
+`doctor`はrootless Podman、image、CLI version、private state、認証file、Claude config、専用`gh`設定、workspaceのHTTPS origin、project handover境界を診断します。Claudeでは`claude-auth`がtokenの通常file・owner・mode・format、`claude-auth-status`がlauncher経由のlocal status、`claude-config`がproject config directory、`claude-project-credentials`がproject config内の`.credentials.json`不在を表します。`WARN network-policy`は既知のnetwork制約であり、`FAIL`が一つでもあれば非zeroで終了します。出力は存在・mode・check結果だけで、credential本文や環境変数値を出しません。
+
+`claude-auth-status`のPASSだけではtokenが現在のAPI inferenceに使える証明になりません。staleまたはrevoked tokenでもlocal statusが成功し、実inferenceがHTTP 401になる可能性があるため、host smokeでは必ず最小の実API応答も確認します。
 
 ## Claudeのrunとresume
 
@@ -118,21 +132,24 @@ Claudeを通常終了した後は同じprojectを同じ`run --agent claude`で�
 | --- | --- | --- |
 | 選択projectのworkspace | `/workspace` | read-write |
 | 選択projectの`claude-config` | `/home/agent/.claude` | read-write |
-| 共有`.credentials.json` | `/home/agent/.claude/.credentials.json` | read-write file mount |
+| 共有`oauth-token` | `/run/secrets/claude-oauth-token` | read-only file mount |
 | 選択projectのcache | `/home/agent/.cache` | read-write |
 | 専用`gh` config | `/home/agent/.config/gh` | read-only |
 | 選択projectのhandover directory | `/handovers/PROJECT` | read-write |
 
-containerは`--read-only`、`--cap-drop=all`、`no-new-privileges`、host userと一致するkeep-id namespace、`/tmp`だけのtmpfsを使います。Claude向けpermission bypass optionは渡しません。`CLAUDE_CONFIG_DIR=/home/agent/.claude`、`AGENT_PROJECT_ID`、`AGENT_HANDOVER_ROOT=/handovers`を設定します。
+containerは`--read-only`、`--cap-drop=all`、`no-new-privileges`、host userと一致するkeep-id namespace、bounded `/tmp` tmpfs、Linuxのcontainer PID namespaceを使います。Claude向けpermission bypass optionは渡しません。`CLAUDE_CONFIG_DIR=/home/agent/.claude`、`AGENT_PROJECT_ID`、`AGENT_HANDOVER_ROOT=/handovers`を設定します。
+
+専用launcherだけがsecret fileを`O_NOFOLLOW`で開いてtokenをClaude processへ渡します。tokenはPodman argvにもhost環境にも入りません。launcherは`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`を必須設定し、ClaudeのBash、hooks、MCP stdio serverなどのsubprocessへ`CLAUDE_CODE_OAUTH_TOKEN`やAnthropic/cloud credential環境変数を継承させません。確認時も環境一覧、値、prefix、長さ、process environment、secret file本文を表示せず、「存在しない」というbooleanだけを記録します。
 
 ## 障害時
 
 - `doctor`のFAILは、表示されたcheckを起点に修正します。state mode、ownership、symlink、workspace origin、image、rootless設定を確認し、credential本文を読まないでください。
-- 認証確認は`claude auth status`だけで行います。`.credentials.json`に対して`cat`、`jq`、`sed`など本文を出すcommandは実行しません。
-- 認証更新でnested credential file mountへのwrite/rename errorが出た場合は停止します。共有config directory全体のmountやprojectごとのcredential copyへ緩和しません。
+- credentialを調べるときは`lstat`相当でexact path、type、mode、ownerだけを確認します。`oauth-token`、旧`.credentials.json`、`.claude.json`、backupに対して`cat`、JSON parser、checksum、prefix確認、長さ表示など本文を読むcommandは実行しません。
+- setup、hidden prompt、token format、`claude auth status`、activationのいずれかが失敗したら停止し、以前のactive tokenが維持され、legacy stateとquarantine対象が移動していないことをmetadataだけで確認します。共有config directory全体のmount、nested credential mount、projectごとのcredential copyへ緩和しません。
+- project `claude-config/.credentials.json`が空fileを含め存在すれば、runtimeとdoctorは拒否します。認証成功後のrecoveryでだけ本文を読まずにprivate quarantineへ移し、project `.claude.json`、backups、cache、sessions、plugins、memoryは移動しません。
 - migrationが拒否または衝突した場合は、destinationを手で消去・上書きせず、dry-runのsource boundary、allowlist、plugin metadataをreviewします。
 - 実hostの対話login、credential refresh、resume、mount検査は[Phase 2 smoke checklist](phase2-smoke-test.md)で承認を得て実行します。未実施をPASSと扱いません。
 
 ## Codexへのrollbackと旧container
 
-Claudeで問題が起きても、同じprojectを`bin/agentctl run PROJECT --agent codex`でCodexとして起動できます。必要なら明示versionでimageを再buildします。Phase 2はhostの`~/.claude`をmountせず、migration sourceをread-onlyに扱い、旧claude-containerを変更しません。そのため、旧containerへ戻るときにPhase 2が旧containerのstateやGit repositoryを復元・変更することはありません。
+Claudeで問題が起きても、同じprojectを`bin/agentctl run PROJECT --agent codex`でCodexとして起動できます。CLI versionの回帰が疑われる場合だけ、既知のversionを`--codex-version`と`--claude-version`で明示してimageを再buildします。active `oauth-token`やquarantineを削除せず、legacy quarantineの復元は自動化しません。Phase 2はhostの`~/.claude`をmountせず、migration sourceをread-onlyに扱い、旧claude-containerを変更しません（停止・rename・remove・rebuildもしません）。そのため、旧containerへ戻るときにPhase 2が旧containerのstateやGit repositoryを復元・変更することはありません。
