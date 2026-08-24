@@ -10,6 +10,12 @@
 
 配布元は`profiles/codex/config.toml`。model+reasoning、context残量、primary/secondary limit、使用token、Git branch、project名の順に表示する。API情報やGit情報がない項目は表示されない場合がある。対話的な変更は`/statusline`で行う。
 
+## Image再buildとCLI version
+
+通常の`bin/agentctl build`はCodexとClaude Codeのversion既定値を両方`latest`としてnpmへ解決し、毎回変わるcachebusterでCLI install layerをinvalidateする。そのため、通常buildはその時点で公開されている両CLIの最新versionを取得し、終了時に解決した公開versionを表示する。runtimeのself-updateは無効であり、version変更はimage再build時だけに起きる。
+
+`--codex-version VERSION`と`--claude-version VERSION`は問題調査またはrollback専用である。通常の更新では固定versionを渡さない。
+
 ## handover保存境界
 
 launcherは対象projectについてだけ`AGENT_PROJECT_ID`と`AGENT_HANDOVER_ROOT`を設定する。Obsidian vault全体をmountしない。handover本文にはcredentialの値を残さない。
