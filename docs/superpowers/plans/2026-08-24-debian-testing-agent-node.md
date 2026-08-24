@@ -65,7 +65,7 @@ self.assertIn("NODE_VERSION=22.23.1", spec.argv)
 
 - [ ] **Step 2: Run the focused tests and confirm failure**
 
-Run: `python3 -m unittest tests.container.test_podman.PodmanCommandTest.test_build_uses_versions_cachebuster_and_repository_context tests.container.test_agentctl.AgentCtlParserTest.test_new_command_contract -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_podman.PodmanCommandTest.test_build_uses_versions_cachebuster_and_repository_context tests.container.test_agentctl.AgentCtlParserTest.test_new_command_contract -v`
 
 Expected: FAIL because `build_image_spec` has no Node argument and the parser has no `node_version`.
 
@@ -122,7 +122,7 @@ self.assertIn("version", stderr.getvalue())
 
 - [ ] **Step 5: Run focused tests**
 
-Run: `python3 -m unittest tests.container.test_podman tests.container.test_agentctl.AgentCtlParserTest -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_podman tests.container.test_agentctl.AgentCtlParserTest -v`
 
 Expected: PASS.
 
@@ -167,7 +167,7 @@ Also replace `test_image_reuses_base_node_identity_for_agent` with assertions fo
 
 - [ ] **Step 2: Run the image-contract tests and confirm failure**
 
-Run: `python3 -m unittest tests.container.test_image -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_image -v`
 
 Expected: FAIL on the base image, Node source, wrapper files, and user creation contract.
 
@@ -255,7 +255,7 @@ Extend the tracked-copy-input test to include `container/bin`. Keep all existing
 
 - [ ] **Step 6: Run image-contract tests**
 
-Run: `python3 -m unittest tests.container.test_image -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_image -v`
 
 Expected: PASS.
 
@@ -290,7 +290,7 @@ self.assertIn("Claude version:", stdout.getvalue())
 
 - [ ] **Step 2: Run the focused controller test and confirm failure**
 
-Run: `python3 -m unittest tests.container.test_agentctl.AgentCtlBuildAuthTest -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_agentctl.AgentCtlBuildAuthTest -v`
 
 Expected: FAIL because the controller reports only Codex and Claude.
 
@@ -300,7 +300,7 @@ Add `node_version_spec(image)` beside `cli_version_spec`, using the same read-on
 
 - [ ] **Step 4: Run controller and Podman tests**
 
-Run: `python3 -m unittest tests.container.test_agentctl tests.container.test_podman -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_agentctl tests.container.test_podman -v`
 
 Expected: PASS.
 
@@ -315,9 +315,9 @@ In `docs/phase2-claude-code.md`, preserve the user's existing dirty edits and ad
 
 - [ ] **Step 6: Run documentation and full unit tests**
 
-Run: `python3 -m unittest tests.container.test_docs -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_docs -v`
 
-Run: `python3 -m unittest discover -s tests -v`
+Run: `PYTHONPATH=src python3 -m unittest discover -s tests -v`
 
 Expected: PASS with no unexpected test count reduction.
 

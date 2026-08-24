@@ -67,7 +67,7 @@ Also test an absent directory returns `ProjectImageConfig((), None)`.
 
 - [ ] **Step 2: Run tests and confirm import failure**
 
-Run: `python3 -m unittest tests.container.test_project_image -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_project_image -v`
 
 Expected: ERROR because `agent_container.project_image` does not exist.
 
@@ -116,7 +116,7 @@ Use `lstat()`/`stat.S_ISREG` and resolved-parent equality checks. Read at most 6
 
 - [ ] **Step 6: Run project-image tests**
 
-Run: `python3 -m unittest tests.container.test_project_image -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_project_image -v`
 
 Expected: PASS.
 
@@ -157,7 +157,7 @@ self.assertEqual(project_image_name("sotlas-frontend", first), f"localhost/agent
 
 - [ ] **Step 2: Run the identity test and confirm failure**
 
-Run: `python3 -m unittest tests.container.test_project_image.ProjectImageIdentityTest -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_project_image.ProjectImageIdentityTest -v`
 
 Expected: ERROR because the functions are undefined.
 
@@ -196,7 +196,7 @@ Render fixed template fragments only; never interpolate raw shell fragments. Wri
 
 - [ ] **Step 6: Run project-image tests**
 
-Run: `python3 -m unittest tests.container.test_project_image -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_project_image -v`
 
 Expected: PASS.
 
@@ -245,7 +245,7 @@ self.assertEqual(spec.argv[-1], "/ctx")
 
 - [ ] **Step 2: Run focused Podman tests and confirm failure**
 
-Run: `python3 -m unittest tests.container.test_podman -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_podman -v`
 
 Expected: ERROR because the new spec builders are undefined.
 
@@ -255,7 +255,7 @@ Use tuple argv only, resolve context and Containerfile paths, pass `--pull=never
 
 - [ ] **Step 4: Run Podman tests**
 
-Run: `python3 -m unittest tests.container.test_podman -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_podman -v`
 
 Expected: PASS.
 
@@ -291,7 +291,7 @@ Add cache-hit coverage where `podman image exists` returns 0 and no build occurs
 
 - [ ] **Step 2: Run focused run tests and confirm failure**
 
-Run: `python3 -m unittest tests.container.test_agentctl.AgentCtlRunDoctorTest -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_agentctl.AgentCtlRunDoctorTest -v`
 
 Expected: FAIL because runtime always uses `arguments.image`.
 
@@ -334,7 +334,7 @@ Call the same resolver with `build_missing=False`. Convert validation and inspec
 
 - [ ] **Step 6: Run controller tests**
 
-Run: `python3 -m unittest tests.container.test_agentctl -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_agentctl -v`
 
 Expected: PASS.
 
@@ -361,7 +361,7 @@ Assert the operator guide contains `.agent-container.d/packages.txt`, `.agent-co
 
 - [ ] **Step 2: Run documentation tests and confirm failure**
 
-Run: `python3 -m unittest tests.container.test_docs -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_docs -v`
 
 Expected: FAIL on the missing workflow text.
 
@@ -383,7 +383,7 @@ State that `findsummits` currently needs no project Node pin and `sotlas-fronten
 
 - [ ] **Step 4: Run full unit tests**
 
-Run: `python3 -m unittest discover -s tests -v`
+Run: `PYTHONPATH=src python3 -m unittest discover -s tests -v`
 
 Expected: PASS.
 

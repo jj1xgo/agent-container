@@ -82,7 +82,7 @@ Also assert Containerfile copies both files to `/etc/claude-code/` and `.contain
 
 - [ ] **Step 2: Run image-contract tests and confirm failure**
 
-Run: `python3 -m unittest tests.container.test_image -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_image -v`
 
 Expected: FAIL because the managed files do not exist.
 
@@ -117,7 +117,7 @@ Extend `.containerignore` with only `!profiles/claude/`, `!profiles/claude/manag
 
 - [ ] **Step 5: Run image-contract tests**
 
-Run: `python3 -m unittest tests.container.test_image -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_image -v`
 
 Expected: PASS.
 
@@ -157,7 +157,7 @@ This tests that the launcher removes a caller-provided scrub variable instead of
 
 - [ ] **Step 2: Run the focused launcher test and confirm failure**
 
-Run: `python3 -m unittest tests.container.test_claude_launcher.ClaudeLauncherTest.test_exec_claude_sets_parent_token_without_global_scrub -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_claude_launcher.ClaudeLauncherTest.test_exec_claude_sets_parent_token_without_global_scrub -v`
 
 Expected: FAIL because the launcher forces scrub to `1`.
 
@@ -173,7 +173,7 @@ execvpe(argv[0], argv, environment)
 
 - [ ] **Step 4: Run all launcher tests**
 
-Run: `python3 -m unittest tests.container.test_claude_launcher -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_claude_launcher -v`
 
 Expected: PASS.
 
@@ -216,7 +216,7 @@ Add fixtures where each condition is individually true. For `/proc`, write `envi
 
 - [ ] **Step 2: Run probe tests and confirm import failure**
 
-Run: `python3 -m unittest tests.container.test_claude_security_probe -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_claude_security_probe -v`
 
 Expected: ERROR because the module does not exist.
 
@@ -241,7 +241,7 @@ Render only the three lines in Step 1. Exit 0 only when all values are false; ex
 
 - [ ] **Step 5: Run probe tests**
 
-Run: `python3 -m unittest tests.container.test_claude_security_probe -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_claude_security_probe -v`
 
 Expected: PASS and no sentinel in output.
 
@@ -272,7 +272,7 @@ The policy status command runs `python3 -m agent_container.claude_policy`, is mo
 
 - [ ] **Step 2: Run Podman tests and confirm failure**
 
-Run: `python3 -m unittest tests.container.test_podman -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_podman -v`
 
 Expected: ERROR because `claude_policy_status_spec` is undefined.
 
@@ -294,7 +294,7 @@ Run the policy check only after base/project image resolution succeeds. Use `_do
 
 - [ ] **Step 7: Run policy, controller, and Podman tests**
 
-Run: `python3 -m unittest tests.container.test_claude_policy tests.container.test_podman tests.container.test_agentctl -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_claude_policy tests.container.test_podman tests.container.test_agentctl -v`
 
 Expected: PASS.
 
@@ -321,7 +321,7 @@ Assert the smoke guide includes all three exact boolean names, `/sandbox` Config
 
 - [ ] **Step 2: Run documentation tests and confirm failure**
 
-Run: `python3 -m unittest tests.container.test_docs -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_docs -v`
 
 Expected: FAIL until the checklist is updated.
 
@@ -339,7 +339,7 @@ Document that any `true`, inability to confirm active strict sandbox, loaded hoo
 
 - [ ] **Step 4: Run the full unit suite before rebuilding**
 
-Run: `python3 -m unittest discover -s tests -v`
+Run: `PYTHONPATH=src python3 -m unittest discover -s tests -v`
 
 Expected: PASS.
 
@@ -414,7 +414,7 @@ Assert operator docs state:
 
 - [ ] **Step 2: Run documentation tests and confirm failure**
 
-Run: `python3 -m unittest tests.container.test_docs -v`
+Run: `PYTHONPATH=src python3 -m unittest tests.container.test_docs -v`
 
 Expected: FAIL on any missing constraint.
 
@@ -424,7 +424,7 @@ Use `git diff` before editing. Preserve already recorded smoke observations unle
 
 - [ ] **Step 4: Run full tests**
 
-Run: `python3 -m unittest discover -s tests -v`
+Run: `PYTHONPATH=src python3 -m unittest discover -s tests -v`
 
 Expected: PASS.
 
