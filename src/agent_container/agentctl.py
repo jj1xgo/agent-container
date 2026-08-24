@@ -68,6 +68,10 @@ class _ClaudeTokenFilesystemError(Exception):
     pass
 
 
+class _ClaudeRuntimeStateError(Exception):
+    pass
+
+
 def _validate_image(value: str) -> str:
     if (
         not value
@@ -396,13 +400,18 @@ def _validate_claude_project_config(layout: StateLayout) -> None:
 
 
 def _validate_runtime_agent_state(layout: StateLayout, agent: str) -> None:
+    if agent == "claude":
+        try:
+            for directory in _runtime_agent_directories(layout, agent):
+                ensure_private_directory(directory)
+            _validate_claude_token_file(layout.claude_token_file)
+        except (ValueError, OSError):
+            raise _ClaudeRuntimeStateError from None
+        _validate_claude_project_config(layout)
+        return
     for directory in _runtime_agent_directories(layout, agent):
         ensure_private_directory(directory)
-    if agent == "claude":
-        _validate_claude_token_file(layout.claude_token_file)
-        _validate_claude_project_config(layout)
-    else:
-        ensure_private_file(_runtime_agent_auth_file(layout, agent))
+    ensure_private_file(_runtime_agent_auth_file(layout, agent))
 
 
 def _private_state_directories(
@@ -913,6 +922,9 @@ def main(
         return error.returncode or 1
     except _ClaudeTokenFilesystemError:
         print("error: Claude token filesystem operation failed", file=stderr)
+        return 1
+    except _ClaudeRuntimeStateError:
+        print("error: Claude runtime state validation failed", file=stderr)
         return 1
     except (ValueError, PermissionError, FileNotFoundError) as error:
         print(f"error: {error}", file=stderr)

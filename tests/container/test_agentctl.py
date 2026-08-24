@@ -1282,6 +1282,68 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 self.assertEqual(calls, [])
                 self.assertEqual(stderr.getvalue().find(marker), -1)
 
+    def test_run_claude_hides_state_root_for_token_or_config_failures(self) -> None:
+        marker = "DO-NOT-PRINT-CLAUDE-RUNTIME-STATE-ROOT"
+        cases = (
+            "token-missing",
+            "token-format",
+            "token-mode",
+            "token-symlink",
+            "config-file",
+            "config-mode",
+            "config-symlink",
+        )
+        for failure in cases:
+            with self.subTest(failure=failure), TemporaryDirectory() as temp:
+                state_parent = Path(temp) / marker
+                state_parent.mkdir()
+                root, _ = self._runtime_state(str(state_parent))
+                token = root / "shared-auth/claude/oauth-token"
+                config = root / "projects/agent-container/claude-config"
+                if failure == "token-missing":
+                    token.unlink()
+                elif failure == "token-format":
+                    token.write_text("invalid", encoding="ascii")
+                elif failure == "token-mode":
+                    token.chmod(0o644)
+                elif failure == "token-symlink":
+                    target = Path(temp) / "token-target"
+                    target.write_text("x" * 32, encoding="ascii")
+                    target.chmod(0o600)
+                    token.unlink()
+                    token.symlink_to(target)
+                elif failure == "config-file":
+                    config.write_text("not a directory", encoding="ascii")
+                elif failure == "config-mode":
+                    config.mkdir(mode=0o700)
+                    config.chmod(0o755)
+                else:
+                    target = Path(temp) / "config-target"
+                    target.mkdir(mode=0o700)
+                    config.symlink_to(target, target_is_directory=True)
+                calls = []
+                stderr = StringIO()
+
+                result = main(
+                    ["run", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stderr=stderr,
+                )
+
+                rendered = stderr.getvalue()
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertEqual(
+                    rendered.startswith(
+                        "error: Claude runtime state validation failed"
+                    ),
+                    True,
+                )
+                self.assertEqual(rendered.find(marker), -1)
+
     def test_run_claude_rejects_broad_auth_or_config_without_secret_output(self) -> None:
         cases = (
             ("auth", "shared-auth/claude/oauth-token", 0o644),
@@ -1312,7 +1374,12 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
 
                 self.assertEqual(result, 1)
                 self.assertEqual(calls, [])
-                self.assertIn("mode", stderr.getvalue())
+                self.assertEqual(
+                    stderr.getvalue().startswith(
+                        "error: Claude runtime state validation failed"
+                    ),
+                    True,
+                )
                 self._assert_private_values_absent(
                     stderr.getvalue(), "DO-NOT-PRINT-CLAUDE-CREDENTIAL"
                 )
@@ -1354,7 +1421,12 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
 
                 self.assertEqual(result, 1)
                 self.assertEqual(calls, [])
-                self.assertIn("must not be a symlink", stderr.getvalue())
+                self.assertEqual(
+                    stderr.getvalue().startswith(
+                        "error: Claude runtime state validation failed"
+                    ),
+                    True,
+                )
                 self._assert_private_values_absent(
                     stderr.getvalue(), "DO-NOT-PRINT-CLAUDE-CREDENTIAL"
                 )
@@ -1472,11 +1544,26 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertIn("PASS  claude-auth-status: authenticated", rendered)
             status_calls = [spec for spec in calls if self._is_claude_status_spec(spec)]
             self.assertEqual(len(status_calls), 1)
-            self.assertIn(
-                f"type=bind,src={root / 'shared-auth/claude/oauth-token'},"
-                "dst=/run/secrets/claude-oauth-token,ro=true",
-                status_calls[0].argv,
+            token_mounts = [
+                argument
+                for argument in status_calls[0].argv
+                if argument.startswith("type=bind,")
+                and "dst=/run/secrets/claude-oauth-token" in argument
+            ]
+            self.assertEqual(len(token_mounts), 1)
+            mount_fields = dict(
+                field.split("=", 1) for field in token_mounts[0].split(",")
             )
+            self.assertTrue(
+                hmac.compare_digest(
+                    mount_fields.get("src", ""),
+                    str(root / "shared-auth/claude/oauth-token"),
+                )
+            )
+            self.assertEqual(
+                mount_fields.get("dst"), "/run/secrets/claude-oauth-token"
+            )
+            self.assertEqual(mount_fields.get("ro"), "true")
 
     def test_doctor_claude_status_failure_is_generic_and_secret_safe(self) -> None:
         marker = "DO-NOT-PRINT-CLAUDE-STATUS-OUTPUT"
