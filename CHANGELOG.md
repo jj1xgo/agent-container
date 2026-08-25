@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- GitHub App credentialをhost memory/private stateへ限定するproject-scoped brokerを追加しました。
+- exact repositoryのclone/fetch、policy-gated work-branch push、固定schemaの`agent-github pr create/view/checks`をbroker経由で利用できます。
+- broker runtime、doctor、project登録、実Unix socket CI、Phase 3運用ガイドと実host smoke checklistを追加しました。
+
+### Security boundaries
+
+- GitHub brokerは明示opt-inで、失敗時にlegacy `gh` credentialへfallbackしません。
+- pushのnon-fast-forward拒否には、brokerのlease/ref gateに加えてGitHub側の全branch force-push禁止rulesetが必要です。
+- 実GitHub App smoke gateは未実施で、外向きnetworkは引き続きdomain allowlistされていません。
+
 ### Changed
 
 - Codex runtimeを`--approve-for-me`付きで起動し、内側のworkspace-write sandboxを維持しながらapproval requestを自動reviewするようにしました。完全なapproval／sandbox bypassは有効にしません。
