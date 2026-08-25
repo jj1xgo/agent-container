@@ -139,7 +139,7 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
 
         def runner(spec):
             calls.append(spec)
-            if spec.argv[-2:] == ("node", "--version"):
+            if spec.argv[-2:] == ("/opt/agent-node/bin/node", "--version"):
                 return subprocess.CompletedProcess(spec.argv, 0, stdout="v22.23.1\n")
             if spec.argv[-2:] == ("codex", "--version"):
                 return subprocess.CompletedProcess(spec.argv, 0, stdout="codex 0.149.0\n")
@@ -170,7 +170,7 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
         self.assertEqual(
             [call.argv[-2:] for call in calls[3:]],
             [
-                ("node", "--version"),
+                ("/opt/agent-node/bin/node", "--version"),
                 ("codex", "--version"),
                 ("claude", "--version"),
             ],
@@ -986,7 +986,10 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "podman-version",
         "podman-rootless",
         "image",
+        "base-image-id",
         "project-image",
+        "agent-node",
+        "project-node",
         "codex-version",
         "private-state",
         "codex-auth",
@@ -1000,7 +1003,10 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "podman-version",
         "podman-rootless",
         "image",
+        "base-image-id",
         "project-image",
+        "agent-node",
+        "project-node",
         "claude-managed-policy",
         "claude-version",
         "private-state",
@@ -1018,7 +1024,10 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "podman-version",
         "podman-rootless",
         "image",
+        "base-image-id",
         "project-image",
+        "agent-node",
+        "project-node",
         "claude-managed-policy",
         "codex-version",
         "claude-version",
@@ -1120,6 +1129,10 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
     def _successful_doctor_runner(self, spec):
         if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
             return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+        if spec.argv[:3] == ("podman", "image", "inspect"):
+            return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+        if spec.argv[-2:] == ("/opt/agent-node/bin/node", "--version"):
+            return subprocess.CompletedProcess(spec.argv, 0, stdout="v24.7.0\n")
         return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
 
     def _doctor_check_names(self, rendered: str) -> list[str]:
@@ -1664,6 +1677,10 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 calls.append(spec)
                 if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
                     return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+                if spec.argv[:3] == ("podman", "image", "inspect"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                if spec.argv[-2:] == ("/opt/agent-node/bin/node", "--version"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="v24.7.0\n")
                 return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
 
             result = main(
@@ -1677,6 +1694,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(result, 0)
             rendered = output.getvalue()
             self.assertIn("PASS  podman-rootless: true", rendered)
+            self.assertIn("PASS  base-image-id: sha256:base", rendered)
+            self.assertIn("PASS  agent-node: v24.7.0", rendered)
+            self.assertIn("PASS  project-node: unconfigured", rendered)
             self.assertIn("PASS  codex-auth: present, mode 0600", rendered)
             self.assertIn("PASS  gh-hosts: present, mode 0600", rendered)
             self.assertIn("PASS  workspace-origin: exact HTTPS origin", rendered)
@@ -1693,6 +1713,27 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                     ("podman", "--version"),
                     ("podman", "info", "--format", "{{.Host.Security.Rootless}}"),
                     ("podman", "image", "exists", "localhost/agent-container:dev"),
+                    (
+                        "podman",
+                        "image",
+                        "inspect",
+                        "--format",
+                        "{{.Id}}",
+                        "localhost/agent-container:dev",
+                    ),
+                    (
+                        "podman",
+                        "run",
+                        "--rm",
+                        "--read-only",
+                        "--cap-drop=all",
+                        "--security-opt=no-new-privileges",
+                        "--userns=keep-id:uid=1000,gid=1000",
+                        "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
+                        "localhost/agent-container:dev",
+                        "/opt/agent-node/bin/node",
+                        "--version",
+                    ),
                     (
                         "podman",
                         "run",
@@ -1724,6 +1765,10 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 calls.append(spec)
                 if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
                     return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+                if spec.argv[:3] == ("podman", "image", "inspect"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                if spec.argv[-2:] == ("/opt/agent-node/bin/node", "--version"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="v24.7.0\n")
                 return subprocess.CompletedProcess(spec.argv, 0, stdout="ignored\n")
 
             result = main(
@@ -1771,6 +1816,10 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             def doctor_runner(spec):
                 if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
                     return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+                if spec.argv[:3] == ("podman", "image", "inspect"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                if spec.argv[-2:] == ("/opt/agent-node/bin/node", "--version"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="v24.7.0\n")
                 if self._is_claude_status_spec(spec):
                     return subprocess.CompletedProcess(
                         spec.argv, 17, stdout=marker, stderr=marker
@@ -1920,6 +1969,10 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 calls.append(spec)
                 if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
                     return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+                if spec.argv[:3] == ("podman", "image", "inspect"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                if spec.argv[-2:] == ("/opt/agent-node/bin/node", "--version"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="v24.7.0\n")
                 if spec.argv[-2:] in (("codex", "--version"), ("claude", "--version")):
                     return subprocess.CompletedProcess(
                         spec.argv,
@@ -1954,7 +2007,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                     call.argv[-2:]
                     for call in calls
                     if call.argv[:2] == ("podman", "run")
-                    and call.argv[-1] == "--version"
+                    and call.argv[-2] in ("codex", "claude")
                 ],
                 [("codex", "--version"), ("claude", "--version")],
             )
@@ -2039,6 +2092,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 config_dir = root / "workspaces/agent-container/.agent-container.d"
                 config_dir.mkdir()
                 (config_dir / "packages.txt").write_text("make\n", encoding="utf-8")
+                (config_dir / "node-version.txt").write_text(
+                    "22.23.1\n", encoding="utf-8"
+                )
                 calls = []
                 output = StringIO()
 
@@ -2052,6 +2108,10 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                         return subprocess.CompletedProcess(spec.argv, exists_code)
                     if spec.argv[:2] == ("podman", "images"):
                         return subprocess.CompletedProcess(spec.argv, 0, stdout=prior)
+                    if spec.argv[-2:] == ("/opt/project-node/bin/node", "--version"):
+                        return subprocess.CompletedProcess(
+                            spec.argv, 0, stdout="v22.23.1\n"
+                        )
                     return self._successful_doctor_runner(spec)
 
                 result = main(
@@ -2063,6 +2123,14 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 )
 
                 self.assertIn(f"project-image: {state}", output.getvalue())
+                if state == "current":
+                    self.assertIn(
+                        "PASS  project-node: v22.23.1", output.getvalue()
+                    )
+                else:
+                    self.assertIn(
+                        "FAIL  project-node: image unavailable", output.getvalue()
+                    )
                 self.assertEqual(result, 0 if state == "current" else 1)
                 self.assertFalse(any(call.argv[:2] == ("podman", "build") for call in calls))
 

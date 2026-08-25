@@ -169,6 +169,14 @@ def cli_version_spec(image: str, agent: str) -> CommandSpec:
 
 
 def node_version_spec(image: str) -> CommandSpec:
+    return _fixed_node_version_spec(image, "/opt/agent-node/bin/node")
+
+
+def project_node_version_spec(image: str) -> CommandSpec:
+    return _fixed_node_version_spec(image, "/opt/project-node/bin/node")
+
+
+def _fixed_node_version_spec(image: str, executable: str) -> CommandSpec:
     return CommandSpec(
         (
             "podman",
@@ -180,7 +188,7 @@ def node_version_spec(image: str) -> CommandSpec:
             "--userns=keep-id:uid=1000,gid=1000",
             "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
             image,
-            "node",
+            executable,
             "--version",
         ),
         {},

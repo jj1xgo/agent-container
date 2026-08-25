@@ -130,7 +130,9 @@ class PodmanCommandTest(unittest.TestCase):
 
         spec = node_version_spec(IMAGE)
 
-        self.assertEqual(spec.argv[-2:], ("node", "--version"))
+        self.assertEqual(
+            spec.argv[-2:], ("/opt/agent-node/bin/node", "--version")
+        )
         self.assertNotIn("--mount", spec.argv)
         for required in (
             "--rm",
@@ -140,7 +142,17 @@ class PodmanCommandTest(unittest.TestCase):
             "--userns=keep-id:uid=1000,gid=1000",
             "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
         ):
-            self.assertIn(required, spec.argv)
+                self.assertIn(required, spec.argv)
+
+    def test_project_node_version_probe_uses_fixed_project_path(self) -> None:
+        from agent_container.podman import project_node_version_spec
+
+        spec = project_node_version_spec(IMAGE)
+
+        self.assertEqual(
+            spec.argv[-2:], ("/opt/project-node/bin/node", "--version")
+        )
+        self.assertNotIn("--mount", spec.argv)
 
     def test_auth_mounts_only_shared_codex_auth_directory(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")

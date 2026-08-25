@@ -38,10 +38,12 @@ from agent_container.podman import podman_image_id_spec
 from agent_container.podman import podman_project_images_spec
 from agent_container.podman import podman_rootless_spec
 from agent_container.podman import podman_version_spec
+from agent_container.podman import project_node_version_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.podman import run_command
 from agent_container.profile import seed_codex_home
+from agent_container.project_image import ProjectImageConfig
 from agent_container.project_image import ProjectImageResolution
 from agent_container.project_image import load_project_image_config
 from agent_container.project_image import project_image_key
@@ -524,16 +526,20 @@ def _resolve_project_image(
     runner: Callable[[CommandSpec], subprocess.CompletedProcess],
     build_missing: bool,
     stdout: TextIO,
+    config: ProjectImageConfig | None = None,
+    base_image_id: str | None = None,
 ) -> ProjectImageResolution:
-    config = load_project_image_config(layout.workspace)
+    if config is None:
+        config = load_project_image_config(layout.workspace)
     if config.is_empty:
         return ProjectImageResolution(base_image, "unconfigured", None)
 
-    base_id_result = _required_probe_run(runner, podman_image_id_spec(base_image))
+    if base_image_id is None:
+        base_id_result = _required_probe_run(runner, podman_image_id_spec(base_image))
+        base_image_id = (base_id_result.stdout or "").strip()
     architecture_result = _required_probe_run(runner, podman_architecture_spec())
-    base_id = (base_id_result.stdout or "").strip()
     architecture = (architecture_result.stdout or "").strip()
-    key = project_image_key(base_id, config, architecture)
+    key = project_image_key(base_image_id, config, architecture)
     image = project_image_name(layout.project_id, key)
 
     present = _doctor_run(runner, podman_image_exists_spec(image))
@@ -565,6 +571,18 @@ def _check_failure_detail(error: Exception) -> str:
     if isinstance(error, subprocess.CalledProcessError):
         return "command failed"
     return "check failed"
+
+
+def _reported_node_version(completed: subprocess.CompletedProcess) -> str | None:
+    if completed.returncode != 0:
+        return None
+    value = (completed.stdout or "").strip()
+    numeric = value[1:] if value.startswith("v") else ""
+    if len(numeric.split(".")) != 3 or not all(
+        part.isdigit() for part in numeric.split(".")
+    ):
+        return None
+    return value
 
 
 def _doctor(
@@ -609,18 +627,46 @@ def _doctor(
     )
 
     runtime_image: str | None = None
+    project_config: ProjectImageConfig | None = None
+    base_image_id: str | None = None
     if image_check.returncode != 0:
+        checks.append(CheckResult("FAIL", "base-image-id", "image unavailable"))
         checks.append(
             CheckResult("FAIL", "project-image", "base image unavailable")
         )
     else:
+        identity = _doctor_run(runner, podman_image_id_spec(image))
+        candidate_id = (identity.stdout or "").strip()
         try:
+            project_image_key(
+                candidate_id,
+                ProjectImageConfig((), None),
+                "doctor",
+            )
+            identity_ok = identity.returncode == 0
+        except ValueError:
+            identity_ok = False
+        if identity_ok:
+            base_image_id = candidate_id
+        checks.append(
+            CheckResult(
+                "PASS" if identity_ok else "FAIL",
+                "base-image-id",
+                candidate_id if identity_ok else "unavailable",
+            )
+        )
+        try:
+            project_config = load_project_image_config(layout.workspace)
+            if base_image_id is None:
+                raise ValueError("base image identity unavailable")
             resolution = _resolve_project_image(
                 layout,
                 image,
                 runner,
                 build_missing=False,
                 stdout=sys.stdout,
+                config=project_config,
+                base_image_id=base_image_id,
             )
             usable = resolution.state in ("unconfigured", "current")
             checks.append(
@@ -638,6 +684,38 @@ def _doctor(
                     "FAIL", "project-image", _check_failure_detail(error)
                 )
             )
+
+    if runtime_image is None:
+        agent_node_version = None
+    else:
+        agent_node_version = _reported_node_version(
+            _doctor_run(runner, node_version_spec(runtime_image))
+        )
+    checks.append(
+        CheckResult(
+            "PASS" if agent_node_version is not None else "FAIL",
+            "agent-node",
+            agent_node_version or "image unavailable",
+        )
+    )
+
+    if project_config is not None and project_config.node_version is None:
+        checks.append(CheckResult("PASS", "project-node", "unconfigured"))
+    elif runtime_image is None or project_config is None:
+        checks.append(CheckResult("FAIL", "project-node", "image unavailable"))
+    else:
+        expected_project_node = f"v{project_config.node_version}"
+        observed_project_node = _reported_node_version(
+            _doctor_run(runner, project_node_version_spec(runtime_image))
+        )
+        project_node_ok = observed_project_node == expected_project_node
+        checks.append(
+            CheckResult(
+                "PASS" if project_node_ok else "FAIL",
+                "project-node",
+                expected_project_node if project_node_ok else "unexpected version",
+            )
+        )
 
     if "claude" in agents:
         if runtime_image is None:
