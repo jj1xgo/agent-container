@@ -25,6 +25,18 @@ class FakeTransport:
         return (pkt(b"response\n"), b"0002")
 
 
+class FakeReceiveTransport:
+    def __init__(self) -> None:
+        self.requests: list[bytes] = []
+
+    def discover(self) -> bytes:
+        return b"advertisement"
+
+    def push(self, request: bytes):  # type: ignore[no-untyped-def]
+        self.requests.append(request)
+        return (b"push-result",)
+
+
 class StatelessRequestTest(unittest.TestCase):
     def test_reads_one_request_including_delimiter_and_flush(self) -> None:
         first = pkt(b"command=fetch\n") + b"0001" + pkt(b"done\n") + b"0000"
@@ -90,6 +102,29 @@ class RemoteHelperTest(unittest.TestCase):
             + transport.discover()
             + pkt(b"response\n")
             + b"0002",
+        )
+
+    def test_runs_one_receive_pack_exchange(self) -> None:
+        transport = FakeReceiveTransport()
+        push = b"commands-and-pack"
+        stdin = BytesIO(
+            b"capabilities\nstateless-connect git-receive-pack\n" + push
+        )
+        stdout = BytesIO()
+
+        result = run_remote_helper(
+            ["origin", "agent-broker://jj1xgo/agent-container"],
+            {"AGENT_BROKER_REPOSITORY": "jj1xgo/agent-container"},
+            transport,
+            stdin,
+            stdout,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(transport.requests, [push])
+        self.assertEqual(
+            stdout.getvalue(),
+            b"stateless-connect\n\n\nadvertisementpush-result",
         )
 
     def test_rejects_push_and_unknown_commands(self) -> None:
