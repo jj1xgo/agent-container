@@ -28,12 +28,19 @@ _CLAUDE_RUNTIME_HOME_TMPFS_MOUNT = (
     "type=tmpfs,dst=/home/agent,tmpfs-size=16777216,"
     "tmpfs-mode=0700,U=true,noexec,nosuid,nodev"
 )
+_BROKER_RUNTIME_PATH = "/run/agent-broker"
 
 
 @dataclass(frozen=True)
 class CommandSpec:
     argv: tuple[str, ...]
     environment: dict[str, str]
+
+
+@dataclass(frozen=True)
+class BrokerRuntimeMount:
+    run_dir: Path
+    repository: Repository
 
 
 def _mount(source: Path, target: str, read_only: bool = False) -> str:
@@ -68,6 +75,35 @@ def _git_environment_args(
         "GIT_CONFIG_KEY_0=credential.https://github.com.helper",
         "--env",
         "GIT_CONFIG_VALUE_0=!gh auth git-credential",
+    ]
+
+
+def _broker_git_args(
+    layout: StateLayout, broker: BrokerRuntimeMount
+) -> list[str]:
+    if not broker.run_dir.is_absolute():
+        raise ValueError("broker runtime path must be absolute")
+    if broker.repository.name == "" or broker.repository.slug.count("/") != 1:
+        raise ValueError("broker repository is invalid")
+    broker_url = f"agent-broker://{broker.repository.slug}"
+    github_url = f"https://github.com/{broker.repository.slug}"
+    return [
+        "--mount",
+        _mount(broker.run_dir, _BROKER_RUNTIME_PATH, True),
+        "--env",
+        f"AGENT_BROKER_SOCKET={_BROKER_RUNTIME_PATH}/broker.sock",
+        "--env",
+        f"AGENT_BROKER_CAPABILITY={_BROKER_RUNTIME_PATH}/capability",
+        "--env",
+        f"AGENT_BROKER_REPOSITORY={broker.repository.slug}",
+        "--env",
+        f"AGENT_PROJECT_ID={layout.project_id}",
+        "--env",
+        "GIT_CONFIG_COUNT=1",
+        "--env",
+        f"GIT_CONFIG_KEY_0=url.{broker_url}.insteadOf",
+        "--env",
+        f"GIT_CONFIG_VALUE_0={github_url}",
     ]
 
 
@@ -256,20 +292,25 @@ def claude_token_status_spec(token_file: Path, image: str) -> CommandSpec:
 
 
 def clone_project_spec(
-    layout: StateLayout, repository: Repository, image: str
+    layout: StateLayout,
+    repository: Repository,
+    image: str,
+    broker: BrokerRuntimeMount | None = None,
 ) -> CommandSpec:
     argv = _runtime_prefix(os.getuid(), os.getgid())
-    argv += _git_environment_args()
-    argv += ["--mount", _mount(layout.gh_dir, "/home/agent/.config/gh", True)]
+    if broker is None:
+        argv += _git_environment_args()
+        argv += ["--mount", _mount(layout.gh_dir, "/home/agent/.config/gh", True)]
+    else:
+        if broker.repository != repository:
+            raise ValueError("broker repository does not match clone repository")
+        argv += _broker_git_args(layout, broker)
     argv += ["--mount", _mount(layout.root / "workspaces", "/workspaces")]
-    argv += [
-        image,
-        "gh",
-        "repo",
-        "clone",
-        repository.slug,
-        f"/workspaces/{layout.project_id}",
-    ]
+    if broker is None:
+        argv += [image, "gh", "repo", "clone", repository.slug]
+    else:
+        argv += [image, "git", "clone", repository.https_url]
+    argv += [f"/workspaces/{layout.project_id}"]
     return CommandSpec(tuple(argv), {})
 
 
@@ -279,20 +320,22 @@ def run_codex_spec(
     image: str,
     uid: int,
     gid: int,
+    broker: BrokerRuntimeMount | None = None,
 ) -> CommandSpec:
     if uid != os.getuid() or gid != os.getgid():
         raise ValueError("runtime uid and gid must match the current user")
     argv = _runtime_prefix(uid, gid)
-    argv += _git_environment_args()
+    argv += _git_environment_args() if broker is None else _broker_git_args(layout, broker)
     argv += ["--env", "AGENT_HANDOVER_ROOT=/handovers"]
-    mounts = (
+    mounts = [
         (layout.workspace, "/workspace", False),
         (layout.codex_home, "/home/agent/.codex", False),
         (layout.codex_auth_file, "/home/agent/.codex/auth.json", False),
         (layout.cache, "/home/agent/.cache", False),
-        (layout.gh_dir, "/home/agent/.config/gh", True),
         (handover_project, f"/handovers/{layout.project_id}", False),
-    )
+    ]
+    if broker is None:
+        mounts.insert(-1, (layout.gh_dir, "/home/agent/.config/gh", True))
     for source, target, read_only in mounts:
         argv += ["--mount", _mount(source, target, read_only)]
     argv += [
@@ -313,21 +356,27 @@ def run_claude_spec(
     image: str,
     uid: int,
     gid: int,
+    broker: BrokerRuntimeMount | None = None,
 ) -> CommandSpec:
     if uid != os.getuid() or gid != os.getgid():
         raise ValueError("runtime uid and gid must match the current user")
     gh_config_dir = "/home/agent/gh-config"
     argv = _runtime_prefix(uid, gid)
     argv += ["--mount", _CLAUDE_RUNTIME_HOME_TMPFS_MOUNT]
-    argv += _git_environment_args(gh_config_dir)
-    mounts = (
+    argv += (
+        _git_environment_args(gh_config_dir)
+        if broker is None
+        else _broker_git_args(layout, broker)
+    )
+    mounts = [
         (layout.workspace, "/workspace", False),
         (layout.claude_config, "/home/agent/.claude", False),
         (layout.claude_token_file, _CLAUDE_TOKEN_PATH, True),
         (layout.cache, "/home/agent/.cache", False),
-        (layout.gh_dir, gh_config_dir, True),
         (handover_project, f"/handovers/{layout.project_id}", False),
-    )
+    ]
+    if broker is None:
+        mounts.insert(-1, (layout.gh_dir, gh_config_dir, True))
     for source, target, read_only in mounts:
         argv += ["--mount", _mount(source, target, read_only)]
     argv += ["--env", "CLAUDE_CONFIG_DIR=/home/agent/.claude"]

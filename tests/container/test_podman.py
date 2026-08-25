@@ -3,6 +3,7 @@ import os
 import unittest
 
 from agent_container.podman import auth_codex_spec
+from agent_container.podman import BrokerRuntimeMount
 from agent_container.podman import codex_login_status_spec
 from agent_container.podman import build_image_spec
 from agent_container.podman import build_project_image_spec
@@ -223,6 +224,94 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertIn("/workspaces/agent-container", spec.argv)
         self.assertNotIn("credential-value", joined)
         self.assertNotIn("token", joined.lower())
+
+    def test_clone_can_use_only_project_scoped_broker_runtime(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        repository = Repository.parse("jj1xgo/agent-container")
+        broker = BrokerRuntimeMount(Path("/state/runtime/one"), repository)
+
+        spec = clone_project_spec(layout, repository, IMAGE, broker)
+        joined = " ".join(spec.argv)
+
+        self.assertIn(
+            "src=/state/runtime/one,dst=/run/agent-broker,ro=true", joined
+        )
+        self.assertIn("AGENT_BROKER_SOCKET=/run/agent-broker/broker.sock", joined)
+        self.assertIn(
+            "AGENT_BROKER_CAPABILITY=/run/agent-broker/capability", joined
+        )
+        self.assertIn("AGENT_BROKER_REPOSITORY=jj1xgo/agent-container", joined)
+        self.assertIn(
+            "GIT_CONFIG_KEY_0=url.agent-broker://jj1xgo/agent-container.insteadOf",
+            joined,
+        )
+        self.assertEqual(
+            spec.argv[-4:],
+            (
+                "git",
+                "clone",
+                "https://github.com/jj1xgo/agent-container.git",
+                "/workspaces/agent-container",
+            ),
+        )
+        self.assertNotIn("/state/gh", joined)
+        self.assertNotIn("gh auth git-credential", joined)
+
+    def test_runtime_can_replace_gh_mount_with_broker_runtime(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        repository = Repository.parse("jj1xgo/agent-container")
+        broker = BrokerRuntimeMount(Path("/state/runtime/one"), repository)
+
+        spec = run_codex_spec(
+            layout,
+            Path("/vault/handovers/agent-container"),
+            IMAGE,
+            os.getuid(),
+            os.getgid(),
+            broker,
+        )
+        joined = " ".join(spec.argv)
+
+        self.assertIn("src=/state/runtime/one,dst=/run/agent-broker,ro=true", joined)
+        self.assertNotIn("src=/state/gh", joined)
+        self.assertNotIn("GH_CONFIG_DIR", joined)
+        self.assertNotIn("gh auth git-credential", joined)
+
+        claude = run_claude_spec(
+            layout,
+            Path("/vault/handovers/agent-container"),
+            IMAGE,
+            os.getuid(),
+            os.getgid(),
+            broker,
+        )
+        claude_joined = " ".join(claude.argv)
+        self.assertIn(
+            "src=/state/runtime/one,dst=/run/agent-broker,ro=true",
+            claude_joined,
+        )
+        self.assertNotIn("src=/state/gh", claude_joined)
+        self.assertNotIn("GH_CONFIG_DIR", claude_joined)
+
+    def test_broker_mount_rejects_relative_path_and_wrong_repository(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        repository = Repository.parse("jj1xgo/agent-container")
+        with self.assertRaisesRegex(ValueError, "absolute"):
+            clone_project_spec(
+                layout,
+                repository,
+                IMAGE,
+                BrokerRuntimeMount(Path("relative"), repository),
+            )
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            clone_project_spec(
+                layout,
+                repository,
+                IMAGE,
+                BrokerRuntimeMount(
+                    Path("/state/runtime/one"), Repository.parse("jj1xgo/other")
+                ),
+            )
 
     def test_run_has_hardened_flags_and_narrow_mounts(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")
