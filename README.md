@@ -23,6 +23,36 @@ podman info --format '{{.Host.Security.Rootless}}'
 
 `true`にならない環境ではagent-containerを実行できません。
 
+## どこからでも`agentctl`を使えるようにする
+
+aliasではなく、agent-containerの`bin` directoryを`PATH`へ追加する方法を推奨します。shellやscriptから通常のcommandとして`agentctl`を実行でき、README内の`bin/agentctl`は`agentctl`と読み替えられます。
+
+ホスト上でcloneしたagent-container directoryへ移動し、次を実行します。
+
+```bash
+cd /path/to/agent-container
+printf '\nexport PATH="%s/bin:$PATH"\n' "$PWD" >> "$HOME/.bashrc"
+source "$HOME/.bashrc"
+```
+
+`/path/to/agent-container`は実際のclone先へ置き換えてください。container内の一時的な`/workspace`ではなく、ホスト上の永続的な絶対pathを使用します。
+
+設定後は次のcommandで確認できます。
+
+```bash
+command -v agentctl
+agentctl --version
+```
+
+状態rootも常に同じ場所を使う場合は、次の設定も`~/.bashrc`へ追加できます。
+
+```bash
+printf 'export AGENT_CONTAINER_HOME="$HOME/.local/share/agent-container"\n' >> "$HOME/.bashrc"
+source "$HOME/.bashrc"
+```
+
+すでに同じ設定が`~/.bashrc`にある場合は重複して追記せず、既存行を利用してください。
+
 ## 最短セットアップ
 
 以下は`OWNER/REPOSITORY`をCodexで使い始める例です。agent-container repositoryをcloneし、そのdirectoryで実行してください。
