@@ -7,7 +7,7 @@
 ### Changed
 
 - Codex runtimeを`--approve-for-me`付きで起動し、内側のworkspace-write sandboxを維持しながらapproval requestを自動reviewするようにしました。完全なapproval／sandbox bypassは有効にしません。
-- Codex status lineから累積token数と固定的なproject名を外し、model、context、利用枠、Git branchに絞りました。
+- Codex status lineから累積token数を外し、model、context、利用枠、Git branch、project名に絞りました。
 
 ## [0.1.0] - 2026-08-25
 

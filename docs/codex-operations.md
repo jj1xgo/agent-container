@@ -8,7 +8,7 @@
 
 ## statusline
 
-配布元は`profiles/codex/config.toml`。model+reasoning、context残量、primary/secondary limit、使用token、Git branch、project名の順に表示する。API情報やGit情報がない項目は表示されない場合がある。対話的な変更は`/statusline`で行う。
+配布元は`profiles/codex/config.toml`。model+reasoning、context残量、primary/secondary limit、Git branch、project名の順に表示する。API情報やGit情報がない項目は表示されない場合がある。対話的な変更は`/statusline`で行う。
 
 ## Image再buildとCLI version
 

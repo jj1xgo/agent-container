@@ -22,6 +22,7 @@ class StatusLineProfileTest(unittest.TestCase):
                 "five-hour-limit",
                 "weekly-limit",
                 "git-branch",
+                "project-name",
             ],
         )
 
