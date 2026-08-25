@@ -25,7 +25,9 @@ from agent_container.migration import render_migration_plan
 from agent_container.github_broker_runtime import GitHubBrokerRuntimeError
 from agent_container.github_broker_runtime import UploadPackBrokerRuntime
 from agent_container.github_broker_runtime import load_broker_policy
+from agent_container.github_broker_runtime import write_broker_policy
 from agent_container.github_app import GitHubAppMetadata
+from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.podman import CommandSpec
 from agent_container.podman import auth_codex_spec
 from agent_container.podman import build_image_spec
@@ -127,6 +129,10 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument("repository")
     add.add_argument("--project")
     add.add_argument("--handover-root", type=Path, required=True)
+    add.add_argument("--github-broker", action="store_true")
+    add.add_argument("--default-branch", default="main")
+    add.add_argument("--protected-branch", action="append", default=[])
+    add.add_argument("--confirm-force-push-ruleset", action="store_true")
     run = subcommands.add_parser("run")
     run.add_argument("project")
     run.add_argument("--agent", choices=("codex", "claude"), default="codex")
@@ -278,9 +284,12 @@ def _ensure_exact_state_root(
         )
 
 
-def _prepare_project_directories(layout: StateLayout) -> None:
+def _prepare_project_directories(
+    layout: StateLayout, include_gh: bool = True
+) -> None:
     ensure_private_directory(layout.root, create=True)
-    ensure_private_directory(layout.gh_dir, create=True)
+    if include_gh:
+        ensure_private_directory(layout.gh_dir, create=True)
     ensure_private_directory(layout.project_dir.parent, create=True)
     ensure_private_directory(layout.project_dir, create=True)
     ensure_private_directory(layout.cache, create=True)
@@ -309,6 +318,10 @@ def _add_project(
     runner: Callable[[CommandSpec], subprocess.CompletedProcess],
     git_remote_reader: Callable[[Path], str],
     profile_root: Path,
+    github_broker: bool = False,
+    default_branch: str = "main",
+    protected_branches: tuple[str, ...] = (),
+    ruleset_confirmed: bool = False,
 ) -> None:
     repository = Repository.parse(repository_value)
     project_id = project_value if project_value is not None else repository.name
@@ -321,17 +334,48 @@ def _add_project(
         validate_workspace_origin(
             layout.workspace, repository, git_remote_reader(layout.workspace)
         )
+    policy: BrokerPolicy | None = None
+    record = ProjectRecord(repository, resolved_handover_root)
+    if github_broker:
+        if not ruleset_confirmed:
+            raise ValueError("GitHub force-push ruleset confirmation is required")
+        protected = protected_branches or (default_branch,)
+        policy = BrokerPolicy.create(
+            project_id=layout.project_id,
+            repository=repository.slug,
+            default_branch=default_branch,
+            protected_branches=protected,
+        )
+        GitHubAppMetadata.load(
+            layout.github_broker_root / "app.json",
+            layout.github_broker_root / "private-key.pem",
+        )
     _podman_preflight(runner, image_required=image)
-    _prepare_project_directories(layout)
-    ensure_private_file(layout.gh_dir / "hosts.yml")
+    _prepare_project_directories(layout, include_gh=not github_broker)
+    if github_broker:
+        assert policy is not None
+        if layout.github_broker_policy_file.exists() or layout.github_broker_policy_file.is_symlink():
+            existing = load_broker_policy(
+                layout.github_broker_policy_file, record, layout.project_id
+            )
+            if existing != policy:
+                raise ValueError("GitHub broker policy does not match project")
+        else:
+            write_broker_policy(layout.github_broker_policy_file, policy)
+    else:
+        ensure_private_file(layout.gh_dir / "hosts.yml")
     if not workspace_exists:
-        runner(clone_project_spec(layout, repository, image))
+        if github_broker:
+            with UploadPackBrokerRuntime.create(layout, record) as broker:
+                runner(clone_project_spec(layout, repository, image, broker))
+        else:
+            runner(clone_project_spec(layout, repository, image))
         validate_workspace(layout.workspace)
         validate_workspace_origin(
             layout.workspace, repository, git_remote_reader(layout.workspace)
         )
     _seed_project_codex_home(layout, profile_root)
-    ProjectRecord(repository, resolved_handover_root).write(layout.project_file)
+    record.write(layout.project_file)
 
 
 def _runtime_preflight(
@@ -993,6 +1037,14 @@ def main(
             validate_agent(arguments.agent)
         elif arguments.command == "run":
             validate_agent(arguments.agent)
+        elif arguments.command == "project" and arguments.project_command == "add":
+            broker_options = (
+                arguments.default_branch != "main"
+                or bool(arguments.protected_branch)
+                or arguments.confirm_force_push_ruleset
+            )
+            if broker_options and not arguments.github_broker:
+                raise ValueError("GitHub broker options require --github-broker")
         elif arguments.command == "doctor":
             validate_agent(arguments.agent, allow_all=True)
         elif arguments.command == "migrate":
@@ -1083,6 +1135,10 @@ def main(
                 runner,
                 git_remote_reader,
                 repository_root / "profiles/codex",
+                arguments.github_broker,
+                arguments.default_branch,
+                tuple(arguments.protected_branch),
+                arguments.confirm_force_push_ruleset,
             )
             return 0
         if arguments.command == "run":

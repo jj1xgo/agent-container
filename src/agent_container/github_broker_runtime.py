@@ -1,6 +1,7 @@
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 import socket
 import threading
@@ -62,6 +63,33 @@ def load_broker_policy(path: Path, record: ProjectRecord, project_id: str) -> Br
         default_branch=payload["default_branch"],
         protected_branches=protected,
     )
+
+
+def write_broker_policy(path: Path, policy: BrokerPolicy) -> None:
+    body = json.dumps(
+        {
+            "repository": policy.repository.slug,
+            "default_branch": policy.default_branch,
+            "protected_branches": sorted(policy.protected_branches),
+            "ruleset_confirmed": True,
+        },
+        ensure_ascii=True,
+        indent=2,
+    ) + "\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        remaining = memoryview(body.encode("ascii"))
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("GitHub broker policy write failed")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 @dataclass
