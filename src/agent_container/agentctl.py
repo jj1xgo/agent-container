@@ -24,6 +24,8 @@ from agent_container.migration import plan_claude_migration
 from agent_container.migration import render_migration_plan
 from agent_container.github_broker_runtime import GitHubBrokerRuntimeError
 from agent_container.github_broker_runtime import UploadPackBrokerRuntime
+from agent_container.github_broker_runtime import load_broker_policy
+from agent_container.github_app import GitHubAppMetadata
 from agent_container.podman import CommandSpec
 from agent_container.podman import auth_codex_spec
 from agent_container.podman import build_image_spec
@@ -132,6 +134,7 @@ def parser() -> argparse.ArgumentParser:
     doctor = subcommands.add_parser("doctor")
     doctor.add_argument("project")
     doctor.add_argument("--agent", choices=("codex", "claude", "all"), default="codex")
+    doctor.add_argument("--github-broker", action="store_true")
     migrate = subcommands.add_parser("migrate")
     migrate.add_argument("agent", choices=("claude",))
     migrate.add_argument("project")
@@ -337,13 +340,17 @@ def _runtime_preflight(
     environment: Mapping[str, str] | None,
     git_remote_reader: Callable[[Path], str],
     identity_reader: Callable[[], tuple[int, int]],
+    github_broker: bool = False,
 ) -> tuple[StateLayout, Path, int, int]:
     layout = StateLayout.from_environment(project_id, environment)
     _ensure_exact_state_root(layout, environment)
-    for directory in _common_runtime_state_directories(layout):
+    for directory in _common_runtime_state_directories(
+        layout, include_gh=not github_broker
+    ):
         ensure_private_directory(directory)
     _validate_runtime_agent_state(layout, agent)
-    ensure_private_file(layout.gh_dir / "hosts.yml")
+    if not github_broker:
+        ensure_private_file(layout.gh_dir / "hosts.yml")
     record = _read_runtime_project(layout.project_file)
     validate_workspace(layout.workspace)
     validate_workspace_origin(
@@ -375,16 +382,20 @@ def _validated_process_identity(
     return identity
 
 
-def _common_runtime_state_directories(layout: StateLayout) -> tuple[Path, ...]:
-    return (
+def _common_runtime_state_directories(
+    layout: StateLayout, include_gh: bool = True
+) -> tuple[Path, ...]:
+    directories = [
         layout.root,
         layout.root / "shared-auth",
-        layout.gh_dir,
         layout.project_dir.parent,
         layout.project_dir,
         layout.cache,
         layout.workspace.parent,
-    )
+    ]
+    if include_gh:
+        directories.insert(2, layout.gh_dir)
+    return tuple(directories)
 
 
 def _runtime_agent_directories(layout: StateLayout, agent: str) -> tuple[Path, ...]:
@@ -437,9 +448,9 @@ def _validate_runtime_agent_state(layout: StateLayout, agent: str) -> None:
 
 
 def _private_state_directories(
-    layout: StateLayout, agents: tuple[str, ...]
+    layout: StateLayout, agents: tuple[str, ...], include_gh: bool = True
 ) -> tuple[Path, ...]:
-    directories = list(_common_runtime_state_directories(layout))
+    directories = list(_common_runtime_state_directories(layout, include_gh))
     for agent in agents:
         directories.extend(_runtime_agent_directories(layout, agent))
     return tuple(directories)
@@ -599,6 +610,7 @@ def _doctor(
     environment: Mapping[str, str] | None,
     runner: Callable[[CommandSpec], subprocess.CompletedProcess],
     git_remote_reader: Callable[[Path], str],
+    github_broker: bool = False,
 ) -> list[CheckResult]:
     layout = StateLayout.from_environment(project_id, environment)
     checks: list[CheckResult] = []
@@ -762,7 +774,9 @@ def _doctor(
 
     try:
         _ensure_exact_state_root(layout, environment)
-        for directory in _private_state_directories(layout, agents):
+        for directory in _private_state_directories(
+            layout, agents, include_gh=not github_broker
+        ):
             ensure_private_directory(directory)
         checks.append(
             CheckResult(
@@ -845,11 +859,12 @@ def _doctor(
                 )
             )
 
-    try:
-        ensure_private_file(layout.gh_dir / "hosts.yml")
-        checks.append(CheckResult("PASS", "gh-hosts", "present, mode 0600"))
-    except (ValueError, OSError) as error:
-        checks.append(CheckResult("FAIL", "gh-hosts", _check_failure_detail(error)))
+    if not github_broker:
+        try:
+            ensure_private_file(layout.gh_dir / "hosts.yml")
+            checks.append(CheckResult("PASS", "gh-hosts", "present, mode 0600"))
+        except (ValueError, OSError) as error:
+            checks.append(CheckResult("FAIL", "gh-hosts", _check_failure_detail(error)))
 
     record: ProjectRecord | None = None
     try:
@@ -865,6 +880,34 @@ def _doctor(
         checks.append(
             CheckResult("FAIL", "project-metadata", _check_failure_detail(error))
         )
+
+    if github_broker:
+        if record is None:
+            checks.append(
+                CheckResult("FAIL", "github-broker", "project metadata unavailable")
+            )
+        else:
+            try:
+                GitHubAppMetadata.load(
+                    layout.github_broker_root / "app.json",
+                    layout.github_broker_root / "private-key.pem",
+                )
+                load_broker_policy(
+                    layout.github_broker_policy_file, record, layout.project_id
+                )
+                checks.append(
+                    CheckResult(
+                        "PASS",
+                        "github-broker",
+                        "local App and project policy valid",
+                    )
+                )
+            except (ValueError, OSError) as error:
+                checks.append(
+                    CheckResult(
+                        "FAIL", "github-broker", _check_failure_detail(error)
+                    )
+                )
 
     if record is None:
         checks.append(
@@ -1049,6 +1092,7 @@ def main(
                 environment,
                 git_remote_reader,
                 identity_reader,
+                arguments.github_broker,
             )
             _podman_preflight(runner, image_required=arguments.image)
             resolution = _resolve_project_image(
@@ -1103,6 +1147,7 @@ def main(
                 environment,
                 runner,
                 git_remote_reader,
+                arguments.github_broker,
             )
             for check in checks:
                 print(
