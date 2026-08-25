@@ -34,7 +34,7 @@ bin/agentctl run agent-container
 
 `bin/agentctl doctor PROJECT`はrootless状態、image、private mode、認証fileの存在、workspace origin、handover mount元を検査します。出力にはpath、存在、認証方式、検査結果だけを出し、credential本文や環境変数値は出しません。
 
-`bin/agentctl run PROJECT`は対象projectのworkspace、project別Codex stateとcache、共有`auth.json`、専用`gh`認証、対象handoverだけをmountしてCodexを起動します。終了時にcontainer本体は削除され、明示した永続directoryだけが残ります。
+`bin/agentctl run PROJECT`は対象projectのworkspace、project別Codex stateとcache、共有`auth.json`、専用`gh`認証、対象handoverだけをmountし、Codexを`--approve-for-me`付きで起動します。Codex内側のworkspace-write sandboxを維持したままapproval requestを自動reviewし、外側のrootless Podman制約は変更しません。完全なapproval／sandbox bypassは有効にしません。終了時にcontainer本体は削除され、明示した永続directoryだけが残ります。
 
 ## 日常の運用
 
