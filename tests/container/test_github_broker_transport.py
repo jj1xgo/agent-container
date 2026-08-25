@@ -1,4 +1,5 @@
 from io import BytesIO
+import json
 import os
 from pathlib import Path
 import stat
@@ -18,6 +19,7 @@ from agent_container.github_broker_protocol import write_chunk_stream
 from agent_container.github_broker_transport import BrokerUploadPackClient
 from agent_container.github_broker_transport import BrokerReceivePackClient
 from agent_container.github_broker_transport import handle_receive_pack_connection
+from agent_container.github_broker_transport import handle_pull_request_connection
 from agent_container.github_broker_transport import handle_upload_pack_connection
 from agent_container.github_broker_transport import read_broker_capability
 from agent_container.state import Repository
@@ -85,6 +87,23 @@ class FakeReceivePackTransport:
     def rpc(self, request: bytes):  # type: ignore[no-untyped-def]
         self.requests.append(request)
         return (b"000eunpack ok\n", b"0000")
+
+
+class FakePullRequestTransport:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def create(self, **payload):  # type: ignore[no-untyped-def]
+        self.calls.append(("create", payload))
+        return {"number": 12, "state": "open", "title": payload["title"], "url": "https://github.com/example/pull/12"}
+
+    def view(self, number):  # type: ignore[no-untyped-def]
+        self.calls.append(("view", number))
+        return {"number": number, "state": "open", "title": "Feature", "url": "https://github.com/example/pull/12"}
+
+    def checks(self, number):  # type: ignore[no-untyped-def]
+        self.calls.append(("checks", number))
+        return {"number": number, "checks": []}
 
 
 def pkt(payload: bytes) -> bytes:
@@ -300,6 +319,35 @@ class BrokerUploadPackServerTest(unittest.TestCase):
             handle_receive_pack_connection(self.session, connection, transport), 1
         )
         self.assertEqual(transport.requests, [])
+
+    def test_pull_request_operations_return_bounded_json_and_audit(self) -> None:
+        transport = FakePullRequestTransport()
+        for sequence, operation, payload in (
+            (10, "pr-create", {"base": "main", "head": "feat/work", "title": "Feature", "body": "Body"}),
+            (11, "pr-view", {"number": 12}),
+            (12, "pr-checks", {"number": 12}),
+        ):
+            with self.subTest(operation=operation):
+                connection = Duplex(self.request(sequence=sequence, operation=operation, payload=payload))
+                self.assertEqual(handle_pull_request_connection(self.session, connection, transport), 0)
+                output = connection.outgoing.getvalue()
+                response_size = int.from_bytes(output[:4], "big") + 4
+                self.assertIn(b'"status":"ok"', output[:response_size])
+                result = json.loads(b"".join(iter_chunk_stream(BytesIO(output[response_size:]), maximum_total=4096)))
+                self.assertEqual(result["number"], 12)
+        audit = self.session.audit_file.read_text(encoding="utf-8")
+        self.assertIn('"operation":"pr-create"', audit)
+        self.assertIn('"pr_number":12', audit)
+        self.assertNotIn("Body", audit)
+
+    def test_pull_request_rejects_unknown_fields_without_leaking_body(self) -> None:
+        marker = "secret-body-marker"
+        connection = Duplex(self.request(operation="pr-create", payload={"base": "main", "head": "feat/work", "title": "Feature", "body": marker, "repository": "other/repo"}))
+        transport = FakePullRequestTransport()
+        self.assertEqual(handle_pull_request_connection(self.session, connection, transport), 1)
+        self.assertEqual(transport.calls, [])
+        self.assertIn(b'"status":"denied"', connection.outgoing.getvalue())
+        self.assertNotIn(marker.encode(), connection.outgoing.getvalue())
 
 
 class BrokerRuntimePathTest(unittest.TestCase):

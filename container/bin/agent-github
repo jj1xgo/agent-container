@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+exec python3 -m agent_container.github_client "$@"
