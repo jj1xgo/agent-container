@@ -1161,7 +1161,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(len(calls), 4)
             self.assertIn("codex", calls[-1].argv)
             self.assertEqual(
-                calls[-1].argv[-3:],
+                calls[-1].argv[-5:-2],
                 ("localhost/agent-container:dev", "codex", "--approve-for-me"),
             )
             self.assertIn("AGENT_PROJECT_ID=agent-container", calls[-1].argv)
