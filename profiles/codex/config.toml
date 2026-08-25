@@ -8,4 +8,5 @@ status_line = [
   "five-hour-limit",
   "weekly-limit",
   "git-branch",
+  "project-name",
 ]

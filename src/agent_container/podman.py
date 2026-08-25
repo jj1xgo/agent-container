@@ -10,7 +10,7 @@ from agent_container.state import validate_project_id
 
 CODEX_STATUS_LINE_CONFIG = (
     'tui.status_line=["model-with-reasoning","context-remaining",'
-    '"five-hour-limit","weekly-limit","git-branch"]'
+    '"five-hour-limit","weekly-limit","git-branch","project-name"]'
 )
 
 

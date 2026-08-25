@@ -248,7 +248,7 @@ class PodmanCommandTest(unittest.TestCase):
                 "--approve-for-me",
                 "-c",
                 'tui.status_line=["model-with-reasoning","context-remaining",'
-                '"five-hour-limit","weekly-limit","git-branch"]',
+                '"five-hour-limit","weekly-limit","git-branch","project-name"]',
             ),
         )
 
