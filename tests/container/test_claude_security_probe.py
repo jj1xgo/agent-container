@@ -2,6 +2,7 @@ from io import StringIO
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent_container.claude_security_probe import ProbeResult
 from agent_container.claude_security_probe import main
@@ -68,6 +69,47 @@ class ClaudeSecurityProbeTest(unittest.TestCase):
                 run_probe(fixture / "missing", proc, {}),
                 ProbeResult(False, False, False),
             )
+
+    def test_detects_parent_token_beyond_the_old_64k_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Path(temporary)
+            proc = fixture / "proc"
+            process = proc / "4242"
+            process.mkdir(parents=True)
+            (process / "environ").write_bytes(
+                b"PADDING="
+                + (b"x" * (70 * 1024))
+                + b"\0CLAUDE_CODE_OAUTH_TOKEN=DO-NOT-PRINT-CREDENTIAL-BODY\0"
+            )
+
+            self.assertEqual(
+                run_probe(fixture / "missing", proc, {}),
+                ProbeResult(False, False, True),
+            )
+
+    def test_incomplete_proc_read_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Path(temporary)
+            proc = fixture / "proc"
+            process = proc / "4242"
+            process.mkdir(parents=True)
+            (process / "environ").write_bytes(b"PATH=/bin\0HOME=/workspace\0")
+
+            with patch(
+                "agent_container.claude_security_probe._MAX_ENVIRON_BYTES", 8
+            ):
+                self.assertEqual(
+                    run_probe(fixture / "missing", proc, {}),
+                    ProbeResult(False, False, True),
+                )
+
+            with patch(
+                "agent_container.claude_security_probe.os.read",
+                side_effect=OSError("DO-NOT-PRINT-CREDENTIAL-BODY"),
+            ):
+                result = run_probe(fixture / "missing", proc, {})
+            self.assertEqual(result, ProbeResult(False, False, True))
+            self.assertNotIn("DO-NOT-PRINT", render(result))
 
     def test_main_prints_only_booleans_and_fails_on_visibility(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

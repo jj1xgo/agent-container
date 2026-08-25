@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import stat
 import sys
 from typing import Mapping
 from typing import TextIO
@@ -8,7 +9,16 @@ from typing import TextIO
 
 TOKEN_NAME = "CLAUDE_CODE_OAUTH_TOKEN"
 TOKEN_MARKER = b"CLAUDE_CODE_OAUTH_TOKEN="
-_MAX_ENVIRON_BYTES = 64 * 1024
+
+def _max_environ_bytes() -> int:
+    try:
+        arg_max = int(os.sysconf("SC_ARG_MAX"))
+    except (AttributeError, OSError, TypeError, ValueError):
+        arg_max = 2 * 1024 * 1024
+    return max(64 * 1024, min(arg_max, 16 * 1024 * 1024))
+
+
+_MAX_ENVIRON_BYTES = _max_environ_bytes()
 
 
 @dataclass(frozen=True)
@@ -42,13 +52,18 @@ def _environ_contains_token(path: Path) -> bool:
     except OSError:
         return False
     try:
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                return False
+        except OSError:
+            return True
         remaining = _MAX_ENVIRON_BYTES
         tail = b""
         while remaining:
             try:
                 chunk = os.read(descriptor, min(4096, remaining))
             except OSError:
-                return False
+                return True
             if not chunk:
                 return False
             window = tail + chunk
@@ -56,7 +71,7 @@ def _environ_contains_token(path: Path) -> bool:
                 return True
             tail = window[-(len(TOKEN_MARKER) - 1) :]
             remaining -= len(chunk)
-        return False
+        return True
     finally:
         os.close(descriptor)
 
