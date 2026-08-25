@@ -736,6 +736,110 @@ class AgentCtlProjectTest(unittest.TestCase):
         hosts.write_text("github.com:\n", encoding="utf-8")
         hosts.chmod(0o600)
 
+    def _broker_app_state(self, root: Path) -> None:
+        root.mkdir(parents=True, mode=0o700)
+        root.chmod(0o700)
+        broker = root / "github-broker"
+        broker.mkdir(mode=0o700)
+        app = broker / "app.json"
+        key = broker / "private-key.pem"
+        app.write_text(
+            json.dumps(
+                {
+                    "client_id": "Iv1abcdefghijk",
+                    "installation_id": 123,
+                    "repository_id": 456,
+                }
+            ),
+            encoding="utf-8",
+        )
+        key.write_text("private-key-marker", encoding="utf-8")
+        app.chmod(0o600)
+        key.chmod(0o600)
+
+    def test_project_add_clones_through_broker_without_gh_state(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            handovers = Path(temp) / "handovers"
+            (handovers / "agent-container").mkdir(parents=True)
+            self._broker_app_state(root)
+            broker = BrokerRuntimeMount(
+                root / "github-broker/run/agent-container/session",
+                Repository.parse("jj1xgo/agent-container"),
+            )
+            calls = []
+
+            def runner(spec):
+                calls.append(spec)
+                if "clone" in spec.argv:
+                    (root / "workspaces/agent-container/.git").mkdir(parents=True)
+                return successful_podman_result(spec)
+
+            with patch(
+                "agent_container.agentctl.UploadPackBrokerRuntime.create"
+            ) as create:
+                context = create.return_value
+                context.__enter__.return_value = broker
+                result = main(
+                    [
+                        "project", "add", "jj1xgo/agent-container",
+                        "--handover-root", str(handovers),
+                        "--github-broker", "--protected-branch", "main",
+                        "--protected-branch", "master",
+                        "--confirm-force-push-ruleset",
+                    ],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                )
+
+            self.assertEqual(result, 0)
+            clone = " ".join(calls[-1].argv)
+            self.assertIn("git clone https://github.com/jj1xgo/agent-container.git", clone)
+            self.assertIn("dst=/run/agent-broker,ro=true", clone)
+            self.assertNotIn("gh auth git-credential", clone)
+            self.assertFalse((root / "gh").exists())
+            policy = json.loads(
+                (root / "projects/agent-container/github-broker.json").read_text()
+            )
+            self.assertEqual(policy["protected_branches"], ["main", "master"])
+            create.assert_called_once()
+            context.__exit__.assert_called_once()
+
+    def test_project_add_broker_start_failure_never_clones_or_falls_back(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            handovers = Path(temp) / "handovers"
+            (handovers / "agent-container").mkdir(parents=True)
+            self._broker_app_state(root)
+            calls = []
+
+            with patch(
+                "agent_container.agentctl.UploadPackBrokerRuntime.create",
+                side_effect=OSError("private-key-marker"),
+            ):
+                result = main(
+                    [
+                        "project", "add", "jj1xgo/agent-container",
+                        "--handover-root", str(handovers),
+                        "--github-broker", "--confirm-force-push-ruleset",
+                    ],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    stderr=StringIO(),
+                )
+
+            self.assertEqual(result, 1)
+            self.assertFalse((root / "workspaces/agent-container").exists())
+            self.assertFalse((root / "gh").exists())
+            self.assertFalse(any("clone" in call.argv for call in calls))
+            self.assertFalse(
+                (root / "projects/agent-container/project.json").exists()
+            )
+
     def test_project_add_records_repository_after_clone(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp) / "state"
