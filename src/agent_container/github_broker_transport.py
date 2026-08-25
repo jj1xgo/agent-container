@@ -7,6 +7,9 @@ import stat
 from typing import BinaryIO, Iterable
 
 from agent_container.git_remote_helper import MAX_STATELESS_REQUEST_BYTES
+from agent_container.git_remote_helper import MAX_RECEIVE_PACK_REQUEST_BYTES
+from agent_container.git_protocol import gate_receive_pack_commands
+from agent_container.git_protocol import parse_receive_pack_advertisement
 from agent_container.github_broker import BrokerSession
 from agent_container.github_broker_protocol import BrokerRequest
 from agent_container.github_broker_protocol import BrokerResponse
@@ -21,6 +24,9 @@ from agent_container.github_broker_protocol import write_chunk_stream
 from agent_container.github_git_transport import MAX_DISCOVERY_BYTES
 from agent_container.github_git_transport import MAX_UPLOAD_PACK_RESPONSE_BYTES
 from agent_container.github_git_transport import GitHubUploadPackTransport
+from agent_container.github_git_transport import GitHubReceivePackTransport
+from agent_container.github_git_transport import MAX_RECEIVE_PACK_ADVERTISEMENT_BYTES
+from agent_container.github_git_transport import MAX_RECEIVE_PACK_RESPONSE_BYTES
 
 
 _CAPABILITY = re.compile(r"^[A-Za-z0-9_-]{43}$")
@@ -156,13 +162,72 @@ class BrokerUploadPackClient:
         self._discovery = None
 
 
+@dataclass
+class BrokerReceivePackClient(BrokerUploadPackClient):
+    def _connect(self) -> None:
+        if self._stream is not None:
+            return
+        validate_broker_socket(self.socket_path)
+        capability = read_broker_capability(self.capability_path)
+        client = self.socket_factory(socket.AF_UNIX, socket.SOCK_STREAM)  # type: ignore[operator]
+        stream: BinaryIO | None = None
+        try:
+            client.settimeout(60)
+            client.connect(str(self.socket_path))
+            stream = client.makefile("rwb", buffering=0)
+            request = BrokerRequest(
+                version=PROTOCOL_VERSION,
+                capability=capability,
+                project_id=self.project_id,
+                sequence=1,
+                operation="git-receive-pack",
+                payload={"repository": self.repository},
+            )
+            stream.write(encode_request_frame(request))
+            stream.flush()
+            response = read_response_frame(stream)
+            if response.status != "ok":
+                raise RuntimeError("Git broker request was denied")
+            discovery = b"".join(
+                iter_chunk_stream(
+                    stream, maximum_total=MAX_RECEIVE_PACK_ADVERTISEMENT_BYTES
+                )
+            )
+            if not discovery:
+                raise RuntimeError("Git broker discovery failed")
+        except Exception:
+            if stream is not None:
+                stream.close()
+            client.close()
+            raise
+        self._socket = client
+        self._stream = stream
+        self._discovery = discovery
+
+    def push(self, request: bytes) -> Iterable[bytes]:
+        self._connect()
+        if self._stream is None:
+            raise RuntimeError("Git broker connection failed")
+        if not isinstance(request, bytes) or not request:
+            raise ValueError("Git broker request is invalid")
+        chunks = (
+            request[offset : offset + MAX_STREAM_CHUNK_BYTES]
+            for offset in range(0, len(request), MAX_STREAM_CHUNK_BYTES)
+        )
+        write_chunk_stream(self._stream, chunks)
+        yield from iter_chunk_stream(
+            self._stream, maximum_total=MAX_RECEIVE_PACK_RESPONSE_BYTES
+        )
+
+
 def handle_upload_pack_connection(
     session: BrokerSession,
     connection: BinaryIO,
     transport: GitHubUploadPackTransport,
+    initial_request: BrokerRequest | None = None,
 ) -> int:
     try:
-        request = read_request_frame(connection)
+        request = initial_request or read_request_frame(connection)
         authorized = session.authorize(request)
         if authorized["operation"] != "git-upload-pack" or authorized["payload"] != {
             "repository": session.policy.repository.slug
@@ -195,3 +260,73 @@ def handle_upload_pack_connection(
             )
             return 0
         transferred += write_chunk_stream(connection, transport.rpc(request_body))
+
+
+def handle_receive_pack_connection(
+    session: BrokerSession,
+    connection: BinaryIO,
+    transport: GitHubReceivePackTransport,
+    initial_request: BrokerRequest | None = None,
+) -> int:
+    try:
+        request = initial_request or read_request_frame(connection)
+        authorized = session.authorize(request)
+        if authorized["operation"] != "git-receive-pack" or authorized["payload"] != {
+            "repository": session.policy.repository.slug
+        }:
+            raise ValueError("broker receive-pack request is not allowed")
+        discovery = transport.discover()
+        advertisement = parse_receive_pack_advertisement(discovery)
+    except (ValueError, RuntimeError, OSError):
+        connection.write(encode_response_frame(BrokerResponse(PROTOCOL_VERSION, "denied")))
+        connection.flush()
+        return 1
+
+    connection.write(encode_response_frame(BrokerResponse(PROTOCOL_VERSION, "ok")))
+    write_chunk_stream(connection, (discovery,))
+    try:
+        request_body = b"".join(
+            iter_chunk_stream(
+                connection, maximum_total=MAX_RECEIVE_PACK_REQUEST_BYTES
+            )
+        )
+        gated = gate_receive_pack_commands(
+            request_body, advertisement, session.policy
+        )
+        transferred = write_chunk_stream(connection, transport.rpc(request_body))
+    except (ValueError, RuntimeError, OSError):
+        session.audit(operation="git-receive-pack", status="denied")
+        return 1
+    for update in gated.updates:
+        session.audit(
+            operation="git-receive-pack",
+            status="ok",
+            ref=update.ref,
+            bytes_transferred=transferred,
+        )
+    return 0
+
+
+def handle_broker_connection(
+    session: BrokerSession,
+    connection: BinaryIO,
+    upload_transport: GitHubUploadPackTransport,
+    receive_transport: GitHubReceivePackTransport | None,
+) -> int:
+    try:
+        request = read_request_frame(connection)
+    except (ValueError, OSError):
+        connection.write(encode_response_frame(BrokerResponse(PROTOCOL_VERSION, "denied")))
+        connection.flush()
+        return 1
+    if request.operation == "git-upload-pack":
+        return handle_upload_pack_connection(
+            session, connection, upload_transport, request
+        )
+    if request.operation == "git-receive-pack" and receive_transport is not None:
+        return handle_receive_pack_connection(
+            session, connection, receive_transport, request
+        )
+    connection.write(encode_response_frame(BrokerResponse(PROTOCOL_VERSION, "denied")))
+    connection.flush()
+    return 1

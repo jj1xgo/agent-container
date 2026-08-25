@@ -7,6 +7,7 @@ from agent_container.state import Repository
 
 
 MAX_STATELESS_REQUEST_BYTES = 16 * 1024 * 1024
+MAX_RECEIVE_PACK_REQUEST_BYTES = 256 * 1024 * 1024
 MAX_STATELESS_PACKETS = 65_536
 _HEX_HEADER = re.compile(br"^[0-9a-fA-F]{4}$")
 
@@ -15,6 +16,12 @@ class UploadPackTransport(Protocol):
     def discover(self) -> bytes: ...
 
     def rpc(self, request: bytes) -> Iterable[bytes]: ...
+
+
+class ReceivePackTransport(Protocol):
+    def discover(self) -> bytes: ...
+
+    def push(self, request: bytes) -> Iterable[bytes]: ...
 
 
 def parse_broker_repository_url(value: str, expected: str) -> Repository:
@@ -93,16 +100,6 @@ class StatelessRemoteHelper:
     stdout: BinaryIO
 
     def run(self) -> int:
-        command = self.stdin.readline(4097)
-        if command != b"capabilities\n":
-            raise ValueError("Git remote helper command is not allowed")
-        self.stdout.write(b"stateless-connect\n\n")
-        self.stdout.flush()
-
-        connect = self.stdin.readline(4097)
-        if connect != b"stateless-connect git-upload-pack\n":
-            raise ValueError("Git remote helper service is not allowed")
-        self.stdout.write(b"\n")
         advertisement = self.transport.discover()
         if not advertisement or len(advertisement) > 1_048_576:
             raise ValueError("Git upload-pack advertisement is invalid")
@@ -120,10 +117,34 @@ class StatelessRemoteHelper:
             self.stdout.flush()
 
 
+@dataclass
+class ReceivePackRemoteHelper:
+    repository: Repository
+    transport: ReceivePackTransport
+    stdin: BinaryIO
+    stdout: BinaryIO
+
+    def run(self) -> int:
+        advertisement = self.transport.discover()
+        if not advertisement or len(advertisement) > 4 * 1024 * 1024:
+            raise ValueError("Git receive-pack advertisement is invalid")
+        self.stdout.write(advertisement)
+        self.stdout.flush()
+        request = self.stdin.read(MAX_RECEIVE_PACK_REQUEST_BYTES + 1)
+        if not request or len(request) > MAX_RECEIVE_PACK_REQUEST_BYTES:
+            raise ValueError("Git receive-pack request is invalid")
+        for chunk in self.transport.push(request):
+            if not isinstance(chunk, bytes) or not chunk:
+                raise ValueError("Git receive-pack response is invalid")
+            self.stdout.write(chunk)
+        self.stdout.flush()
+        return 0
+
+
 def run_remote_helper(
     arguments: list[str],
     environment: Mapping[str, str],
-    transport: UploadPackTransport,
+    transport: UploadPackTransport | ReceivePackTransport,
     stdin: BinaryIO,
     stdout: BinaryIO,
 ) -> int:
@@ -131,4 +152,32 @@ def run_remote_helper(
         raise ValueError("Git remote helper arguments are invalid")
     expected = environment.get("AGENT_BROKER_REPOSITORY", "")
     repository = parse_broker_repository_url(arguments[1], expected)
-    return StatelessRemoteHelper(repository, transport, stdin, stdout).run()
+    command = stdin.readline(4097)
+    if command != b"capabilities\n":
+        raise ValueError("Git remote helper command is not allowed")
+    stdout.write(b"stateless-connect\n\n")
+    stdout.flush()
+    connect = stdin.readline(4097)
+    if connect == b"stateless-connect git-upload-pack\n":
+        selected = (
+            transport.for_service("git-upload-pack")  # type: ignore[union-attr]
+            if hasattr(transport, "for_service")
+            else transport
+        )
+        stdout.write(b"\n")
+        stdout.flush()
+        return StatelessRemoteHelper(
+            repository, selected, stdin, stdout  # type: ignore[arg-type]
+        ).run()
+    if connect == b"stateless-connect git-receive-pack\n":
+        selected = (
+            transport.for_service("git-receive-pack")  # type: ignore[union-attr]
+            if hasattr(transport, "for_service")
+            else transport
+        )
+        stdout.write(b"\n")
+        stdout.flush()
+        return ReceivePackRemoteHelper(
+            repository, selected, stdin, stdout  # type: ignore[arg-type]
+        ).run()
+    raise ValueError("Git remote helper service is not allowed")

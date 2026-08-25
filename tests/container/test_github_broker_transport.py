@@ -16,6 +16,8 @@ from agent_container.github_broker_protocol import encode_response_frame
 from agent_container.github_broker_protocol import iter_chunk_stream
 from agent_container.github_broker_protocol import write_chunk_stream
 from agent_container.github_broker_transport import BrokerUploadPackClient
+from agent_container.github_broker_transport import BrokerReceivePackClient
+from agent_container.github_broker_transport import handle_receive_pack_connection
 from agent_container.github_broker_transport import handle_upload_pack_connection
 from agent_container.github_broker_transport import read_broker_capability
 from agent_container.state import Repository
@@ -72,6 +74,47 @@ class FakeGitHubTransport:
         return (b"0008NAK\n", b"0002")
 
 
+class FakeReceivePackTransport:
+    def __init__(self, discovery: bytes) -> None:
+        self.discovery = discovery
+        self.requests: list[bytes] = []
+
+    def discover(self) -> bytes:
+        return self.discovery
+
+    def rpc(self, request: bytes):  # type: ignore[no-untyped-def]
+        self.requests.append(request)
+        return (b"000eunpack ok\n", b"0000")
+
+
+def pkt(payload: bytes) -> bytes:
+    return f"{len(payload) + 4:04x}".encode("ascii") + payload
+
+
+OLD = "1" * 40
+NEW = "2" * 40
+
+
+def receive_advertisement() -> bytes:
+    return (
+        pkt(
+            f"{OLD} refs/heads/feat/work".encode()
+            + b"\0report-status side-band-64k object-format=sha1\n"
+        )
+        + b"0000"
+    )
+
+
+def receive_request(ref: str = "refs/heads/feat/work", old: str = OLD) -> bytes:
+    return (
+        pkt(
+            f"{old} {NEW} {ref}".encode()
+            + b"\0report-status side-band-64k object-format=sha1\n"
+        )
+        + b"0000PACKpayload"
+    )
+
+
 def chunks(*bodies: bytes) -> bytes:
     stream = BytesIO()
     write_chunk_stream(stream, bodies)
@@ -116,6 +159,39 @@ class BrokerUploadPackClientTest(unittest.TestCase):
         self.assertEqual(fake_socket.connected, "/run/broker.sock")
         client.close()
         self.assertTrue(fake_socket.closed)
+
+    @mock.patch("agent_container.github_broker_transport.read_broker_capability")
+    @mock.patch("agent_container.github_broker_transport.validate_broker_socket")
+    def test_receive_client_uses_receive_operation_and_push_stream(
+        self, validate_socket: mock.Mock, read_capability: mock.Mock
+    ) -> None:
+        validate_socket.side_effect = lambda path: path
+        read_capability.return_value = "c" * 43
+        incoming = (
+            encode_response_frame(BrokerResponse(1, "ok"))
+            + chunks(receive_advertisement())
+            + chunks(b"push-result")
+        )
+        stream = Duplex(incoming)
+        client = BrokerReceivePackClient(
+            Path("/run/broker.sock"),
+            Path("/run/capability"),
+            "agent-container",
+            "jj1xgo/agent-container",
+            socket_factory=lambda *_: FakeSocket(stream),
+        )
+
+        self.assertEqual(client.discover(), receive_advertisement())
+        self.assertEqual(list(client.push(receive_request())), [b"push-result"])
+        request, consumed = decode_request_frame(stream.outgoing.getvalue())
+        self.assertEqual(request.operation, "git-receive-pack")
+        pushed = b"".join(
+            iter_chunk_stream(
+                BytesIO(stream.outgoing.getvalue()[consumed:]), maximum_total=4096
+            )
+        )
+        self.assertEqual(pushed, receive_request())
+        client.close()
         self.assertTrue(stream.closed)
 
     @mock.patch("agent_container.github_broker_transport.read_broker_capability")
@@ -200,6 +276,30 @@ class BrokerUploadPackServerTest(unittest.TestCase):
         self.assertEqual(transport.requests, [])
         self.assertNotIn(marker.encode(), connection.outgoing.getvalue())
         self.assertIn(b'"status":"denied"', connection.outgoing.getvalue())
+
+    def test_receive_pack_gates_then_forwards_work_branch(self) -> None:
+        connection = Duplex(
+            self.request(operation="git-receive-pack") + chunks(receive_request())
+        )
+        transport = FakeReceivePackTransport(receive_advertisement())
+
+        self.assertEqual(
+            handle_receive_pack_connection(self.session, connection, transport), 0
+        )
+        self.assertEqual(transport.requests, [receive_request()])
+        self.assertIn(b'"status":"ok"', connection.outgoing.getvalue())
+
+    def test_receive_pack_rejects_protected_ref_before_rpc(self) -> None:
+        connection = Duplex(
+            self.request(operation="git-receive-pack")
+            + chunks(receive_request(ref="refs/heads/main", old="0" * 40))
+        )
+        transport = FakeReceivePackTransport(receive_advertisement())
+
+        self.assertEqual(
+            handle_receive_pack_connection(self.session, connection, transport), 1
+        )
+        self.assertEqual(transport.requests, [])
 
 
 class BrokerRuntimePathTest(unittest.TestCase):
