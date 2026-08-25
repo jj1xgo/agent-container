@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import json
 import os
 from pathlib import Path
 import re
@@ -28,9 +29,12 @@ from agent_container.github_git_transport import GitHubUploadPackTransport
 from agent_container.github_git_transport import GitHubReceivePackTransport
 from agent_container.github_git_transport import MAX_RECEIVE_PACK_ADVERTISEMENT_BYTES
 from agent_container.github_git_transport import MAX_RECEIVE_PACK_RESPONSE_BYTES
+from agent_container.github_pr import GitHubPullRequestTransport
+from agent_container.github_pr import MAX_PR_RESPONSE_BYTES
 
 
 _CAPABILITY = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_PR_OPERATIONS = frozenset({"pr-create", "pr-view", "pr-checks"})
 
 
 def _validate_exact_path(path: Path) -> Path:
@@ -308,11 +312,92 @@ def handle_receive_pack_connection(
     return 0
 
 
+def _pr_result(
+    operation: str,
+    payload: dict[str, object],
+    transport: GitHubPullRequestTransport,
+) -> dict[str, object]:
+    if operation == "pr-create" and set(payload) == {
+        "base",
+        "head",
+        "title",
+        "body",
+    }:
+        base, head, title, body = (
+            payload["base"], payload["head"], payload["title"], payload["body"]
+        )
+        if not all(isinstance(value, str) for value in (base, head, title, body)):
+            raise ValueError("broker pull request payload is invalid")
+        return transport.create(base=base, head=head, title=title, body=body)
+    if operation in {"pr-view", "pr-checks"} and set(payload) == {"number"}:
+        number = payload["number"]
+        if isinstance(number, bool) or not isinstance(number, int):
+            raise ValueError("broker pull request payload is invalid")
+        return (
+            transport.view(number)
+            if operation == "pr-view"
+            else transport.checks(number)
+        )
+    raise ValueError("broker pull request payload is invalid")
+
+
+def handle_pull_request_connection(
+    session: BrokerSession,
+    connection: BinaryIO,
+    transport: GitHubPullRequestTransport,
+    initial_request: BrokerRequest | None = None,
+) -> int:
+    operation = "pr-view"
+    try:
+        request = initial_request or read_request_frame(connection)
+        operation = request.operation
+        authorized = session.authorize(request)
+        operation = authorized["operation"]
+        if operation not in _PR_OPERATIONS:
+            raise ValueError("broker pull request operation is not allowed")
+        result = _pr_result(operation, authorized["payload"], transport)
+        body = json.dumps(
+            result,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        if not body or len(body) > MAX_PR_RESPONSE_BYTES:
+            raise ValueError("broker pull request response is invalid")
+    except (TypeError, ValueError, RuntimeError, OSError):
+        connection.write(
+            encode_response_frame(BrokerResponse(PROTOCOL_VERSION, "denied"))
+        )
+        connection.flush()
+        try:
+            session.audit(operation=operation, status="denied")
+        except ValueError:
+            pass
+        return 1
+
+    connection.write(encode_response_frame(BrokerResponse(PROTOCOL_VERSION, "ok")))
+    transferred = write_chunk_stream(connection, (body,))
+    number = result.get("number")
+    session.audit(
+        operation=operation,
+        status="ok",
+        pr_number=(
+            number
+            if isinstance(number, int) and not isinstance(number, bool)
+            else None
+        ),
+        bytes_transferred=transferred,
+    )
+    return 0
+
+
 def handle_broker_connection(
     session: BrokerSession,
     connection: BinaryIO,
     upload_transport: GitHubUploadPackTransport,
     receive_transport: GitHubReceivePackTransport | None,
+    pr_transport: GitHubPullRequestTransport | None = None,
 ) -> int:
     try:
         request = read_request_frame(connection)
@@ -327,6 +412,10 @@ def handle_broker_connection(
     if request.operation == "git-receive-pack" and receive_transport is not None:
         return handle_receive_pack_connection(
             session, connection, receive_transport, request
+        )
+    if request.operation in _PR_OPERATIONS and pr_transport is not None:
+        return handle_pull_request_connection(
+            session, connection, pr_transport, request
         )
     connection.write(encode_response_frame(BrokerResponse(PROTOCOL_VERSION, "denied")))
     connection.flush()

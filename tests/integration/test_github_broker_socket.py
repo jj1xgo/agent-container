@@ -11,6 +11,7 @@ from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_runtime import UploadPackBrokerRuntime
 from agent_container.github_broker_transport import BrokerUploadPackClient
 from agent_container.github_broker_transport import BrokerReceivePackClient
+from agent_container.github_client import request_pull_request
 
 
 RUN_SOCKET_INTEGRATION = (
@@ -57,6 +58,16 @@ class FakeReceivePackTransport:
         return (b"000eunpack ok\n", b"0000")
 
 
+class FakePullRequestTransport:
+    def view(self, number):  # type: ignore[no-untyped-def]
+        return {
+            "number": number,
+            "state": "open",
+            "title": "Feature",
+            "url": "https://github.com/jj1xgo/agent-container/pull/12",
+        }
+
+
 @unittest.skipUnless(
     RUN_SOCKET_INTEGRATION,
     "set AGENT_CONTAINER_RUN_SOCKET_INTEGRATION=1 for Unix socket integration",
@@ -77,7 +88,7 @@ class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
             upload = FakeUploadPackTransport()
             receive = FakeReceivePackTransport()
             runtime = UploadPackBrokerRuntime(  # type: ignore[arg-type]
-                session, upload, receive
+                session, upload, receive, FakePullRequestTransport()
             )
             first = b"0009done\n0000"
             second = b"000cls-refs\n0000"
@@ -134,9 +145,19 @@ class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
                     )
                 finally:
                     push_client.close()
+                pr_result = request_pull_request(
+                    "pr-view",
+                    {"number": 12},
+                    {
+                        "AGENT_BROKER_SOCKET": str(session.socket_path),
+                        "AGENT_BROKER_CAPABILITY": str(session.capability_path),
+                        "AGENT_PROJECT_ID": "agent-container",
+                    },
+                )
 
             self.assertEqual(result, 0)
             self.assertEqual(push_result, 0)
+            self.assertEqual(pr_result["number"], 12)
             self.assertEqual(upload.requests, [first, second])
             self.assertEqual(receive.requests, [push])
             self.assertEqual(
@@ -158,11 +179,13 @@ class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
                 json.loads(line)
                 for line in session.audit_file.read_text(encoding="utf-8").splitlines()
             ]
-            self.assertEqual(len(records), 2)
+            self.assertEqual(len(records), 3)
             self.assertEqual(records[0]["status"], "ok")
             self.assertEqual(records[0]["operation"], "git-upload-pack")
             self.assertEqual(records[1]["operation"], "git-receive-pack")
             self.assertEqual(records[1]["ref"], "refs/heads/feat/work")
+            self.assertEqual(records[2]["operation"], "pr-view")
+            self.assertEqual(records[2]["pr_number"], 12)
             self.assertTrue(all("capability" not in record for record in records))
 
 
