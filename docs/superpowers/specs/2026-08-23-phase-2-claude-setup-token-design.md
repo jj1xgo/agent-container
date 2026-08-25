@@ -1,7 +1,7 @@
 # Phase 2 Claude Code setup-token認証 再設計
 
-**作成日:** 2026-08-23  
-**対象:** `agent-container`  
+**作成日:** 2026-08-23
+**対象:** `agent-container`
 **状態:** ユーザー承認済み
 
 ## 1. 位置づけ
@@ -155,4 +155,3 @@ push、PR、merge、force-push、release、削除はsmokeに含めない。
 - Codexの既存build/auth/run/doctorが回帰しない。
 - legacy credentialは削除せずprivate quarantineへ隔離される。
 - automated tests、host smoke、whole-branch reviewが成功する。
-

@@ -2,8 +2,8 @@
 
 > **認証・runtime設計の更新:** Claudeの永続認証、runtime mount、doctor、host smokeに関する規定は、実host検証を反映した `2026-08-23-phase-2-claude-setup-token-design.md` が優先する。
 
-**作成日:** 2026-08-23  
-**対象:** `agent-container`  
+**作成日:** 2026-08-23
+**対象:** `agent-container`
 **状態:** ユーザー承認済み
 
 ## 1. 目的

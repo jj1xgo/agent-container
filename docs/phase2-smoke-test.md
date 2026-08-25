@@ -23,6 +23,13 @@ Codexはここから通常build完了までを実行してよい。認証やlive
    git diff --check
    ```
 
+   derived imageの実Podman統合確認は、base image build後に次を実行する。テストは一意な専用imageを作成し、cache再利用とagent/project Node分離を確認してから、その専用imageだけを削除する。
+
+   ```bash
+   AGENT_CONTAINER_RUN_PODMAN_INTEGRATION=1 PYTHONPATH=src \
+     python3 -m unittest tests.integration.test_project_image_podman -v
+   ```
+
 2. state変更の前に、状態rootと次のexact pathだけを確定する。存在するentryは`lstat`相当でpath、type、mode、numeric ownerだけを記録し、本文やsymlink targetを読まない。
 
    ```text
@@ -137,7 +144,8 @@ unit suiteの結果を実host観測として扱いません。実行後は、実
 
 | command/check | expected result | observed result | date |
 | --- | --- | --- | --- |
-| setup-token automated preflight | complete suite PASS; no whitespace errors | unittest exit 0; `Ran 232 tests`; `OK`; `git diff --check` exit 0 | 2026-08-24 |
+| setup-token automated preflight | complete suite PASS; no whitespace errors | unittest exit 0; `Ran 240 tests`; `OK (skipped=1)` for the separately gated Podman test; `git diff --check` exit 0 | 2026-08-25 |
+| derived image Podman integration | sample package/project Node build; second resolution reuses cache; agent/project Node separation; both agent CLIs start | exit 0; `make` and project Node `v22.23.1` succeeded; fixed agent Node, Codex, and Claude probes succeeded; second resolution did not build; exact disposable test image removed | 2026-08-25 |
 | normal latest rebuild | no fixed version flags; cachebuster invalidates CLI install; both public versions resolve | `bin/agentctl build` exit 0; CLI install step executed; `localhost/agent-container:dev` image `ed588166e3d0af1a1c45bb1884237170eaa5201d2eb9ef46b477d003e30b5a25`; Node `v26.7.0`; Codex `0.149.1`; Claude `2.1.241` | 2026-08-24 |
 | private setup-token ceremony | user-only private terminal; exit status and sanitized result only | user reported exit 0; controller received no token value; active `oauth-token` metadata is regular file, mode `0600`, owner `1000:1000`; shared legacy names absent; new private quarantine tree has `0700` directories and `0600` files | 2026-08-24 |
 | post-auth Claude doctor | authenticated status; expected failed-project credential identified separately | exit 1; every required check PASS except `claude-project-credentials`; expected network-policy WARN only | 2026-08-24 |
