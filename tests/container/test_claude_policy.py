@@ -2,6 +2,7 @@ from contextlib import redirect_stdout
 from copy import deepcopy
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -19,6 +20,8 @@ class ClaudeManagedPolicyTest(unittest.TestCase):
         mcp_path = root / "managed-mcp.json"
         settings_path.write_text(json.dumps(settings), encoding="utf-8")
         mcp_path.write_text(json.dumps(mcp), encoding="utf-8")
+        settings_path.chmod(0o600)
+        mcp_path.chmod(0o600)
         return settings_path, mcp_path
 
     def test_accepts_repository_managed_policy(self) -> None:
@@ -74,6 +77,52 @@ class ClaudeManagedPolicyTest(unittest.TestCase):
             self.assertEqual(status, 1)
             self.assertEqual(output.getvalue(), "managed_policy_valid=false\n")
             self.assertNotIn("DO-NOT-PRINT", output.getvalue())
+
+    def test_rejects_symlinked_special_broad_and_oversized_policy_files(self) -> None:
+        baseline = json.loads(
+            (ROOT / "profiles/claude/managed-settings.json").read_text()
+        )
+        mcp = {"mcpServers": {}}
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Path(temporary)
+            real_settings, mcp_path = self._write_policy(fixture, baseline, mcp)
+
+            linked_settings = fixture / "linked-settings.json"
+            linked_settings.symlink_to(real_settings)
+            self.assertFalse(validate_managed_policy(linked_settings, mcp_path))
+
+            fifo_settings = fixture / "fifo-settings.json"
+            os.mkfifo(fifo_settings, 0o600)
+            self.assertFalse(validate_managed_policy(fifo_settings, mcp_path))
+
+            real_settings.chmod(0o666)
+            self.assertFalse(
+                validate_managed_policy(
+                    real_settings,
+                    mcp_path,
+                    expected_uid=os.getuid(),
+                )
+            )
+
+            real_settings.chmod(0o600)
+            real_settings.write_bytes(b" " * (64 * 1024 + 1))
+            self.assertFalse(validate_managed_policy(real_settings, mcp_path))
+
+    def test_enforces_expected_policy_owner_when_requested(self) -> None:
+        baseline = json.loads(
+            (ROOT / "profiles/claude/managed-settings.json").read_text()
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            settings, mcp = self._write_policy(
+                Path(temporary), baseline, {"mcpServers": {}}
+            )
+
+            self.assertTrue(
+                validate_managed_policy(settings, mcp, expected_uid=os.getuid())
+            )
+            self.assertFalse(
+                validate_managed_policy(settings, mcp, expected_uid=os.getuid() + 1)
+            )
 
 
 if __name__ == "__main__":

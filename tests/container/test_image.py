@@ -54,11 +54,11 @@ class ContainerImageContractTest(unittest.TestCase):
 
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
         self.assertIn(
-            "COPY profiles/claude/managed-settings.json /etc/claude-code/managed-settings.json",
+            "COPY --chmod=0644 profiles/claude/managed-settings.json /etc/claude-code/managed-settings.json",
             body,
         )
         self.assertIn(
-            "COPY profiles/claude/managed-mcp.json /etc/claude-code/managed-mcp.json",
+            "COPY --chmod=0644 profiles/claude/managed-mcp.json /etc/claude-code/managed-mcp.json",
             body,
         )
 

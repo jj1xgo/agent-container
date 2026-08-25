@@ -65,8 +65,8 @@ COPY --chmod=0755 container/bin/claude /usr/local/bin/claude
 COPY container/profile.d/10-agent-node.sh /etc/profile.d/10-agent-node.sh
 COPY src /opt/agent-container/src
 COPY profiles/codex /opt/agent-container/profiles/codex
-COPY profiles/claude/managed-settings.json /etc/claude-code/managed-settings.json
-COPY profiles/claude/managed-mcp.json /etc/claude-code/managed-mcp.json
+COPY --chmod=0644 profiles/claude/managed-settings.json /etc/claude-code/managed-settings.json
+COPY --chmod=0644 profiles/claude/managed-mcp.json /etc/claude-code/managed-mcp.json
 
 ENV HOME=/home/agent \
     PATH=/usr/local/bin:/opt/agent-node/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
