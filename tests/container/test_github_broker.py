@@ -35,7 +35,7 @@ class BrokerSessionTest(unittest.TestCase):
             "version": 1,
             "capability": self.session._capability,
             "project_id": "agent-container",
-            "sequence": self.session._next_sequence,
+            "sequence": 123,
             "operation": "pr-view",
             "payload": {"number": 1},
         }
@@ -65,7 +65,7 @@ class BrokerSessionTest(unittest.TestCase):
         authorized = self.session.authorize(self.request())
         self.assertEqual(authorized["operation"], "pr-view")
         self.assertEqual(authorized["payload"], {"number": 1})
-        self.assertEqual(self.session._next_sequence, 2)
+        self.assertEqual(self.session._seen_sequences, {123})
 
     def test_rejects_mismatch_replay_and_closed_session_without_secret_echo(self) -> None:
         marker = "secret-capability-marker"
@@ -73,7 +73,7 @@ class BrokerSessionTest(unittest.TestCase):
             self.request(version=2),
             self.request(capability=marker),
             self.request(project_id="other"),
-            self.request(sequence=2),
+            self.request(sequence=0),
             self.request(operation="merge"),
         )
         for request in cases:
@@ -82,8 +82,9 @@ class BrokerSessionTest(unittest.TestCase):
                     self.session.authorize(request)
                 self.assertNotIn(marker, str(raised.exception))
 
-        accepted = self.request()
+        accepted = self.request(sequence=456)
         self.session.authorize(accepted)
+        self.session.authorize(self.request(sequence=789))
         with self.assertRaisesRegex(ValueError, "sequence"):
             self.session.authorize(accepted)
         self.session.close()

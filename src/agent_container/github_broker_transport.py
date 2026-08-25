@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import re
+import secrets
 import socket
 import stat
 from typing import BinaryIO, Iterable
@@ -109,7 +110,7 @@ class BrokerUploadPackClient:
                 version=PROTOCOL_VERSION,
                 capability=capability,
                 project_id=self.project_id,
-                sequence=1,
+                sequence=secrets.randbelow((1 << 63) - 1) + 1,
                 operation="git-upload-pack",
                 payload={"repository": self.repository},
             )
@@ -179,7 +180,7 @@ class BrokerReceivePackClient(BrokerUploadPackClient):
                 version=PROTOCOL_VERSION,
                 capability=capability,
                 project_id=self.project_id,
-                sequence=1,
+                sequence=secrets.randbelow((1 << 63) - 1) + 1,
                 operation="git-receive-pack",
                 payload={"repository": self.repository},
             )

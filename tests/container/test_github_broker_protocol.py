@@ -93,6 +93,8 @@ class BrokerProtocolTest(unittest.TestCase):
             {"capability": 1},
             {"project_id": []},
             {"sequence": True},
+            {"sequence": 0},
+            {"sequence": 1 << 63},
             {"operation": None},
             {"payload": []},
         )

@@ -14,6 +14,7 @@ _REQUEST_FIELDS = frozenset(
 _RESPONSE_FIELDS = frozenset({"version", "status"})
 _RESPONSE_STATUSES = frozenset({"ok", "denied", "error"})
 MAX_STREAM_CHUNK_BYTES = 1_048_576
+MAX_REQUEST_NONCE = (1 << 63) - 1
 
 
 @dataclass(frozen=True)
@@ -93,7 +94,11 @@ def decode_request_frame(data: bytes) -> tuple[BrokerRequest, int]:
         raise ValueError("broker request schema is invalid")
     if not isinstance(capability, str) or not isinstance(project_id, str):
         raise ValueError("broker request schema is invalid")
-    if isinstance(sequence, bool) or not isinstance(sequence, int):
+    if (
+        isinstance(sequence, bool)
+        or not isinstance(sequence, int)
+        or not 1 <= sequence <= MAX_REQUEST_NONCE
+    ):
         raise ValueError("broker request schema is invalid")
     if not isinstance(operation, str) or not isinstance(payload, dict):
         raise ValueError("broker request schema is invalid")
