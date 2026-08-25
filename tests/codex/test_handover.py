@@ -1,5 +1,5 @@
 from datetime import datetime
-from datetime import timezone
+from datetime import timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import os
@@ -27,11 +27,28 @@ class HandoverTest(unittest.TestCase):
             project_dir.mkdir()
             older = project_dir / "2026-08-21_1758.md"
             newest = project_dir / "2026-08-22_1815.md"
-            older.write_text("older", encoding="utf-8")
-            newest.write_text("newest", encoding="utf-8")
+            older.write_text("- Created: 2026-08-21T17:58+00:00\n", encoding="utf-8")
+            newest.write_text("- Created: 2026-08-22T18:15+00:00\n", encoding="utf-8")
             (project_dir / "notes.md").write_text("ignore", encoding="utf-8")
 
             self.assertEqual(latest_handover(Path(temp), "agent-container"), newest)
+
+    def test_latest_handover_uses_created_instant_across_timezones(self) -> None:
+        with TemporaryDirectory() as temp:
+            project = Path(temp) / "agent-container"
+            project.mkdir()
+            misleading = project / "2026-08-25_1236.md"
+            actual_latest = project / "2026-08-25_0835.md"
+            misleading.write_text(
+                "- Created: 2026-08-25T12:36+09:00\n", encoding="utf-8"
+            )
+            actual_latest.write_text(
+                "- Created: 2026-08-25T08:35+00:00\n", encoding="utf-8"
+            )
+
+            self.assertEqual(
+                latest_handover(Path(temp), "agent-container"), actual_latest
+            )
 
     def test_latest_handover_ignores_project_directory_symlink(self) -> None:
         with TemporaryDirectory() as temp:
@@ -55,19 +72,54 @@ class HandoverTest(unittest.TestCase):
                 now=datetime(2026, 8, 22, 18, 15, tzinfo=timezone.utc),
             )
 
-            self.assertEqual(path.name, "2026-08-22_1815.md")
+            self.assertRegex(path.name, r"^2026-08-22_181500_[0-9a-f]{8}\.md$")
             body = path.read_text(encoding="utf-8")
             self.assertIn("# Handover: Codex運用設計", body)
             self.assertIn("- Project: agent-container", body)
             self.assertIn("- Session: thread-example", body)
+            self.assertIn("- Created: 2026-08-22T18:15:00+00:00", body)
             self.assertIn("## 次の一手", body)
 
-    def test_create_handover_never_overwrites_same_minute(self) -> None:
+    def test_create_handover_is_unique_within_same_second(self) -> None:
         with TemporaryDirectory() as temp:
             now = datetime(2026, 8, 22, 18, 15, tzinfo=timezone.utc)
-            create_handover(Path(temp), "agent-container", "first", "", now)
-            with self.assertRaises(FileExistsError):
-                create_handover(Path(temp), "agent-container", "second", "", now)
+            first = create_handover(Path(temp), "agent-container", "first", "", now)
+            second = create_handover(Path(temp), "agent-container", "second", "", now)
+            self.assertNotEqual(first, second)
+            self.assertTrue(first.is_file())
+            self.assertTrue(second.is_file())
+            os.utime(first, ns=(1_000_000_000, 1_000_000_000))
+            os.utime(second, ns=(2_000_000_000, 2_000_000_000))
+            self.assertEqual(
+                latest_handover(Path(temp), "agent-container"), second
+            )
+
+    def test_create_handover_normalizes_non_utc_timestamp(self) -> None:
+        with TemporaryDirectory() as temp:
+            jst = timezone(timedelta(hours=9))
+            path = create_handover(
+                Path(temp),
+                "agent-container",
+                "timezone",
+                "session",
+                datetime(2026, 8, 25, 12, 36, tzinfo=jst),
+            )
+            self.assertTrue(path.name.startswith("2026-08-25_033600_"))
+            self.assertIn(
+                "- Created: 2026-08-25T03:36:00+00:00",
+                path.read_text(encoding="utf-8"),
+            )
+
+    def test_create_handover_rejects_naive_timestamp(self) -> None:
+        with TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError, "timezone"):
+                create_handover(
+                    Path(temp),
+                    "agent-container",
+                    "naive",
+                    "session",
+                    datetime(2026, 8, 25, 12, 36),
+                )
 
     def test_create_handover_rejects_project_directory_symlink(self) -> None:
         with TemporaryDirectory() as temp:

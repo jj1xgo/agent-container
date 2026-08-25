@@ -14,6 +14,8 @@ class HandoverSkillTest(unittest.TestCase):
         for required in (
             "AGENT_HANDOVER_ROOT",
             "AGENT_PROJECT_ID",
+            "CODEX_SESSION_ID",
+            '--session-id "$CODEX_SESSION_ID"',
             "agent_container.handover_cli",
             "git status",
             "検証結果",

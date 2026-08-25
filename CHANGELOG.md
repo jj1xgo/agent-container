@@ -18,6 +18,7 @@
 
 ### Changed
 
+- handover名をUTC・秒精度・一意suffixにし、timezone付き`Created`実時刻で最新を選ぶようにしました。host/containerの並行sessionがlocal時刻のファイル名で誤順序になりません。
 - Codex runtimeを`--approve-for-me`付きで起動し、内側のworkspace-write sandboxを維持しながらapproval requestを自動reviewするようにしました。完全なapproval／sandbox bypassは有効にしません。
 - Codex status lineから累積token数を外し、model、context、利用枠、Git branch、project名に絞りました。
 
