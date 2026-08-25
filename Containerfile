@@ -10,6 +10,11 @@ RUN apt-get update \
     && sed -i \
       's|URIs: http://deb.debian.org|URIs: https://deb.debian.org|g' \
       /etc/apt/sources.list.d/debian.sources \
+    && grep -qx 'URIs: https://deb.debian.org/debian' \
+      /etc/apt/sources.list.d/debian.sources \
+    && grep -qx 'URIs: https://deb.debian.org/debian-security' \
+      /etc/apt/sources.list.d/debian.sources \
+    && ! grep -q '^URIs: http://' /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
       bubblewrap ca-certificates curl git libatomic1 passwd python3 socat xz-utils \

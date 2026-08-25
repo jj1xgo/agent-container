@@ -100,6 +100,13 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertLess(ca_install, https_source)
         self.assertLess(https_source, main_install)
         self.assertIn("URIs: https://deb.debian.org", body)
+        self.assertIn(
+            "grep -qx 'URIs: https://deb.debian.org/debian'", body
+        )
+        self.assertIn(
+            "grep -qx 'URIs: https://deb.debian.org/debian-security'", body
+        )
+        self.assertIn("! grep -q '^URIs: http://'", body)
         self.assertGreaterEqual(body.count("apt-get update"), 2)
 
     def test_image_installs_checksum_verified_official_github_cli(self) -> None:
