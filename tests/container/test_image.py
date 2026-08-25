@@ -164,6 +164,14 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertIn("exec /opt/agent-node/bin/claude", claude_wrapper)
         self.assertNotIn("/opt/agent-node/bin/node", claude_wrapper)
 
+        broker_wrapper = (ROOT / "container/bin/git-remote-agent-broker").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "exec python3 -m agent_container.git_remote_helper_cli",
+            broker_wrapper,
+        )
+
     def test_image_creates_fixed_agent_identity(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
 
@@ -192,6 +200,7 @@ class ContainerImageContractTest(unittest.TestCase):
                 "!container/bin/",
                 "!container/bin/codex",
                 "!container/bin/claude",
+                "!container/bin/git-remote-agent-broker",
                 "!container/profile.d/",
                 "!container/profile.d/10-agent-node.sh",
                 "**/auth.json",

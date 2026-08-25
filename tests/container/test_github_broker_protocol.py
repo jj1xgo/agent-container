@@ -1,11 +1,19 @@
 import json
+from io import BytesIO
 import struct
 import unittest
 
 from agent_container.github_broker_protocol import BrokerRequest
 from agent_container.github_broker_protocol import MAX_REQUEST_BYTES
+from agent_container.github_broker_protocol import BrokerResponse
 from agent_container.github_broker_protocol import decode_request_frame
+from agent_container.github_broker_protocol import decode_response_frame
 from agent_container.github_broker_protocol import encode_request_frame
+from agent_container.github_broker_protocol import encode_response_frame
+from agent_container.github_broker_protocol import iter_chunk_stream
+from agent_container.github_broker_protocol import read_request_frame
+from agent_container.github_broker_protocol import read_response_frame
+from agent_container.github_broker_protocol import write_chunk_stream
 
 
 def raw_frame(body: bytes) -> bytes:
@@ -102,3 +110,26 @@ class BrokerProtocolTest(unittest.TestCase):
         request = BrokerRequest(1, "c", "p", 1, "pr-view", {"body": "x" * 70_000})
         with self.assertRaisesRegex(ValueError, "too large"):
             encode_request_frame(request)
+
+    def test_stream_readers_round_trip_request_and_response_frames(self) -> None:
+        request = BrokerRequest(1, "c", "p", 1, "pr-view", {})
+        response = BrokerResponse(1, "ok")
+        self.assertEqual(read_request_frame(BytesIO(encode_request_frame(request))), request)
+        self.assertEqual(
+            read_response_frame(BytesIO(encode_response_frame(response))), response
+        )
+        decoded, consumed = decode_response_frame(encode_response_frame(response))
+        self.assertEqual(decoded, response)
+        self.assertEqual(consumed, len(encode_response_frame(response)))
+
+    def test_chunk_stream_is_bounded_and_terminated(self) -> None:
+        stream = BytesIO()
+        self.assertEqual(write_chunk_stream(stream, (b"one", b"two")), 6)
+        self.assertEqual(
+            list(iter_chunk_stream(BytesIO(stream.getvalue()), maximum_total=6)),
+            [b"one", b"two"],
+        )
+        with self.assertRaisesRegex(ValueError, "too large"):
+            list(iter_chunk_stream(BytesIO(stream.getvalue()), maximum_total=5))
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            list(iter_chunk_stream(BytesIO(b"\x00\x00\x00\x04abc"), maximum_total=10))
