@@ -11,3 +11,7 @@ AI coding agentsをホスト環境から分離して動かす、Linux・rootless
 - [Phase 2 Claude Code operator guide](docs/phase2-claude-code.md)
 - [Phase 2 Claude Code実host smoke test](docs/phase2-smoke-test.md)
 - [PR workflow](docs/phase1-codex-container.md#日常の運用)
+
+## License
+
+GNU General Public License v3.0。詳細は[LICENSE](LICENSE)を参照してください。
