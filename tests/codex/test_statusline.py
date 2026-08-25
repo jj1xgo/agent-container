@@ -21,9 +21,7 @@ class StatusLineProfileTest(unittest.TestCase):
                 "context-remaining",
                 "five-hour-limit",
                 "weekly-limit",
-                "used-tokens",
                 "git-branch",
-                "project-name",
             ],
         )
 

@@ -8,6 +8,12 @@ from agent_container.state import StateLayout
 from agent_container.state import validate_project_id
 
 
+CODEX_STATUS_LINE_CONFIG = (
+    'tui.status_line=["model-with-reasoning","context-remaining",'
+    '"five-hour-limit","weekly-limit","git-branch"]'
+)
+
+
 _CLAUDE_TOKEN_PATH = "/run/secrets/claude-oauth-token"
 _CLAUDE_LAUNCHER_PREFIX = (
     "python3",
@@ -295,6 +301,8 @@ def run_codex_spec(
         image,
         "codex",
         "--approve-for-me",
+        "-c",
+        CODEX_STATUS_LINE_CONFIG,
     ]
     return CommandSpec(tuple(argv), {})
 
