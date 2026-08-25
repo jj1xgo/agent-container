@@ -1,23 +1,88 @@
-FROM docker.io/library/node:22-bookworm-slim
+FROM docker.io/library/debian:testing-slim
 
-ARG CODEX_VERSION=0.149.0
+ARG NODE_VERSION=latest
+ARG CODEX_VERSION=latest
+ARG CLAUDE_VERSION=latest
+ARG AGENT_CLI_CACHEBUST=0
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bubblewrap ca-certificates gh git python3 \
-    && rm -rf /var/lib/apt/lists/* \
-    && npm install --global "@openai/codex@${CODEX_VERSION}"
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && sed -i \
+      's|URIs: http://deb.debian.org|URIs: https://deb.debian.org|g' \
+      /etc/apt/sources.list.d/debian.sources \
+    && grep -qx 'URIs: https://deb.debian.org/debian' \
+      /etc/apt/sources.list.d/debian.sources \
+    && grep -qx 'URIs: https://deb.debian.org/debian-security' \
+      /etc/apt/sources.list.d/debian.sources \
+    && ! grep -q '^URIs: http://' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+      bubblewrap ca-certificates curl git libatomic1 passwd python3 socat xz-utils \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN groupmod --new-name agent node \
-    && usermod --login agent --home /home/agent --move-home node \
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) gh_arch=amd64 ;; \
+      arm64) gh_arch=arm64 ;; \
+      *) echo "unsupported GitHub CLI architecture" >&2; exit 1 ;; \
+    esac; \
+    release_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+      https://github.com/cli/cli/releases/latest)"; \
+    gh_version="$(printf '%s\n' "${release_url}" \
+      | python3 -c 'import re, sys; match = re.fullmatch(r"https://github\.com/cli/cli/releases/tag/v(\d+\.\d+\.\d+)", sys.stdin.read().strip()); print(match.group(1) if match else (_ for _ in ()).throw(SystemExit("invalid GitHub CLI release URL")))')"; \
+    archive="gh_${gh_version}_linux_${gh_arch}.tar.gz"; \
+    checksums="gh_${gh_version}_checksums.txt"; \
+    release="https://github.com/cli/cli/releases/download/v${gh_version}"; \
+    curl -fsSLO "${release}/${archive}"; \
+    curl -fsSLO "${release}/${checksums}"; \
+    grep "  ${archive}$" "${checksums}" | sha256sum --check --strict -; \
+    tar -xzf "${archive}"; \
+    install -m 0755 "gh_${gh_version}_linux_${gh_arch}/bin/gh" /usr/local/bin/gh; \
+    rm -rf "${archive}" "${checksums}" "gh_${gh_version}_linux_${gh_arch}"
+
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) node_arch=x64 ;; \
+      arm64) node_arch=arm64 ;; \
+      *) echo "unsupported Node architecture" >&2; exit 1 ;; \
+    esac; \
+    if [ "${NODE_VERSION}" = latest ]; then \
+      resolved="$(curl -fsSL https://nodejs.org/dist/index.json \
+        | python3 -c 'import json, sys; print(next(release["version"][1:] for release in json.load(sys.stdin) if "-" not in release["version"]))')"; \
+    else \
+      resolved="${NODE_VERSION}"; \
+    fi; \
+    archive="node-v${resolved}-linux-${node_arch}.tar.xz"; \
+    curl -fsSLO "https://nodejs.org/dist/v${resolved}/${archive}"; \
+    curl -fsSLO "https://nodejs.org/dist/v${resolved}/SHASUMS256.txt"; \
+    grep "  ${archive}$" SHASUMS256.txt | sha256sum --check --strict -; \
+    mkdir -p /opt/agent-node; \
+    tar -xJf "${archive}" -C /opt/agent-node --strip-components=1; \
+    rm -f "${archive}" SHASUMS256.txt
+
+RUN test -n "${AGENT_CLI_CACHEBUST}" \
+    && PATH=/opt/agent-node/bin:$PATH /opt/agent-node/bin/npm install --global \
+      "@openai/codex@${CODEX_VERSION}" \
+      "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
+
+RUN groupadd --gid 1000 agent \
+    && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/agent agent \
     && mkdir -p /opt/agent-container /workspace \
     && chown agent:agent /workspace
 
+COPY --chmod=0755 container/bin/codex /usr/local/bin/codex
+COPY --chmod=0755 container/bin/claude /usr/local/bin/claude
+COPY container/profile.d/10-agent-node.sh /etc/profile.d/10-agent-node.sh
 COPY src /opt/agent-container/src
 COPY profiles/codex /opt/agent-container/profiles/codex
+COPY --chmod=0644 profiles/claude/managed-settings.json /etc/claude-code/managed-settings.json
+COPY --chmod=0644 profiles/claude/managed-mcp.json /etc/claude-code/managed-mcp.json
 
 ENV HOME=/home/agent \
+    PATH=/usr/local/bin:/opt/agent-node/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
     PYTHONPATH=/opt/agent-container/src \
-    GH_CONFIG_DIR=/home/agent/.config/gh
+    GH_CONFIG_DIR=/home/agent/.config/gh \
+    DISABLE_UPDATES=1
 
 USER agent
 WORKDIR /workspace

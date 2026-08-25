@@ -10,6 +10,12 @@
 
 配布元は`profiles/codex/config.toml`。model+reasoning、context残量、primary/secondary limit、使用token、Git branch、project名の順に表示する。API情報やGit情報がない項目は表示されない場合がある。対話的な変更は`/statusline`で行う。
 
+## Image再buildとCLI version
+
+通常の`bin/agentctl build`はCodexとClaude Codeのversion既定値を両方`latest`としてnpmへ解決し、毎回変わるcachebusterでCLI install layerをinvalidateする。そのため、通常buildはその時点で公開されている両CLIの最新versionを取得し、終了時に解決した公開versionを表示する。runtimeのself-updateは無効であり、version変更はimage再build時だけに起きる。
+
+`--codex-version VERSION`と`--claude-version VERSION`は問題調査またはrollback専用である。通常の更新では固定versionを渡さない。
+
 ## handover保存境界
 
 launcherは対象projectについてだけ`AGENT_PROJECT_ID`と`AGENT_HANDOVER_ROOT`を設定する。Obsidian vault全体をmountしない。handover本文にはcredentialの値を残さない。
@@ -17,6 +23,8 @@ launcherは対象projectについてだけ`AGENT_PROJECT_ID`と`AGENT_HANDOVER_R
 ## 起動hook
 
 `profiles/codex/hooks.json`を専用`CODEX_HOME`へ配布する。初回または定義変更後は`/hooks`でcommandを確認してtrustする。hookは最新handoverのpathだけを通知し、本文は必要なときにCodexが読む。
+
+Claudeのmanaged sandboxでは、初期状態のhooksとMCPをEnterprise policyで無効にしている。これはCodexのhook設定とは別の境界であり、Codexのhandover通知hookを無効化するものではない。Claude側の制約とsecurity gateは[Phase 2運用ガイド](phase2-claude-code.md)を参照する。
 
 ## 手動確認
 
@@ -47,5 +55,7 @@ launcherは対象projectについてだけ`AGENT_PROJECT_ID`と`AGENT_HANDOVER_R
 - handover Skillのfresh-agent評価: SkillなしのREDではagentが`.codex/HANDOVER.md`を推測しproject CLIを省略した。SkillありのGREENではstorage変数不足を拒否し、CLI contractを使用、環境値とfull transcriptを除外し、未確認のGit/testsをskippedとして記録した。
 
 認証済み専用containerでのPhase 1 integration checkは2026-08-22に完了した。rootless Podman、device auth、private clone、authenticated TUIでのhook trust（`/hooks`）、statusline、`/status`、session resume、共有認証の継続、test branchのpushと未merge PR作成までの結果は、承認付きの[Phase 1 smoke test checklist](phase1-smoke-test.md)に記録している。
+
+2026-08-24のPhase 2 regressionでは、最新rebuild済みimage上の`bin/agentctl doctor agent-container --agent codex`がexit 0（既知のnetwork-policy WARNのみ）、Codex `0.149.1`の認証済みTUIが起動し、SessionStart hookがhandover本文ではなくpathだけを通知した。sandbox内shellは`CODEX_SMOKE_OK`を返し、通常終了後に同じprojectの直前sessionを`/resume`で再開できた。workspaceの変更、push、PR、mergeは行っていない。`codex_apps` connectorは保存token期限切れのHTTP 401で起動しなかったが、Codex本体、shell、handover hook、resumeの回帰結果とは分離して記録する。
 
 prototypeのunit testと実host smoke testは役割が異なる。前者は安全境界とcommand contractの回帰を検出し、後者は認証済みTUIと外部サービスを含むend-to-end動作を確認する。

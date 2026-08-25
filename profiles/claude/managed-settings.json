@@ -1,0 +1,34 @@
+{
+  "sandbox": {
+    "enabled": true,
+    "enableWeakerNestedSandbox": true,
+    "allowUnsandboxedCommands": false,
+    "failIfUnavailable": true,
+    "credentials": {
+      "envVars": [
+        {"name": "CLAUDE_CODE_OAUTH_TOKEN", "mode": "deny"},
+        {"name": "ANTHROPIC_API_KEY", "mode": "deny"},
+        {"name": "ANTHROPIC_AUTH_TOKEN", "mode": "deny"},
+        {"name": "AWS_ACCESS_KEY_ID", "mode": "deny"},
+        {"name": "AWS_SECRET_ACCESS_KEY", "mode": "deny"},
+        {"name": "AWS_SESSION_TOKEN", "mode": "deny"},
+        {"name": "GOOGLE_APPLICATION_CREDENTIALS", "mode": "deny"},
+        {"name": "GOOGLE_API_KEY", "mode": "deny"},
+        {"name": "AZURE_CLIENT_SECRET", "mode": "deny"}
+      ],
+      "files": [
+        {"path": "/run/secrets/claude-oauth-token", "mode": "deny"}
+      ]
+    }
+  },
+  "permissions": {
+    "deny": [
+      "Read(//run/secrets/claude-oauth-token)"
+    ],
+    "disableBypassPermissionsMode": "disable"
+  },
+  "disableAllHooks": true,
+  "allowManagedHooksOnly": true,
+  "allowedMcpServers": [],
+  "allowManagedMcpServersOnly": true
+}

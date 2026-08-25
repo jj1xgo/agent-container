@@ -1,35 +1,74 @@
 import argparse
 from dataclasses import dataclass
+import getpass
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+import time
 from typing import Callable
 from typing import Mapping
 from typing import TextIO
 
+from agent_container.claude_auth import discard_staged_token
+from agent_container.claude_auth import install_claude_token
+from agent_container.claude_auth import quarantine_legacy_claude_state
+from agent_container.claude_auth import stage_claude_token
+from agent_container.claude_auth import validate_legacy_quarantine_sources
+from agent_container.migration import add_plugin_entries
+from agent_container.migration import apply_claude_migration
+from agent_container.migration import plan_claude_migration
+from agent_container.migration import render_migration_plan
 from agent_container.podman import CommandSpec
 from agent_container.podman import auth_codex_spec
 from agent_container.podman import build_image_spec
+from agent_container.podman import build_project_image_spec
 from agent_container.podman import clone_project_spec
+from agent_container.podman import cli_version_spec
 from agent_container.podman import codex_login_status_spec
+from agent_container.podman import claude_setup_token_spec
+from agent_container.podman import claude_token_status_spec
+from agent_container.podman import claude_policy_status_spec
+from agent_container.podman import node_version_spec
 from agent_container.podman import podman_image_exists_spec
+from agent_container.podman import podman_architecture_spec
+from agent_container.podman import podman_image_id_spec
+from agent_container.podman import podman_project_images_spec
 from agent_container.podman import podman_rootless_spec
 from agent_container.podman import podman_version_spec
+from agent_container.podman import project_node_version_spec
 from agent_container.podman import run_codex_spec
+from agent_container.podman import run_claude_spec
 from agent_container.podman import run_command
 from agent_container.profile import seed_codex_home
+from agent_container.project_image import ProjectImageConfig
+from agent_container.project_image import ProjectImageResolution
+from agent_container.project_image import load_project_image_config
+from agent_container.project_image import project_image_key
+from agent_container.project_image import project_image_name
+from agent_container.project_image import write_project_build_context
 from agent_container.state import ProjectRecord
 from agent_container.state import Repository
 from agent_container.state import StateLayout
 from agent_container.state import ensure_private_directory
 from agent_container.state import ensure_private_file
+from agent_container.state import validate_claude_oauth_token
 from agent_container.state import validate_workspace
 from agent_container.state import validate_workspace_origin
+from agent_container.state import validate_agent
+from agent_container.state import validate_plugin_identifier
+from agent_container.state import validate_project_id
+from agent_container.state import validate_version
 
 
 DEFAULT_IMAGE = "localhost/agent-container:dev"
+RuntimeSpecBuilder = Callable[[StateLayout, Path, str, int, int], CommandSpec]
+
+
+def read_cachebuster() -> str:
+    return str(time.time_ns())
 
 
 @dataclass(frozen=True)
@@ -37,6 +76,14 @@ class CheckResult:
     level: str
     name: str
     detail: str
+
+
+class _ClaudeTokenFilesystemError(Exception):
+    pass
+
+
+class _ClaudeRuntimeStateError(Exception):
+    pass
 
 
 def _validate_image(value: str) -> str:
@@ -58,9 +105,14 @@ def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog="agentctl")
     command.add_argument("--image", default=DEFAULT_IMAGE)
     subcommands = command.add_subparsers(dest="command", required=True)
-    subcommands.add_parser("build")
+    build = subcommands.add_parser("build")
+    build.add_argument("--node-version", default="latest")
+    build.add_argument("--codex-version", default="latest")
+    build.add_argument("--claude-version", default="latest")
     auth = subcommands.add_parser("auth")
-    auth.add_subparsers(dest="agent", required=True).add_parser("codex")
+    auth_subcommands = auth.add_subparsers(dest="agent", required=True)
+    auth_subcommands.add_parser("codex")
+    auth_subcommands.add_parser("claude")
     project = subcommands.add_parser("project")
     project_subcommands = project.add_subparsers(dest="project_command", required=True)
     add = project_subcommands.add_parser("add")
@@ -69,8 +121,16 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument("--handover-root", type=Path, required=True)
     run = subcommands.add_parser("run")
     run.add_argument("project")
+    run.add_argument("--agent", choices=("codex", "claude"), default="codex")
     doctor = subcommands.add_parser("doctor")
     doctor.add_argument("project")
+    doctor.add_argument("--agent", choices=("codex", "claude", "all"), default="codex")
+    migrate = subcommands.add_parser("migrate")
+    migrate.add_argument("agent", choices=("claude",))
+    migrate.add_argument("project")
+    migrate.add_argument("--from", dest="source", type=Path, required=True)
+    migrate.add_argument("--plugin", dest="plugins", action="append", default=[])
+    migrate.add_argument("--apply", action="store_true")
     return command
 
 
@@ -117,6 +177,46 @@ def _validate_existing_codex_auth(layout: StateLayout) -> None:
             ensure_private_directory(directory)
     if layout.codex_auth_file.exists() or layout.codex_auth_file.is_symlink():
         ensure_private_file(layout.codex_auth_file)
+
+
+def _prepare_claude_auth(layout: StateLayout) -> None:
+    try:
+        ensure_private_directory(layout.root, create=True)
+        ensure_private_directory(layout.root / "shared-auth", create=True)
+        ensure_private_directory(layout.claude_auth_dir, create=True)
+        if layout.claude_token_file.exists() or layout.claude_token_file.is_symlink():
+            ensure_private_file(layout.claude_token_file)
+    except (ValueError, OSError):
+        raise _ClaudeTokenFilesystemError from None
+
+
+def _validate_existing_claude_auth(layout: StateLayout) -> None:
+    try:
+        for directory in (
+            layout.root,
+            layout.root / "shared-auth",
+            layout.claude_auth_dir,
+        ):
+            if directory.exists() or directory.is_symlink():
+                ensure_private_directory(directory)
+        if layout.claude_token_file.exists() or layout.claude_token_file.is_symlink():
+            ensure_private_file(layout.claude_token_file)
+    except (ValueError, OSError):
+        raise _ClaudeTokenFilesystemError from None
+
+
+def _snapshot_legacy_claude_sources(layout: StateLayout) -> tuple[Path, ...]:
+    if not (layout.claude_auth_dir.exists() or layout.claude_auth_dir.is_symlink()):
+        return ()
+    try:
+        return validate_legacy_quarantine_sources(layout)
+    except (ValueError, OSError):
+        raise _ClaudeTokenFilesystemError from None
+
+
+def _require_private_token_terminal(stdin: TextIO, stderr: TextIO) -> None:
+    if not stdin.isatty() or not stderr.isatty():
+        raise ValueError("Claude setup-token requires a private terminal")
 
 
 def _resolve_handover_root(handover_root: Path, project_id: str) -> Path:
@@ -177,6 +277,10 @@ def _prepare_project_directories(layout: StateLayout) -> None:
     ensure_private_directory(layout.workspace.parent, create=True)
 
 
+def _prepare_claude_project_state(layout: StateLayout) -> None:
+    ensure_private_directory(layout.claude_config, create=True)
+
+
 def _seed_project_codex_home(layout: StateLayout, profile_root: Path) -> None:
     if layout.codex_home.exists() or layout.codex_home.is_symlink():
         ensure_private_directory(layout.codex_home)
@@ -222,15 +326,16 @@ def _add_project(
 
 def _runtime_preflight(
     project_id: str,
+    agent: str,
     environment: Mapping[str, str] | None,
     git_remote_reader: Callable[[Path], str],
     identity_reader: Callable[[], tuple[int, int]],
 ) -> tuple[StateLayout, Path, int, int]:
     layout = StateLayout.from_environment(project_id, environment)
     _ensure_exact_state_root(layout, environment)
-    for directory in _private_state_directories(layout):
+    for directory in _common_runtime_state_directories(layout):
         ensure_private_directory(directory)
-    ensure_private_file(layout.codex_auth_file)
+    _validate_runtime_agent_state(layout, agent)
     ensure_private_file(layout.gh_dir / "hosts.yml")
     record = _read_runtime_project(layout.project_file)
     validate_workspace(layout.workspace)
@@ -263,18 +368,74 @@ def _validated_process_identity(
     return identity
 
 
-def _private_state_directories(layout: StateLayout) -> tuple[Path, ...]:
+def _common_runtime_state_directories(layout: StateLayout) -> tuple[Path, ...]:
     return (
         layout.root,
         layout.root / "shared-auth",
-        layout.codex_auth_dir,
         layout.gh_dir,
         layout.project_dir.parent,
         layout.project_dir,
-        layout.codex_home,
         layout.cache,
         layout.workspace.parent,
     )
+
+
+def _runtime_agent_directories(layout: StateLayout, agent: str) -> tuple[Path, ...]:
+    if agent == "codex":
+        return (layout.codex_auth_dir, layout.codex_home)
+    if agent == "claude":
+        directories = [layout.claude_auth_dir]
+        if layout.claude_config.exists() or layout.claude_config.is_symlink():
+            directories.append(layout.claude_config)
+        return tuple(directories)
+    raise ValueError("agent must be codex or claude")
+
+
+def _runtime_agent_auth_file(layout: StateLayout, agent: str) -> Path:
+    if agent == "codex":
+        return layout.codex_auth_file
+    if agent == "claude":
+        return layout.claude_token_file
+    raise ValueError("agent must be codex or claude")
+
+
+def _validate_claude_token_file(path: Path) -> None:
+    ensure_private_file(path)
+    try:
+        token = path.read_text(encoding="ascii")
+    except UnicodeError:
+        raise ValueError("Claude OAuth token has invalid format") from None
+    validate_claude_oauth_token(token)
+
+
+def _validate_claude_project_config(layout: StateLayout) -> None:
+    credentials = layout.claude_config / ".credentials.json"
+    if credentials.exists() or credentials.is_symlink():
+        raise ValueError("unsupported legacy Claude project credentials")
+
+
+def _validate_runtime_agent_state(layout: StateLayout, agent: str) -> None:
+    if agent == "claude":
+        try:
+            for directory in _runtime_agent_directories(layout, agent):
+                ensure_private_directory(directory)
+            _validate_claude_token_file(layout.claude_token_file)
+        except (ValueError, OSError):
+            raise _ClaudeRuntimeStateError from None
+        _validate_claude_project_config(layout)
+        return
+    for directory in _runtime_agent_directories(layout, agent):
+        ensure_private_directory(directory)
+    ensure_private_file(_runtime_agent_auth_file(layout, agent))
+
+
+def _private_state_directories(
+    layout: StateLayout, agents: tuple[str, ...]
+) -> tuple[Path, ...]:
+    directories = list(_common_runtime_state_directories(layout))
+    for agent in agents:
+        directories.extend(_runtime_agent_directories(layout, agent))
+    return tuple(directories)
 
 
 def _read_runtime_project(path: Path) -> ProjectRecord:
@@ -328,6 +489,17 @@ def _required_probe_run(
     return completed
 
 
+def _suppressed_run(
+    runner: Callable[[CommandSpec], subprocess.CompletedProcess],
+    spec: CommandSpec,
+) -> subprocess.CompletedProcess[str]:
+    if runner is run_command:
+        completed = run_command(spec, check=False, capture_output=True)
+    else:
+        completed = runner(spec)
+    return subprocess.CompletedProcess(spec.argv, completed.returncode)
+
+
 def _require_success(
     completed: subprocess.CompletedProcess,
     spec: CommandSpec,
@@ -348,16 +520,74 @@ def _podman_preflight(
         _required_probe_run(runner, podman_image_exists_spec(image_required))
 
 
+def _resolve_project_image(
+    layout: StateLayout,
+    base_image: str,
+    runner: Callable[[CommandSpec], subprocess.CompletedProcess],
+    build_missing: bool,
+    stdout: TextIO,
+    config: ProjectImageConfig | None = None,
+    base_image_id: str | None = None,
+) -> ProjectImageResolution:
+    if config is None:
+        config = load_project_image_config(layout.workspace)
+    if config.is_empty:
+        return ProjectImageResolution(base_image, "unconfigured", None)
+
+    if base_image_id is None:
+        base_id_result = _required_probe_run(runner, podman_image_id_spec(base_image))
+        base_image_id = (base_id_result.stdout or "").strip()
+    architecture_result = _required_probe_run(runner, podman_architecture_spec())
+    architecture = (architecture_result.stdout or "").strip()
+    key = project_image_key(base_image_id, config, architecture)
+    image = project_image_name(layout.project_id, key)
+
+    present = _doctor_run(runner, podman_image_exists_spec(image))
+    if present.returncode == 0:
+        return ProjectImageResolution(image, "current", key)
+
+    if not build_missing:
+        prior = _doctor_run(runner, podman_project_images_spec(layout.project_id))
+        has_prior = prior.returncode == 0 and bool((prior.stdout or "").strip())
+        state = "stale" if has_prior else "missing"
+        return ProjectImageResolution(image, state, key)
+
+    print("project image missing; building", file=stdout)
+    with tempfile.TemporaryDirectory(prefix="agent-container-project-") as temporary:
+        context = Path(temporary)
+        containerfile = write_project_build_context(context, base_image, config)
+        build_spec = build_project_image_spec(
+            context, containerfile, base_image, image
+        )
+        _require_success(runner(build_spec), build_spec)
+    return ProjectImageResolution(image, "current", key)
+
+
 def _check_failure_detail(error: Exception) -> str:
-    if isinstance(error, OSError) and not isinstance(
-        error, (PermissionError, FileNotFoundError)
-    ):
+    if isinstance(error, OSError):
         return "filesystem operation failed"
-    return str(error)
+    if isinstance(error, ValueError):
+        return "state validation failed"
+    if isinstance(error, subprocess.CalledProcessError):
+        return "command failed"
+    return "check failed"
+
+
+def _reported_node_version(completed: subprocess.CompletedProcess) -> str | None:
+    if completed.returncode != 0:
+        return None
+    value = (completed.stdout or "").strip()
+    numeric = value[1:] if value.startswith("v") else ""
+    if len(numeric.split(".")) != 3 or not all(
+        part.isdigit() for part in numeric.split(".")
+    ):
+        return None
+    return value
 
 
 def _doctor(
     project_id: str,
+    agent: str,
     image: str,
     environment: Mapping[str, str] | None,
     runner: Callable[[CommandSpec], subprocess.CompletedProcess],
@@ -365,6 +595,7 @@ def _doctor(
 ) -> list[CheckResult]:
     layout = StateLayout.from_environment(project_id, environment)
     checks: list[CheckResult] = []
+    agents = ("codex", "claude") if agent == "all" else (agent,)
 
     version = _doctor_run(runner, podman_version_spec())
     checks.append(
@@ -395,9 +626,136 @@ def _doctor(
         )
     )
 
+    runtime_image: str | None = None
+    project_config: ProjectImageConfig | None = None
+    base_image_id: str | None = None
+    if image_check.returncode != 0:
+        checks.append(CheckResult("FAIL", "base-image-id", "image unavailable"))
+        checks.append(
+            CheckResult("FAIL", "project-image", "base image unavailable")
+        )
+    else:
+        identity = _doctor_run(runner, podman_image_id_spec(image))
+        candidate_id = (identity.stdout or "").strip()
+        try:
+            project_image_key(
+                candidate_id,
+                ProjectImageConfig((), None),
+                "doctor",
+            )
+            identity_ok = identity.returncode == 0
+        except ValueError:
+            identity_ok = False
+        if identity_ok:
+            base_image_id = candidate_id
+        checks.append(
+            CheckResult(
+                "PASS" if identity_ok else "FAIL",
+                "base-image-id",
+                candidate_id if identity_ok else "unavailable",
+            )
+        )
+        try:
+            project_config = load_project_image_config(layout.workspace)
+            if base_image_id is None:
+                raise ValueError("base image identity unavailable")
+            resolution = _resolve_project_image(
+                layout,
+                image,
+                runner,
+                build_missing=False,
+                stdout=sys.stdout,
+                config=project_config,
+                base_image_id=base_image_id,
+            )
+            usable = resolution.state in ("unconfigured", "current")
+            checks.append(
+                CheckResult(
+                    "PASS" if usable else "FAIL",
+                    "project-image",
+                    resolution.state,
+                )
+            )
+            if usable:
+                runtime_image = resolution.image
+        except (ValueError, OSError, subprocess.CalledProcessError) as error:
+            checks.append(
+                CheckResult(
+                    "FAIL", "project-image", _check_failure_detail(error)
+                )
+            )
+
+    if runtime_image is None:
+        agent_node_version = None
+    else:
+        agent_node_version = _reported_node_version(
+            _doctor_run(runner, node_version_spec(runtime_image))
+        )
+    checks.append(
+        CheckResult(
+            "PASS" if agent_node_version is not None else "FAIL",
+            "agent-node",
+            agent_node_version or "image unavailable",
+        )
+    )
+
+    if project_config is not None and project_config.node_version is None:
+        checks.append(CheckResult("PASS", "project-node", "unconfigured"))
+    elif runtime_image is None or project_config is None:
+        checks.append(CheckResult("FAIL", "project-node", "image unavailable"))
+    else:
+        expected_project_node = f"v{project_config.node_version}"
+        observed_project_node = _reported_node_version(
+            _doctor_run(runner, project_node_version_spec(runtime_image))
+        )
+        project_node_ok = observed_project_node == expected_project_node
+        checks.append(
+            CheckResult(
+                "PASS" if project_node_ok else "FAIL",
+                "project-node",
+                expected_project_node if project_node_ok else "unexpected version",
+            )
+        )
+
+    if "claude" in agents:
+        if runtime_image is None:
+            policy_ok = False
+            policy_detail = "image unavailable"
+        else:
+            policy_status = _doctor_run(
+                runner, claude_policy_status_spec(runtime_image)
+            )
+            policy_ok = policy_status.returncode == 0
+            policy_detail = "valid" if policy_ok else "invalid"
+        checks.append(
+            CheckResult(
+                "PASS" if policy_ok else "FAIL",
+                "claude-managed-policy",
+                policy_detail,
+            )
+        )
+
+    for selected_agent in agents:
+        if runtime_image is not None:
+            cli_version = _doctor_run(
+                runner, cli_version_spec(runtime_image, selected_agent)
+            )
+            version_ok = cli_version.returncode == 0
+            version_detail = "available" if version_ok else "unavailable"
+        else:
+            version_ok = False
+            version_detail = "image unavailable"
+        checks.append(
+            CheckResult(
+                "PASS" if version_ok else "FAIL",
+                f"{selected_agent}-version",
+                version_detail,
+            )
+        )
+
     try:
         _ensure_exact_state_root(layout, environment)
-        for directory in _private_state_directories(layout):
+        for directory in _private_state_directories(layout, agents):
             ensure_private_directory(directory)
         checks.append(
             CheckResult(
@@ -409,15 +767,82 @@ def _doctor(
             CheckResult("FAIL", "private-state", _check_failure_detail(error))
         )
 
-    for name, path in (
-        ("codex-auth", layout.codex_auth_file),
-        ("gh-hosts", layout.gh_dir / "hosts.yml"),
-    ):
+    claude_token_ok = False
+    for selected_agent in agents:
+        name = f"{selected_agent}-auth"
+        path = _runtime_agent_auth_file(layout, selected_agent)
         try:
-            ensure_private_file(path)
+            if selected_agent == "claude":
+                _validate_claude_token_file(path)
+                claude_token_ok = True
+            else:
+                ensure_private_file(path)
             checks.append(CheckResult("PASS", name, "present, mode 0600"))
         except (ValueError, OSError) as error:
             checks.append(CheckResult("FAIL", name, _check_failure_detail(error)))
+
+    if "claude" in agents:
+        if not claude_token_ok:
+            checks.append(
+                CheckResult(
+                    "FAIL",
+                    "claude-auth-status",
+                    "not run: token invalid",
+                )
+            )
+        elif image_check.returncode != 0:
+            checks.append(
+                CheckResult(
+                    "FAIL",
+                    "claude-auth-status",
+                    "not run: image unavailable",
+                )
+            )
+        else:
+            auth_status = _doctor_run(
+                runner,
+                claude_token_status_spec(layout.claude_token_file, image),
+            )
+            authenticated = auth_status.returncode == 0
+            checks.append(
+                CheckResult(
+                    "PASS" if authenticated else "FAIL",
+                    "claude-auth-status",
+                    "authenticated" if authenticated else "command failed",
+                )
+            )
+
+        try:
+            ensure_private_directory(layout.claude_config)
+            checks.append(
+                CheckResult("PASS", "claude-config", "present, mode 0700")
+            )
+        except (ValueError, OSError) as error:
+            checks.append(
+                CheckResult("FAIL", "claude-config", _check_failure_detail(error))
+            )
+
+        try:
+            _validate_claude_project_config(layout)
+            checks.append(
+                CheckResult(
+                    "PASS", "claude-project-credentials", "absent"
+                )
+            )
+        except (ValueError, OSError) as error:
+            checks.append(
+                CheckResult(
+                    "FAIL",
+                    "claude-project-credentials",
+                    _check_failure_detail(error),
+                )
+            )
+
+    try:
+        ensure_private_file(layout.gh_dir / "hosts.yml")
+        checks.append(CheckResult("PASS", "gh-hosts", "present, mode 0600"))
+    except (ValueError, OSError) as error:
+        checks.append(CheckResult("FAIL", "gh-hosts", _check_failure_detail(error)))
 
     record: ProjectRecord | None = None
     try:
@@ -487,7 +912,7 @@ def _doctor(
         CheckResult(
             "WARN",
             "network-policy",
-            "outbound network is not domain-restricted in Phase 1",
+            "outbound network is not domain-restricted in Phase 2",
         )
     )
     return checks
@@ -500,18 +925,52 @@ def main(
     git_remote_reader: Callable[[Path], str] = read_git_remote,
     stdout: TextIO = sys.stdout,
     stderr: TextIO = sys.stderr,
+    stdin: TextIO = sys.stdin,
     identity_reader: Callable[[], tuple[int, int]] = read_process_identity,
-    runtime_spec_builder: Callable[
-        [StateLayout, Path, str, int, int], CommandSpec
-    ] = run_codex_spec,
+    runtime_spec_builder: RuntimeSpecBuilder | None = None,
+    runtime_spec_builders: Mapping[str, RuntimeSpecBuilder] | None = None,
+    cachebuster_reader: Callable[[], str] = read_cachebuster,
+    token_reader: Callable[[str], str] | None = None,
 ) -> int:
     try:
         arguments = parser().parse_args(argv)
         _validate_image(arguments.image)
+        if arguments.command == "build":
+            validate_version(arguments.node_version)
+            validate_version(arguments.codex_version)
+            validate_version(arguments.claude_version)
+        elif arguments.command == "auth":
+            validate_agent(arguments.agent)
+        elif arguments.command == "run":
+            validate_agent(arguments.agent)
+        elif arguments.command == "doctor":
+            validate_agent(arguments.agent, allow_all=True)
+        elif arguments.command == "migrate":
+            validate_agent(arguments.agent)
+            validate_project_id(arguments.project)
+            for plugin in arguments.plugins:
+                validate_plugin_identifier(plugin)
         repository_root = Path(__file__).resolve().parents[2]
         if arguments.command == "build":
             _podman_preflight(runner)
-            runner(build_image_spec(repository_root, arguments.image))
+            runner(
+                build_image_spec(
+                    repository_root,
+                    arguments.image,
+                    arguments.node_version,
+                    arguments.codex_version,
+                    arguments.claude_version,
+                    cachebuster_reader(),
+                )
+            )
+            probes = (
+                ("Node", node_version_spec(arguments.image)),
+                ("Codex", cli_version_spec(arguments.image, "codex")),
+                ("Claude", cli_version_spec(arguments.image, "claude")),
+            )
+            for label, probe in probes:
+                version = _required_probe_run(runner, probe)
+                print(f"{label} version: {(version.stdout or '').strip()}", file=stdout)
             return 0
         if arguments.command == "auth" and arguments.agent == "codex":
             layout = StateLayout.from_environment("auth", environment)
@@ -523,6 +982,46 @@ def main(
             ensure_private_file(layout.codex_auth_file)
             status_spec = codex_login_status_spec(layout, arguments.image)
             _require_success(runner(status_spec), status_spec)
+            return 0
+        if arguments.command == "auth" and arguments.agent == "claude":
+            layout = StateLayout.from_environment("auth", environment)
+            _ensure_exact_state_root(layout, environment)
+            _validate_existing_claude_auth(layout)
+            legacy_sources = _snapshot_legacy_claude_sources(layout)
+            _podman_preflight(runner, image_required=arguments.image)
+            if token_reader is None:
+                _require_private_token_terminal(stdin, stderr)
+            _prepare_claude_auth(layout)
+            setup_spec = claude_setup_token_spec(arguments.image)
+            _require_success(runner(setup_spec), setup_spec)
+            reader = getpass.getpass if token_reader is None else token_reader
+            token = ""
+            try:
+                try:
+                    token = reader("Paste Claude setup token (input hidden): ")
+                except (EOFError, KeyboardInterrupt):
+                    print("error: Claude token input cancelled", file=stderr)
+                    return 1
+                validate_claude_oauth_token(token)
+                try:
+                    staged = stage_claude_token(layout.claude_auth_dir, token)
+                except (ValueError, OSError):
+                    raise _ClaudeTokenFilesystemError from None
+            finally:
+                token = ""
+            try:
+                status_spec = claude_token_status_spec(staged, arguments.image)
+                _require_success(_suppressed_run(runner, status_spec), status_spec)
+                try:
+                    install_claude_token(staged, layout.claude_token_file)
+                    quarantine_legacy_claude_state(layout, legacy_sources)
+                except (ValueError, OSError):
+                    raise _ClaudeTokenFilesystemError from None
+            finally:
+                try:
+                    discard_staged_token(staged)
+                except (ValueError, OSError):
+                    raise _ClaudeTokenFilesystemError from None
             return 0
         if arguments.command == "project" and arguments.project_command == "add":
             _add_project(
@@ -539,20 +1038,39 @@ def main(
         if arguments.command == "run":
             layout, handover_project, uid, gid = _runtime_preflight(
                 arguments.project,
+                arguments.agent,
                 environment,
                 git_remote_reader,
                 identity_reader,
             )
             _podman_preflight(runner, image_required=arguments.image)
-            spec = runtime_spec_builder(
+            resolution = _resolve_project_image(
+                layout,
+                arguments.image,
+                runner,
+                build_missing=True,
+                stdout=stdout,
+            )
+            if arguments.agent == "claude":
+                policy_spec = claude_policy_status_spec(resolution.image)
+                _require_success(_suppressed_run(runner, policy_spec), policy_spec)
+                _prepare_claude_project_state(layout)
+            builders = (
+                {"codex": run_codex_spec, "claude": run_claude_spec}
+                if runtime_spec_builders is None
+                else runtime_spec_builders
+            )
+            if runtime_spec_builder is not None:
+                builders = {**builders, "codex": runtime_spec_builder}
+            spec = builders[arguments.agent](
                 layout,
                 handover_project,
-                arguments.image,
+                resolution.image,
                 uid,
                 gid,
             )
             print(
-                f"Starting Codex for project: {layout.project_id}",
+                f"Starting {arguments.agent.title()} for project: {layout.project_id}",
                 file=stdout,
             )
             runner(spec)
@@ -560,6 +1078,7 @@ def main(
         if arguments.command == "doctor":
             checks = _doctor(
                 arguments.project,
+                arguments.agent,
                 arguments.image,
                 environment,
                 runner,
@@ -571,10 +1090,35 @@ def main(
                     file=stdout,
                 )
             return 1 if any(check.level == "FAIL" for check in checks) else 0
+        if arguments.command == "migrate":
+            layout = StateLayout.from_environment(arguments.project, environment)
+            _ensure_exact_state_root(layout, environment)
+            for directory in (
+                layout.root,
+                layout.project_dir.parent,
+                layout.project_dir,
+            ):
+                ensure_private_directory(directory)
+            _read_runtime_project(layout.project_file)
+            plan = plan_claude_migration(arguments.source, layout.claude_config)
+            plan = add_plugin_entries(plan, tuple(arguments.plugins))
+            rendered = render_migration_plan(plan)
+            if arguments.apply:
+                apply_claude_migration(plan)
+            for line in rendered:
+                print(line, file=stdout)
+            print(f"MODE {'apply' if arguments.apply else 'dry-run'}", file=stdout)
+            return 0
         return 1
     except subprocess.CalledProcessError as error:
         print(f"error: command failed with exit code {error.returncode}", file=stderr)
         return error.returncode or 1
+    except _ClaudeTokenFilesystemError:
+        print("error: Claude token filesystem operation failed", file=stderr)
+        return 1
+    except _ClaudeRuntimeStateError:
+        print("error: Claude runtime state validation failed", file=stderr)
+        return 1
     except (ValueError, PermissionError, FileNotFoundError) as error:
         print(f"error: {error}", file=stderr)
         return 1

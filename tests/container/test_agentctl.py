@@ -1,14 +1,21 @@
 from io import StringIO
+import hmac
 import json
 import os
 from pathlib import Path
-from tempfile import TemporaryDirectory
+import shutil
 import subprocess
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 from agent_container.agentctl import main
+from agent_container.agentctl import parser
 from agent_container.podman import run_codex_spec
+from agent_container.podman import run_claude_spec
+from agent_container.project_image import ProjectImageConfig
+from agent_container.project_image import project_image_key
+from agent_container.project_image import project_image_name
 from agent_container.state import ProjectRecord
 from agent_container.state import Repository
 
@@ -20,9 +27,50 @@ def successful_podman_result(spec):
 
 
 class AgentCtlBuildAuthTest(unittest.TestCase):
+    OLD_TOKEN = "o" * 32
+    NEW_TOKEN = "n" * 32
+
     @staticmethod
     def _successful_probe(spec):
         return successful_podman_result(spec)
+
+    def _make_claude_state(
+        self, root: Path, token: str | None = None, legacy: bool = False
+    ) -> Path:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root.chmod(0o700)
+        shared = root / "shared-auth"
+        shared.mkdir(exist_ok=True, mode=0o700)
+        shared.chmod(0o700)
+        auth_dir = shared / "claude"
+        auth_dir.mkdir(exist_ok=True, mode=0o700)
+        auth_dir.chmod(0o700)
+        if token is not None:
+            active = auth_dir / "oauth-token"
+            active.write_text(token, encoding="ascii")
+            active.chmod(0o600)
+        if legacy:
+            for name, body in (
+                (".credentials.json", "legacy-credential-private"),
+                (".claude.json", "legacy-metadata-private"),
+            ):
+                path = auth_dir / name
+                path.write_text(body, encoding="ascii")
+                path.chmod(0o600)
+            backups = auth_dir / "backups"
+            backups.mkdir(mode=0o700)
+            backup = backups / "old"
+            backup.write_text("legacy-backup-private", encoding="ascii")
+            backup.chmod(0o600)
+        return auth_dir
+
+    def _assert_token_matches(self, path: Path, expected: bytes) -> None:
+        self.assertTrue(hmac.compare_digest(path.read_bytes(), expected))
+
+    def _assert_private_values_absent(
+        self, rendered: str, *private_values: str
+    ) -> None:
+        self.assertTrue(all(value not in rendered for value in private_values))
 
     def test_build_requires_successful_rootless_podman_before_build(self) -> None:
         calls = []
@@ -71,15 +119,93 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
                 self.assertEqual(result, 1)
                 self.assertEqual(calls, [])
 
-    def test_build_runs_one_podman_build(self) -> None:
+    def test_build_rejects_invalid_node_version_before_any_runner_call(self) -> None:
         calls = []
+        stderr = StringIO()
+
+        result = main(
+            ["build", "--node-version", "../bad"],
+            runner=lambda spec: calls.append(spec),
+            stderr=stderr,
+        )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(calls, [])
+        self.assertIn("version", stderr.getvalue())
+
+    def test_build_uses_requested_versions_and_prints_ordered_cli_probes(self) -> None:
+        calls = []
+        stdout = StringIO()
+
+        def runner(spec):
+            calls.append(spec)
+            if spec.argv[-2:] == ("/opt/agent-node/bin/node", "--version"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="v22.23.1\n")
+            if spec.argv[-2:] == ("codex", "--version"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="codex 0.149.0\n")
+            if spec.argv[-2:] == ("claude", "--version"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="claude 1.2.3\n")
+            return self._successful_probe(spec)
+
+        result = main(
+            [
+                "build",
+                "--node-version",
+                "22.23.1",
+                "--codex-version",
+                "0.149.0",
+                "--claude-version",
+                "1.2.3",
+            ],
+            runner=runner,
+            stdout=stdout,
+            cachebuster_reader=lambda: "12345",
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIn("NODE_VERSION=22.23.1", calls[2].argv)
+        self.assertIn("CODEX_VERSION=0.149.0", calls[2].argv)
+        self.assertIn("CLAUDE_VERSION=1.2.3", calls[2].argv)
+        self.assertIn("AGENT_CLI_CACHEBUST=12345", calls[2].argv)
+        self.assertEqual(
+            [call.argv[-2:] for call in calls[3:]],
+            [
+                ("/opt/agent-node/bin/node", "--version"),
+                ("codex", "--version"),
+                ("claude", "--version"),
+            ],
+        )
+        self.assertEqual(
+            stdout.getvalue(),
+            "Node version: v22.23.1\n"
+            "Codex version: codex 0.149.0\n"
+            "Claude version: claude 1.2.3\n",
+        )
+
+    def test_build_returns_claude_probe_exit_without_printing_probe_stderr(self) -> None:
+        calls = []
+        stderr = StringIO()
+
+        def runner(spec):
+            calls.append(spec)
+            if spec.argv[-2:] == ("claude", "--version"):
+                return subprocess.CompletedProcess(
+                    spec.argv,
+                    23,
+                    stderr="DO-NOT-PRINT-PROBE-STDERR",
+                )
+            return self._successful_probe(spec)
+
         result = main(
             ["build"],
-            runner=lambda spec: calls.append(spec) or self._successful_probe(spec),
+            runner=runner,
+            stderr=stderr,
+            cachebuster_reader=lambda: "12345",
         )
-        self.assertEqual(result, 0)
-        self.assertEqual(len(calls), 3)
-        self.assertEqual(calls[2].argv[:2], ("podman", "build"))
+
+        self.assertEqual(result, 23)
+        self.assertEqual(calls[-1].argv[-2:], ("claude", "--version"))
+        self.assertNotIn("DO-NOT-PRINT-PROBE-STDERR", stderr.getvalue())
 
     def test_auth_creates_private_state_and_runs_device_login(self) -> None:
         with TemporaryDirectory() as temp:
@@ -217,6 +343,389 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
             self.assertIn("mode 0600", stderr.getvalue())
             self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
 
+    def test_claude_auth_activates_verified_token_and_quarantines_legacy(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            auth_dir = self._make_claude_state(root, self.OLD_TOKEN, legacy=True)
+            active = auth_dir / "oauth-token"
+            calls = []
+            status_observations = []
+            stdout = StringIO()
+            stderr = StringIO()
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-3:] == ("claude", "auth", "status"):
+                    status_observations.append(
+                        (
+                            hmac.compare_digest(active.read_bytes(), b"o" * 32),
+                            (auth_dir / ".credentials.json").exists(),
+                            (auth_dir / ".claude.json").exists(),
+                            (auth_dir / "backups").exists(),
+                        )
+                    )
+                    return subprocess.CompletedProcess(
+                        spec.argv,
+                        0,
+                        stdout="status-output-private",
+                        stderr="runner-stderr-private",
+                    )
+                return self._successful_probe(spec)
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=runner,
+                token_reader=lambda prompt: self.NEW_TOKEN,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(len(calls), 5)
+            self.assertEqual(calls[0].argv, ("podman", "--version"))
+            self.assertEqual(calls[1].argv[:2], ("podman", "info"))
+            self.assertEqual(calls[2].argv[:3], ("podman", "image", "exists"))
+            self.assertEqual(calls[3].argv[-2:], ("claude", "setup-token"))
+            self.assertEqual(calls[4].argv[-3:], ("claude", "auth", "status"))
+            status_mount = next(
+                value
+                for value in calls[4].argv
+                if "dst=/run/secrets/claude-oauth-token" in value
+            )
+            staged_source = Path(
+                status_mount.split("src=", 1)[1].split(",dst=", 1)[0]
+            )
+            self.assertEqual(staged_source.parent, auth_dir)
+            self.assertNotEqual(staged_source, active)
+            self.assertFalse(staged_source.exists())
+            self.assertEqual(status_observations, [(True, True, True, True)])
+            self._assert_token_matches(active, b"n" * 32)
+            quarantine_runs = list((root / "quarantine/claude").iterdir())
+            self.assertEqual(len(quarantine_runs), 1)
+            self.assertEqual(
+                {path.name for path in quarantine_runs[0].iterdir()},
+                {".credentials.json", ".claude.json", "backups"},
+            )
+            self.assertFalse((quarantine_runs[0] / "oauth-token").exists())
+            rendered = stdout.getvalue() + stderr.getvalue()
+            self._assert_private_values_absent(
+                rendered,
+                self.NEW_TOKEN,
+                self.OLD_TOKEN,
+                "legacy-credential-private",
+                "legacy-metadata-private",
+                "legacy-backup-private",
+                "status-output-private",
+                "runner-stderr-private",
+            )
+
+    def test_claude_auth_setup_failure_does_not_prompt_or_change_existing_token(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+            old_bytes = active.read_bytes()
+            calls = []
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-2:] == ("claude", "setup-token"):
+                    return subprocess.CompletedProcess(spec.argv, 19)
+                return self._successful_probe(spec)
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=runner,
+                token_reader=lambda prompt: (_ for _ in ()).throw(AssertionError()),
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 19)
+            self.assertEqual(calls[-1].argv[-2:], ("claude", "setup-token"))
+            self._assert_token_matches(active, old_bytes)
+            self.assertEqual(list(active.parent.glob(".oauth-token-stage-*")), [])
+
+    def test_claude_auth_cancelled_prompt_preserves_existing_token(self) -> None:
+        for cancellation in (EOFError, KeyboardInterrupt):
+            with self.subTest(cancellation=cancellation.__name__), TemporaryDirectory() as temp:
+                root = Path(temp)
+                active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+                old_bytes = active.read_bytes()
+                calls = []
+                stdout = StringIO()
+                stderr = StringIO()
+
+                def reader(prompt):
+                    raise cancellation
+
+                result = main(
+                    ["auth", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": temp},
+                    runner=lambda spec: calls.append(spec) or self._successful_probe(spec),
+                    token_reader=reader,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls[-1].argv[-2:], ("claude", "setup-token"))
+                self.assertEqual(stderr.getvalue(), "error: Claude token input cancelled\n")
+                self._assert_token_matches(active, old_bytes)
+                self.assertEqual(list(active.parent.glob(".oauth-token-stage-*")), [])
+                self._assert_private_values_absent(
+                    stdout.getvalue() + stderr.getvalue(), self.OLD_TOKEN
+                )
+
+    def test_claude_auth_invalid_token_never_runs_status_and_preserves_existing(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+            old_bytes = active.read_bytes()
+            calls = []
+            stderr = StringIO()
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=lambda spec: calls.append(spec) or self._successful_probe(spec),
+                token_reader=lambda prompt: "z" * 31,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertTrue(all(call.argv[-3:] != ("claude", "auth", "status") for call in calls))
+            self._assert_token_matches(active, old_bytes)
+            self.assertEqual(list(active.parent.glob(".oauth-token-stage-*")), [])
+            self._assert_private_values_absent(
+                stderr.getvalue(), "z" * 31, self.OLD_TOKEN
+            )
+
+    def test_claude_auth_status_failure_discards_stage_and_preserves_existing(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+            old_bytes = active.read_bytes()
+            calls = []
+            stdout = StringIO()
+            stderr = StringIO()
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-3:] == ("claude", "auth", "status"):
+                    return subprocess.CompletedProcess(
+                        spec.argv,
+                        17,
+                        stdout="status-output-private",
+                        stderr="runner-stderr-private",
+                    )
+                return self._successful_probe(spec)
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=runner,
+                token_reader=lambda prompt: self.NEW_TOKEN,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 17)
+            self._assert_token_matches(active, old_bytes)
+            self.assertEqual(list(active.parent.glob(".oauth-token-stage-*")), [])
+            self._assert_private_values_absent(
+                stdout.getvalue() + stderr.getvalue(),
+                self.NEW_TOKEN,
+                self.OLD_TOKEN,
+                "status-output-private",
+                "runner-stderr-private",
+            )
+
+    def test_claude_auth_missing_image_creates_no_state_and_does_not_prompt(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "new-state"
+            calls = []
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[:3] == ("podman", "image", "exists"):
+                    return subprocess.CompletedProcess(spec.argv, 31)
+                return self._successful_probe(spec)
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                token_reader=lambda prompt: (_ for _ in ()).throw(AssertionError()),
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 31)
+            self.assertEqual(len(calls), 3)
+            self.assertFalse(root.exists())
+
+    def test_claude_auth_rejects_unsafe_existing_token_metadata_before_container(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+            active.chmod(0o644)
+            old_bytes = active.read_bytes()
+            calls = []
+            stderr = StringIO()
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=lambda spec: calls.append(spec),
+                token_reader=lambda prompt: self.NEW_TOKEN,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(calls, [])
+            self._assert_token_matches(active, old_bytes)
+            self.assertEqual(stderr.getvalue(), "error: Claude token filesystem operation failed\n")
+            self._assert_private_values_absent(
+                stderr.getvalue(), str(active), self.OLD_TOKEN, self.NEW_TOKEN
+            )
+
+    def test_claude_auth_allows_replacing_malformed_existing_token(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            active = self._make_claude_state(root, "malformed") / "oauth-token"
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=self._successful_probe,
+                token_reader=lambda prompt: self.NEW_TOKEN,
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 0)
+            self._assert_token_matches(active, b"n" * 32)
+
+    def test_claude_auth_requires_private_tty_for_default_reader(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+            old_bytes = active.read_bytes()
+            calls = []
+            stderr = StringIO()
+
+            with patch(
+                "agent_container.agentctl.getpass.getpass", side_effect=AssertionError
+            ):
+                result = main(
+                    ["auth", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": temp},
+                    runner=lambda spec: calls.append(spec) or self._successful_probe(spec),
+                    stdin=StringIO(),
+                    stderr=stderr,
+                )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(len(calls), 3)
+            self.assertTrue(all(call.argv[-2:] != ("claude", "setup-token") for call in calls))
+            self._assert_token_matches(active, old_bytes)
+
+    def test_claude_auth_status_output_is_suppressed_with_real_run_command_adapter(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            bin_dir = Path(temp) / "bin"
+            bin_dir.mkdir()
+            podman = bin_dir / "podman"
+            podman.write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  'info --format {{.Host.Security.Rootless}}') echo true ;;\n"
+                "  *'auth status') echo status-output-private; "
+                "echo runner-stderr-private >&2 ;;\n"
+                "esac\n",
+                encoding="ascii",
+            )
+            podman.chmod(0o755)
+            stdout = StringIO()
+            stderr = StringIO()
+
+            with patch.dict(os.environ, {"PATH": str(bin_dir)}):
+                result = main(
+                    ["auth", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    token_reader=lambda prompt: self.NEW_TOKEN,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+            self.assertEqual(result, 0)
+            rendered = stdout.getvalue() + stderr.getvalue()
+            self._assert_private_values_absent(
+                rendered,
+                self.NEW_TOKEN,
+                "status-output-private",
+                "runner-stderr-private",
+            )
+
+    def test_claude_auth_validates_legacy_sources_before_setup_and_moves_after_status(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            auth_dir = self._make_claude_state(root, self.OLD_TOKEN, legacy=True)
+            active = auth_dir / "oauth-token"
+            order = []
+
+            def runner(spec):
+                if spec.argv[-2:] == ("claude", "setup-token"):
+                    order.append("setup-with-legacy")
+                    self.assertTrue((auth_dir / ".credentials.json").exists())
+                if spec.argv[-3:] == ("claude", "auth", "status"):
+                    order.append("status-with-legacy-and-old-active")
+                    self.assertTrue((auth_dir / ".credentials.json").exists())
+                    self._assert_token_matches(active, b"o" * 32)
+                return self._successful_probe(spec)
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=runner,
+                token_reader=lambda prompt: self.NEW_TOKEN,
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                order,
+                ["setup-with-legacy", "status-with-legacy-and-old-active"],
+            )
+            self.assertFalse((auth_dir / ".credentials.json").exists())
+            self.assertTrue(any((root / "quarantine/claude").iterdir()))
+
+    def test_claude_auth_staging_failure_preserves_token_without_path_leak(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            auth_dir = self._make_claude_state(root, self.OLD_TOKEN)
+            active = auth_dir / "oauth-token"
+            old_bytes = active.read_bytes()
+            stderr = StringIO()
+
+            def reader(prompt):
+                auth_dir.chmod(0o755)
+                return self.NEW_TOKEN
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=self._successful_probe,
+                token_reader=reader,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 1)
+            self._assert_token_matches(active, old_bytes)
+            self.assertEqual(stderr.getvalue(), "error: Claude token filesystem operation failed\n")
+            self._assert_private_values_absent(
+                stderr.getvalue(), str(auth_dir), self.NEW_TOKEN, self.OLD_TOKEN
+            )
+
 
 class AgentCtlProjectTest(unittest.TestCase):
     def _authenticated_state(self, root: Path) -> None:
@@ -253,6 +762,7 @@ class AgentCtlProjectTest(unittest.TestCase):
             record = ProjectRecord.read(root / "projects/agent-container/project.json")
             self.assertEqual(record.repository.slug, "jj1xgo/agent-container")
             self.assertTrue((root / "projects/agent-container/codex-home/config.toml").is_file())
+            self.assertFalse((root / "projects/agent-container/claude-config").exists())
             self.assertEqual(len(calls), 4)
             for forbidden in ("checkout", "reset", "clean", "fetch"):
                 self.assertNotIn(forbidden, calls[-1].argv)
@@ -472,12 +982,61 @@ class AgentCtlProjectTest(unittest.TestCase):
 
 
 class AgentCtlRunDoctorTest(unittest.TestCase):
-    DOCTOR_CHECK_ORDER = [
+    CODEX_DOCTOR = [
         "podman-version",
         "podman-rootless",
         "image",
+        "base-image-id",
+        "project-image",
+        "agent-node",
+        "project-node",
+        "codex-version",
         "private-state",
         "codex-auth",
+        "gh-hosts",
+        "project-metadata",
+        "workspace-origin",
+        "handover-project",
+        "network-policy",
+    ]
+    CLAUDE_DOCTOR = [
+        "podman-version",
+        "podman-rootless",
+        "image",
+        "base-image-id",
+        "project-image",
+        "agent-node",
+        "project-node",
+        "claude-managed-policy",
+        "claude-version",
+        "private-state",
+        "claude-auth",
+        "claude-auth-status",
+        "claude-config",
+        "claude-project-credentials",
+        "gh-hosts",
+        "project-metadata",
+        "workspace-origin",
+        "handover-project",
+        "network-policy",
+    ]
+    ALL_DOCTOR = [
+        "podman-version",
+        "podman-rootless",
+        "image",
+        "base-image-id",
+        "project-image",
+        "agent-node",
+        "project-node",
+        "claude-managed-policy",
+        "codex-version",
+        "claude-version",
+        "private-state",
+        "codex-auth",
+        "claude-auth",
+        "claude-auth-status",
+        "claude-config",
+        "claude-project-credentials",
         "gh-hosts",
         "project-metadata",
         "workspace-origin",
@@ -492,6 +1051,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             root,
             root / "shared-auth",
             root / "shared-auth/codex",
+            root / "shared-auth/claude",
             root / "gh",
             root / "projects",
             root / "projects/agent-container",
@@ -510,6 +1070,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         auth_file = root / "shared-auth/codex/auth.json"
         auth_file.write_text("DO-NOT-PRINT-CREDENTIAL-BODY", encoding="utf-8")
         auth_file.chmod(0o600)
+        claude_token_file = root / "shared-auth/claude/oauth-token"
+        claude_token_file.write_text("x" * 32, encoding="ascii")
+        claude_token_file.chmod(0o600)
         hosts_file = root / "gh/hosts.yml"
         hosts_file.write_text("github.com:\n", encoding="utf-8")
         hosts_file.chmod(0o600)
@@ -522,6 +1085,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         self,
         root: Path,
         *,
+        agent: str = "codex",
         environment_root: Path | None = None,
         remote_url: str = "https://github.com/jj1xgo/agent-container.git",
     ) -> None:
@@ -530,7 +1094,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         stderr = StringIO()
 
         result = main(
-            ["run", "agent-container"],
+            ["run", "agent-container", "--agent", agent],
             environment={
                 "AGENT_CONTAINER_HOME": str(
                     root if environment_root is None else environment_root
@@ -546,15 +1110,38 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertEqual(calls, [])
         rendered = stdout.getvalue() + stderr.getvalue()
-        self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", rendered)
+        self._assert_private_values_absent(
+            rendered, "DO-NOT-PRINT-CREDENTIAL-BODY"
+        )
+
+    def _is_claude_status_spec(self, spec) -> bool:
+        return spec.argv[-8:] == (
+            "python3",
+            "-m",
+            "agent_container.claude_launcher",
+            "/run/secrets/claude-oauth-token",
+            "--",
+            "claude",
+            "auth",
+            "status",
+        )
 
     def _successful_doctor_runner(self, spec):
         if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
             return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+        if spec.argv[:3] == ("podman", "image", "inspect"):
+            return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+        if spec.argv[-2:] == ("/opt/agent-node/bin/node", "--version"):
+            return subprocess.CompletedProcess(spec.argv, 0, stdout="v24.7.0\n")
         return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
 
     def _doctor_check_names(self, rendered: str) -> list[str]:
         return [line.split()[1].removesuffix(":") for line in rendered.splitlines()]
+
+    def _assert_private_values_absent(
+        self, rendered: str, *private_values: str
+    ) -> None:
+        self.assertTrue(all(value not in rendered for value in private_values))
 
     def test_run_validates_then_starts_codex(self) -> None:
         with TemporaryDirectory() as temp:
@@ -584,6 +1171,109 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertNotIn(str(root / "shared-auth/codex/auth.json"), output.getvalue())
             self.assertEqual(os.getuid(), root.stat().st_uid)
 
+    def test_run_builds_and_uses_missing_project_image(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            config_dir = root / "workspaces/agent-container/.agent-container.d"
+            config_dir.mkdir()
+            (config_dir / "packages.txt").write_text("make\n", encoding="utf-8")
+            calls = []
+            builder_calls = []
+            output = StringIO()
+            expected_key = project_image_key(
+                "sha256:base", ProjectImageConfig(("make",), None), "amd64"
+            )
+            expected_image = project_image_name("agent-container", expected_key)
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[:5] == (
+                    "podman", "image", "inspect", "--format", "{{.Id}}"
+                ):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Arch}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="amd64\n")
+                if spec.argv[:3] == ("podman", "image", "exists") and spec.argv[-1] == expected_image:
+                    return subprocess.CompletedProcess(spec.argv, 1)
+                return successful_podman_result(spec)
+
+            def runtime_builder(*args):
+                builder_calls.append(args)
+                return run_codex_spec(*args)
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                runtime_spec_builder=runtime_builder,
+                stdout=output,
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(builder_calls[0][2], expected_image)
+            self.assertEqual(sum(call.argv[:2] == ("podman", "build") for call in calls), 1)
+            self.assertIn("project image missing; building", output.getvalue())
+
+    def test_run_uses_current_project_image_without_build(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            config_dir = root / "workspaces/agent-container/.agent-container.d"
+            config_dir.mkdir()
+            (config_dir / "packages.txt").write_text("make\n", encoding="utf-8")
+            calls = []
+            builder_calls = []
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[:3] == ("podman", "image", "inspect"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Arch}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="amd64\n")
+                return successful_podman_result(spec)
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                runtime_spec_builder=lambda *args: builder_calls.append(args) or run_codex_spec(*args),
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(sum(call.argv[:2] == ("podman", "build") for call in calls), 0)
+            self.assertIn("localhost/agent-container-project:", builder_calls[0][2])
+
+    def test_run_project_image_build_failure_never_starts_runtime(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            config_dir = root / "workspaces/agent-container/.agent-container.d"
+            config_dir.mkdir()
+            (config_dir / "packages.txt").write_text("make\n", encoding="utf-8")
+            builder_calls = []
+
+            def runner(spec):
+                if spec.argv[:3] == ("podman", "image", "inspect"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Arch}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="amd64\n")
+                if spec.argv[:3] == ("podman", "image", "exists") and "project:" in spec.argv[-1]:
+                    return subprocess.CompletedProcess(spec.argv, 1)
+                if spec.argv[:2] == ("podman", "build"):
+                    return subprocess.CompletedProcess(spec.argv, 17)
+                return successful_podman_result(spec)
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                runtime_spec_builder=lambda *args: builder_calls.append(args) or run_codex_spec(*args),
+            )
+
+            self.assertEqual(result, 17)
+            self.assertEqual(builder_calls, [])
+
     def test_run_missing_image_preserves_exit_code_without_starting_codex(self) -> None:
         with TemporaryDirectory() as temp:
             root, _ = self._runtime_state(temp)
@@ -609,7 +1299,346 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(result, 29)
             self.assertEqual(len(calls), 3)
             self.assertNotIn("Starting Codex", stdout.getvalue())
-            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
+            self._assert_private_values_absent(
+                stderr.getvalue(), "DO-NOT-PRINT-CREDENTIAL-BODY"
+            )
+
+    def test_run_claude_creates_project_config_after_image_preflight(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, handover_project = self._runtime_state(temp)
+            calls = []
+            builder_calls = []
+            output = StringIO()
+            config = root / "projects/agent-container/claude-config"
+
+            def runtime_spec_builder(*args):
+                builder_calls.append(args)
+                self.assertEqual(len(calls), 4)
+                self.assertEqual(calls[-2].argv[:3], ("podman", "image", "exists"))
+                self.assertEqual(
+                    calls[-1].argv[-3:],
+                    ("python3", "-m", "agent_container.claude_policy"),
+                )
+                self.assertTrue(config.is_dir())
+                self.assertEqual(config.stat().st_mode & 0o777, 0o700)
+                return run_claude_spec(*args)
+
+            result = main(
+                ["run", "agent-container", "--agent", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec) or successful_podman_result(spec),
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                runtime_spec_builders={"claude": runtime_spec_builder},
+                stdout=output,
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(len(builder_calls), 1)
+            self.assertEqual(len(calls), 5)
+            self.assertEqual(calls[-1].argv[-1], "claude")
+            self.assertIn(
+                f"src={handover_project},dst=/handovers/agent-container",
+                " ".join(calls[-1].argv),
+            )
+            self.assertEqual(
+                output.getvalue(), "Starting Claude for project: agent-container\n"
+            )
+
+    def test_run_claude_rejects_invalid_managed_policy_before_state_or_runtime(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            calls = []
+            builder_calls = []
+            stdout = StringIO()
+            stderr = StringIO()
+            config = root / "projects/agent-container/claude-config"
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-3:] == (
+                    "python3", "-m", "agent_container.claude_policy"
+                ):
+                    return subprocess.CompletedProcess(
+                        spec.argv,
+                        9,
+                        stdout="DO-NOT-PRINT-POLICY-OUTPUT",
+                        stderr="DO-NOT-PRINT-POLICY-ERROR",
+                    )
+                return successful_podman_result(spec)
+
+            result = main(
+                ["run", "agent-container", "--agent", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                runtime_spec_builders={
+                    "claude": lambda *args: builder_calls.append(args)
+                    or run_claude_spec(*args)
+                },
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 9)
+            self.assertEqual(builder_calls, [])
+            self.assertFalse(config.exists())
+            self.assertNotIn("Starting Claude", stdout.getvalue())
+            self.assertNotIn("DO-NOT-PRINT-POLICY", stdout.getvalue())
+            self.assertNotIn("DO-NOT-PRINT-POLICY", stderr.getvalue())
+            self.assertEqual(
+                sum(
+                    call.argv[-3:]
+                    == ("python3", "-m", "agent_container.claude_policy")
+                    for call in calls
+                ),
+                1,
+            )
+
+    def test_run_claude_missing_image_does_not_create_config(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            calls = []
+            config = root / "projects/agent-container/claude-config"
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[:3] == ("podman", "image", "exists"):
+                    return subprocess.CompletedProcess(spec.argv, 29)
+                return successful_podman_result(spec)
+
+            result = main(
+                ["run", "agent-container", "--agent", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 29)
+            self.assertEqual(len(calls), 3)
+            self.assertFalse(config.exists())
+
+    def test_run_claude_rejects_legacy_project_credentials_before_podman(self) -> None:
+        marker = "DO-NOT-PRINT-CLAUDE-PROJECT-CREDENTIAL"
+        cases = ("empty", "non-empty", "symlink")
+        for entry_kind in cases:
+            with self.subTest(entry=entry_kind), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                config = root / "projects/agent-container/claude-config"
+                config.mkdir(mode=0o700)
+                credentials = config / ".credentials.json"
+                if entry_kind == "symlink":
+                    target = Path(temp) / marker
+                    target.write_text(marker, encoding="utf-8")
+                    credentials.symlink_to(target)
+                else:
+                    credentials.write_text(
+                        "" if entry_kind == "empty" else marker,
+                        encoding="utf-8",
+                    )
+                    credentials.chmod(0o600)
+                calls = []
+                stderr = StringIO()
+
+                result = main(
+                    ["run", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stderr=stderr,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                rendered = stderr.getvalue()
+                self.assertIn("unsupported legacy Claude project credential", rendered)
+                self.assertEqual(rendered.find(marker), -1)
+
+    def test_run_claude_rejects_invalid_active_token_before_podman(self) -> None:
+        marker = "DO-NOT-PRINT-INVALID-CLAUDE-TOKEN"
+        cases = ("format", "mode", "symlink")
+        for failure in cases:
+            with self.subTest(failure=failure), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                legacy_auth = root / "shared-auth/claude/.credentials.json"
+                legacy_auth.write_text("{}", encoding="ascii")
+                legacy_auth.chmod(0o600)
+                token = root / "shared-auth/claude/oauth-token"
+                if failure == "format":
+                    token.write_text("invalid", encoding="ascii")
+                elif failure == "mode":
+                    token.chmod(0o644)
+                else:
+                    target = Path(temp) / marker
+                    target.write_text("x" * 32, encoding="ascii")
+                    target.chmod(0o600)
+                    token.unlink()
+                    token.symlink_to(target)
+                calls = []
+                stderr = StringIO()
+
+                result = main(
+                    ["run", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stderr=stderr,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertEqual(stderr.getvalue().find(marker), -1)
+
+    def test_run_claude_hides_state_root_for_token_or_config_failures(self) -> None:
+        marker = "DO-NOT-PRINT-CLAUDE-RUNTIME-STATE-ROOT"
+        cases = (
+            "token-missing",
+            "token-format",
+            "token-mode",
+            "token-symlink",
+            "config-file",
+            "config-mode",
+            "config-symlink",
+        )
+        for failure in cases:
+            with self.subTest(failure=failure), TemporaryDirectory() as temp:
+                state_parent = Path(temp) / marker
+                state_parent.mkdir()
+                root, _ = self._runtime_state(str(state_parent))
+                token = root / "shared-auth/claude/oauth-token"
+                config = root / "projects/agent-container/claude-config"
+                if failure == "token-missing":
+                    token.unlink()
+                elif failure == "token-format":
+                    token.write_text("invalid", encoding="ascii")
+                elif failure == "token-mode":
+                    token.chmod(0o644)
+                elif failure == "token-symlink":
+                    target = Path(temp) / "token-target"
+                    target.write_text("x" * 32, encoding="ascii")
+                    target.chmod(0o600)
+                    token.unlink()
+                    token.symlink_to(target)
+                elif failure == "config-file":
+                    config.write_text("not a directory", encoding="ascii")
+                elif failure == "config-mode":
+                    config.mkdir(mode=0o700)
+                    config.chmod(0o755)
+                else:
+                    target = Path(temp) / "config-target"
+                    target.mkdir(mode=0o700)
+                    config.symlink_to(target, target_is_directory=True)
+                calls = []
+                stderr = StringIO()
+
+                result = main(
+                    ["run", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stderr=stderr,
+                )
+
+                rendered = stderr.getvalue()
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertEqual(
+                    rendered.startswith(
+                        "error: Claude runtime state validation failed"
+                    ),
+                    True,
+                )
+                self.assertEqual(rendered.find(marker), -1)
+
+    def test_run_claude_rejects_broad_auth_or_config_without_secret_output(self) -> None:
+        cases = (
+            ("auth", "shared-auth/claude/oauth-token", 0o644),
+            ("config", "projects/agent-container/claude-config", 0o755),
+        )
+        for name, relative_path, mode in cases:
+            with self.subTest(boundary=name), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                if name == "auth":
+                    legacy_auth = root / "shared-auth/claude/.credentials.json"
+                    legacy_auth.write_text("{}", encoding="ascii")
+                    legacy_auth.chmod(0o600)
+                path = root / relative_path
+                if name == "config":
+                    path.mkdir(mode=0o700)
+                path.chmod(mode)
+                calls = []
+                stderr = StringIO()
+
+                result = main(
+                    ["run", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stderr=stderr,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertEqual(
+                    stderr.getvalue().startswith(
+                        "error: Claude runtime state validation failed"
+                    ),
+                    True,
+                )
+                self._assert_private_values_absent(
+                    stderr.getvalue(), "DO-NOT-PRINT-CLAUDE-CREDENTIAL"
+                )
+
+    def test_run_claude_rejects_symlinked_auth_or_config_without_secret_output(self) -> None:
+        cases = (
+            ("auth", "shared-auth/claude/oauth-token", "auth-target"),
+            ("config", "projects/agent-container/claude-config", "config-target"),
+        )
+        for name, relative_path, target_name in cases:
+            with self.subTest(boundary=name), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                if name == "auth":
+                    legacy_auth = root / "shared-auth/claude/.credentials.json"
+                    legacy_auth.write_text("{}", encoding="ascii")
+                    legacy_auth.chmod(0o600)
+                path = root / relative_path
+                target = Path(temp) / target_name
+                if name == "auth":
+                    path.unlink()
+                    target.write_text(
+                        "DO-NOT-PRINT-CLAUDE-CREDENTIAL", encoding="utf-8"
+                    )
+                    target.chmod(0o600)
+                else:
+                    target.mkdir(mode=0o700)
+                path.symlink_to(target, target_is_directory=name == "config")
+                calls = []
+                stderr = StringIO()
+
+                result = main(
+                    ["run", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stderr=stderr,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertEqual(
+                    stderr.getvalue().startswith(
+                        "error: Claude runtime state validation failed"
+                    ),
+                    True,
+                )
+                self._assert_private_values_absent(
+                    stderr.getvalue(), "DO-NOT-PRINT-CLAUDE-CREDENTIAL"
+                )
 
     def test_run_rejects_identity_mismatch_before_building_runtime_spec(self) -> None:
         with TemporaryDirectory() as temp:
@@ -648,6 +1677,10 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 calls.append(spec)
                 if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
                     return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+                if spec.argv[:3] == ("podman", "image", "inspect"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                if spec.argv[-2:] == ("/opt/agent-node/bin/node", "--version"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="v24.7.0\n")
                 return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
 
             result = main(
@@ -661,26 +1694,366 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(result, 0)
             rendered = output.getvalue()
             self.assertIn("PASS  podman-rootless: true", rendered)
+            self.assertIn("PASS  base-image-id: sha256:base", rendered)
+            self.assertIn("PASS  agent-node: v24.7.0", rendered)
+            self.assertIn("PASS  project-node: unconfigured", rendered)
             self.assertIn("PASS  codex-auth: present, mode 0600", rendered)
             self.assertIn("PASS  gh-hosts: present, mode 0600", rendered)
             self.assertIn("PASS  workspace-origin: exact HTTPS origin", rendered)
             self.assertIn(
-                "WARN  network-policy: outbound network is not domain-restricted in Phase 1",
+                "WARN  network-policy: outbound network is not domain-restricted in Phase 2",
                 rendered,
             )
-            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", rendered)
+            self._assert_private_values_absent(
+                rendered, "DO-NOT-PRINT-CREDENTIAL-BODY"
+            )
             self.assertEqual(
                 [call.argv for call in calls],
                 [
                     ("podman", "--version"),
                     ("podman", "info", "--format", "{{.Host.Security.Rootless}}"),
                     ("podman", "image", "exists", "localhost/agent-container:dev"),
+                    (
+                        "podman",
+                        "image",
+                        "inspect",
+                        "--format",
+                        "{{.Id}}",
+                        "localhost/agent-container:dev",
+                    ),
+                    (
+                        "podman",
+                        "run",
+                        "--rm",
+                        "--read-only",
+                        "--cap-drop=all",
+                        "--security-opt=no-new-privileges",
+                        "--userns=keep-id:uid=1000,gid=1000",
+                        "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
+                        "localhost/agent-container:dev",
+                        "/opt/agent-node/bin/node",
+                        "--version",
+                    ),
+                    (
+                        "podman",
+                        "run",
+                        "--rm",
+                        "--read-only",
+                        "--cap-drop=all",
+                        "--security-opt=no-new-privileges",
+                        "--userns=keep-id:uid=1000,gid=1000",
+                        "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
+                        "localhost/agent-container:dev",
+                        "codex",
+                        "--version",
+                    ),
                 ],
             )
             self.assertEqual(
                 self._doctor_check_names(rendered),
-                self.DOCTOR_CHECK_ORDER,
+                self.CODEX_DOCTOR,
             )
+
+    def test_doctor_claude_reports_authenticated_launcher_status(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            (root / "projects/agent-container/claude-config").mkdir(mode=0o700)
+            calls = []
+            output = StringIO()
+
+            def doctor_runner(spec):
+                calls.append(spec)
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+                if spec.argv[:3] == ("podman", "image", "inspect"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                if spec.argv[-2:] == ("/opt/agent-node/bin/node", "--version"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="v24.7.0\n")
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="ignored\n")
+
+            result = main(
+                ["doctor", "agent-container", "--agent", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=doctor_runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=output,
+            )
+
+            self.assertEqual(result, 0)
+            rendered = output.getvalue()
+            self.assertIn("PASS  claude-auth: present, mode 0600", rendered)
+            self.assertIn("PASS  claude-auth-status: authenticated", rendered)
+            status_calls = [spec for spec in calls if self._is_claude_status_spec(spec)]
+            self.assertEqual(len(status_calls), 1)
+            token_mounts = [
+                argument
+                for argument in status_calls[0].argv
+                if argument.startswith("type=bind,")
+                and "dst=/run/secrets/claude-oauth-token" in argument
+            ]
+            self.assertEqual(len(token_mounts), 1)
+            mount_fields = dict(
+                field.split("=", 1) for field in token_mounts[0].split(",")
+            )
+            self.assertTrue(
+                hmac.compare_digest(
+                    mount_fields.get("src", ""),
+                    str(root / "shared-auth/claude/oauth-token"),
+                )
+            )
+            self.assertEqual(
+                mount_fields.get("dst"), "/run/secrets/claude-oauth-token"
+            )
+            self.assertEqual(mount_fields.get("ro"), "true")
+
+    def test_doctor_claude_status_failure_is_generic_and_secret_safe(self) -> None:
+        marker = "DO-NOT-PRINT-CLAUDE-STATUS-OUTPUT"
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            (root / "projects/agent-container/claude-config").mkdir(mode=0o700)
+            output = StringIO()
+
+            def doctor_runner(spec):
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+                if spec.argv[:3] == ("podman", "image", "inspect"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                if spec.argv[-2:] == ("/opt/agent-node/bin/node", "--version"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="v24.7.0\n")
+                if self._is_claude_status_spec(spec):
+                    return subprocess.CompletedProcess(
+                        spec.argv, 17, stdout=marker, stderr=marker
+                    )
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="ignored\n")
+
+            result = main(
+                ["doctor", "agent-container", "--agent", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=doctor_runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=output,
+            )
+
+            rendered = output.getvalue()
+            self.assertEqual(result, 1)
+            self.assertIn("PASS  claude-auth: present, mode 0600", rendered)
+            self.assertIn("FAIL  claude-auth-status: command failed", rendered)
+            self.assertEqual(
+                [line for line in rendered.splitlines() if line.startswith("FAIL")],
+                ["FAIL  claude-auth-status: command failed"],
+            )
+            self.assertEqual(rendered.find(marker), -1)
+
+    def test_doctor_claude_skips_status_when_token_is_invalid(self) -> None:
+        cases = ("missing", "format", "mode")
+        for failure in cases:
+            with self.subTest(failure=failure), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                (root / "projects/agent-container/claude-config").mkdir(mode=0o700)
+                token = root / "shared-auth/claude/oauth-token"
+                if failure == "missing":
+                    token.unlink()
+                elif failure == "format":
+                    token.write_text("invalid", encoding="ascii")
+                else:
+                    token.chmod(0o644)
+                calls = []
+                output = StringIO()
+
+                result = main(
+                    ["doctor", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or self._successful_doctor_runner(spec),
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stdout=output,
+                )
+
+                rendered = output.getvalue()
+                self.assertEqual(result, 1)
+                self.assertIn("FAIL  claude-auth:", rendered)
+                self.assertIn(
+                    "FAIL  claude-auth-status: not run: token invalid", rendered
+                )
+                self.assertFalse(any(self._is_claude_status_spec(spec) for spec in calls))
+
+    def test_doctor_claude_skips_status_when_image_is_missing(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            (root / "projects/agent-container/claude-config").mkdir(mode=0o700)
+            calls = []
+            output = StringIO()
+
+            def doctor_runner(spec):
+                calls.append(spec)
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+                if spec.argv[:3] == ("podman", "image", "exists"):
+                    return subprocess.CompletedProcess(spec.argv, 1)
+                return subprocess.CompletedProcess(spec.argv, 0)
+
+            result = main(
+                ["doctor", "agent-container", "--agent", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=doctor_runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=output,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertIn(
+                "FAIL  claude-auth-status: not run: image unavailable",
+                output.getvalue(),
+            )
+            self.assertFalse(any(self._is_claude_status_spec(spec) for spec in calls))
+
+    def test_doctor_claude_reports_legacy_project_credentials_without_body(self) -> None:
+        marker = "DO-NOT-PRINT-CLAUDE-PROJECT-CREDENTIAL"
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            config = root / "projects/agent-container/claude-config"
+            config.mkdir(mode=0o700)
+            credentials = config / ".credentials.json"
+            credentials.write_text(marker, encoding="utf-8")
+            credentials.chmod(0o600)
+            output = StringIO()
+
+            result = main(
+                ["doctor", "agent-container", "--agent", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=self._successful_doctor_runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=output,
+            )
+
+            rendered = output.getvalue()
+            self.assertEqual(result, 1)
+            self.assertIn("FAIL  claude-project-credentials:", rendered)
+            self.assertEqual(rendered.find(marker), -1)
+
+    def test_doctor_reports_checks_in_selected_agent_order(self) -> None:
+        cases = (
+            ("codex", self.CODEX_DOCTOR),
+            ("claude", self.CLAUDE_DOCTOR),
+            ("all", self.ALL_DOCTOR),
+        )
+        for agent, expected_order in cases:
+            with self.subTest(agent=agent), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                config = root / "projects/agent-container/claude-config"
+                config.mkdir(mode=0o700)
+                output = StringIO()
+
+                result = main(
+                    ["doctor", "agent-container", "--agent", agent],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=self._successful_doctor_runner,
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stdout=output,
+                )
+
+                self.assertEqual(result, 0)
+                self.assertEqual(
+                    self._doctor_check_names(output.getvalue()), expected_order
+                )
+
+    def test_doctor_all_runs_common_probes_once_and_reports_missing_claude_state(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            claude_auth = root / "shared-auth/claude/oauth-token"
+            claude_auth.unlink()
+            output = StringIO()
+            calls = []
+
+            def doctor_runner(spec):
+                calls.append(spec)
+                if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+                if spec.argv[:3] == ("podman", "image", "inspect"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                if spec.argv[-2:] == ("/opt/agent-node/bin/node", "--version"):
+                    return subprocess.CompletedProcess(spec.argv, 0, stdout="v24.7.0\n")
+                if spec.argv[-2:] in (("codex", "--version"), ("claude", "--version")):
+                    return subprocess.CompletedProcess(
+                        spec.argv,
+                        0,
+                        stdout="version\n",
+                        stderr="DO-NOT-PRINT-PROBE-STDERR",
+                    )
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
+
+            result = main(
+                ["doctor", "agent-container", "--agent", "all"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=doctor_runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=output,
+            )
+
+            rendered = output.getvalue()
+            self.assertEqual(result, 1)
+            self.assertEqual(
+                [call.argv[:3] for call in calls].count(("podman", "--version")), 1
+            )
+            self.assertEqual(
+                [call.argv[:2] for call in calls].count(("podman", "info")), 1
+            )
+            self.assertEqual(
+                [call.argv[:3] for call in calls].count(("podman", "image", "exists")),
+                1,
+            )
+            self.assertEqual(
+                [
+                    call.argv[-2:]
+                    for call in calls
+                    if call.argv[:2] == ("podman", "run")
+                    and call.argv[-2] in ("codex", "claude")
+                ],
+                [("codex", "--version"), ("claude", "--version")],
+            )
+            self.assertIn("FAIL  claude-auth:", rendered)
+            self.assertIn("FAIL  claude-config:", rendered)
+            self.assertEqual(self._doctor_check_names(rendered), self.ALL_DOCTOR)
+            self.assertFalse(
+                (root / "projects/agent-container/claude-config").exists()
+            )
+            self._assert_private_values_absent(
+                rendered,
+                "DO-NOT-PRINT-CLAUDE-CREDENTIAL",
+                "DO-NOT-PRINT-PROBE-STDERR",
+            )
+
+    def test_doctor_does_not_print_state_root_in_claude_validation_failures(self) -> None:
+        marker = "DO-NOT-PRINT-STATE-ROOT"
+        cases = (
+            ("claude-auth", "shared-auth/claude/oauth-token"),
+            ("claude-config", "projects/agent-container/claude-config"),
+        )
+        for failed_check, relative_path in cases:
+            with self.subTest(check=failed_check), TemporaryDirectory() as temp:
+                state_parent = Path(temp) / marker
+                state_parent.mkdir()
+                root, _ = self._runtime_state(str(state_parent))
+                config = root / "projects/agent-container/claude-config"
+                config.mkdir(mode=0o700)
+                if failed_check == "claude-auth":
+                    (root / relative_path).unlink()
+                else:
+                    config.rmdir()
+                output = StringIO()
+
+                result = main(
+                    ["doctor", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=self._successful_doctor_runner,
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stdout=output,
+                )
+
+                rendered = output.getvalue()
+                self.assertEqual(result, 1)
+                self.assertIn(f"FAIL  {failed_check}:", rendered)
+                self.assertEqual(rendered.find(marker), -1)
 
     def test_doctor_failure_is_nonzero_and_does_not_print_secret_values(self) -> None:
         with TemporaryDirectory() as temp:
@@ -704,7 +2077,149 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertIn("FAIL  codex-auth:", output.getvalue())
             self.assertIn("WARN  network-policy:", output.getvalue())
-            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", output.getvalue())
+            self._assert_private_values_absent(
+                output.getvalue(), "DO-NOT-PRINT-CREDENTIAL-BODY"
+            )
+
+    def test_doctor_reports_project_image_states_without_building(self) -> None:
+        for state, exists_code, prior in (
+            ("current", 0, ""),
+            ("stale", 1, "localhost/agent-container-project:agent-container-old"),
+            ("missing", 1, ""),
+        ):
+            with self.subTest(state=state), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                config_dir = root / "workspaces/agent-container/.agent-container.d"
+                config_dir.mkdir()
+                (config_dir / "packages.txt").write_text("make\n", encoding="utf-8")
+                (config_dir / "node-version.txt").write_text(
+                    "22.23.1\n", encoding="utf-8"
+                )
+                calls = []
+                output = StringIO()
+
+                def runner(spec):
+                    calls.append(spec)
+                    if spec.argv[:3] == ("podman", "image", "inspect"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout="sha256:base\n")
+                    if spec.argv == ("podman", "info", "--format", "{{.Host.Arch}}"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout="amd64\n")
+                    if spec.argv[:3] == ("podman", "image", "exists") and "project:" in spec.argv[-1]:
+                        return subprocess.CompletedProcess(spec.argv, exists_code)
+                    if spec.argv[:2] == ("podman", "images"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout=prior)
+                    if spec.argv[-2:] == ("/opt/project-node/bin/node", "--version"):
+                        return subprocess.CompletedProcess(
+                            spec.argv, 0, stdout="v22.23.1\n"
+                        )
+                    return self._successful_doctor_runner(spec)
+
+                result = main(
+                    ["doctor", "agent-container"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stdout=output,
+                )
+
+                self.assertIn(f"project-image: {state}", output.getvalue())
+                if state == "current":
+                    self.assertIn(
+                        "PASS  project-node: v22.23.1", output.getvalue()
+                    )
+                else:
+                    self.assertIn(
+                        "FAIL  project-node: image unavailable", output.getvalue()
+                    )
+                self.assertEqual(result, 0 if state == "current" else 1)
+                self.assertFalse(any(call.argv[:2] == ("podman", "build") for call in calls))
+
+    def test_doctor_rejects_invalid_project_image_config_without_content(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            config_dir = root / "workspaces/agent-container/.agent-container.d"
+            config_dir.mkdir()
+            secret = "make;DO-NOT-PRINT-PROJECT-CONFIG"
+            (config_dir / "packages.txt").write_text(secret, encoding="utf-8")
+            calls = []
+            output = StringIO()
+
+            result = main(
+                ["doctor", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec) or self._successful_doctor_runner(spec),
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                stdout=output,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertIn("FAIL  project-image: state validation failed", output.getvalue())
+            self.assertNotIn(secret, output.getvalue())
+            self.assertFalse(any(call.argv[:2] == ("podman", "build") for call in calls))
+
+    def test_doctor_reports_claude_managed_policy_without_command_output(self) -> None:
+        for returncode, level in ((0, "PASS"), (9, "FAIL")):
+            with self.subTest(returncode=returncode), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                (root / "projects/agent-container/claude-config").mkdir(mode=0o700)
+                calls = []
+                output = StringIO()
+
+                def runner(spec):
+                    calls.append(spec)
+                    if spec.argv[-3:] == (
+                        "python3", "-m", "agent_container.claude_policy"
+                    ):
+                        return subprocess.CompletedProcess(
+                            spec.argv,
+                            returncode,
+                            stdout="DO-NOT-PRINT-POLICY-OUTPUT",
+                            stderr="DO-NOT-PRINT-POLICY-ERROR",
+                        )
+                    return self._successful_doctor_runner(spec)
+
+                main(
+                    ["doctor", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stdout=output,
+                )
+
+                self.assertIn(
+                    f"{level}  claude-managed-policy: "
+                    f"{'valid' if returncode == 0 else 'invalid'}",
+                    output.getvalue(),
+                )
+                self.assertNotIn("DO-NOT-PRINT-POLICY", output.getvalue())
+                self.assertEqual(
+                    sum(
+                        call.argv[-3:]
+                        == ("python3", "-m", "agent_container.claude_policy")
+                        for call in calls
+                    ),
+                    1,
+                )
+
+    def test_codex_doctor_does_not_probe_claude_policy(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            calls = []
+
+            main(
+                ["doctor", "agent-container", "--agent", "codex"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec) or self._successful_doctor_runner(spec),
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+            )
+
+            self.assertFalse(
+                any(
+                    call.argv[-3:]
+                    == ("python3", "-m", "agent_container.claude_policy")
+                    for call in calls
+                )
+            )
 
     def test_doctor_converts_filesystem_oserrors_to_ordered_failures(self) -> None:
         cases = (
@@ -735,9 +2250,11 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 self.assertIn(f"FAIL  {failed_check}: filesystem operation failed", rendered)
                 self.assertEqual(
                     self._doctor_check_names(rendered),
-                    self.DOCTOR_CHECK_ORDER,
+                    self.CODEX_DOCTOR,
                 )
-                self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", rendered)
+                self._assert_private_values_absent(
+                    rendered, "DO-NOT-PRINT-CREDENTIAL-BODY"
+                )
 
     def test_run_converts_filesystem_oserror_without_running_container(self) -> None:
         with TemporaryDirectory() as temp:
@@ -760,7 +2277,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertEqual(runner_calls, [])
             self.assertIn("error: filesystem operation failed", stderr.getvalue())
-            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
+            self._assert_private_values_absent(
+                stderr.getvalue(), "DO-NOT-PRINT-CREDENTIAL-BODY"
+            )
 
     def test_run_rejects_symlinked_configured_state_root_before_runner(self) -> None:
         with TemporaryDirectory() as temp:
@@ -924,6 +2443,271 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 root,
                 remote_url="https://github.com/example/other.git",
             )
+
+
+class AgentCtlMigrationTest(unittest.TestCase):
+    def _migration_state(self, temp: str) -> tuple[Path, Path]:
+        base = Path(temp).resolve()
+        root = base / "state"
+        project_dir = root / "projects/demo"
+        project_dir.mkdir(parents=True, mode=0o700)
+        root.chmod(0o700)
+        (root / "projects").chmod(0o700)
+        project_dir.chmod(0o700)
+        handovers = base / "handovers"
+        handovers.mkdir()
+        ProjectRecord(
+            Repository("safe", "demo"), handovers.resolve()
+        ).write(project_dir / "project.json")
+
+        source = base / "source"
+        selected = source / "plugins/cache/local-marketplace/issue-ops/1.2.3"
+        unselected = source / "plugins/cache/local-marketplace/unselected/9.9.9"
+        selected.mkdir(parents=True)
+        unselected.mkdir(parents=True)
+        (source / "CLAUDE.md").write_text("safe instructions\n", encoding="utf-8")
+        (selected / "plugin.json").write_text(
+            '{"name": "issue-ops"}\n', encoding="utf-8"
+        )
+        (unselected / "plugin.json").write_text(
+            "DO-NOT-PRINT-CREDENTIAL-BODY", encoding="utf-8"
+        )
+        (source / "plugins/installed_plugins.json").write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "plugins": {
+                        "issue-ops@local-marketplace": [
+                            {
+                                "scope": "user",
+                                "installPath": str(selected),
+                                "version": "1.2.3",
+                            }
+                        ],
+                        "unselected@local-marketplace": [
+                            {
+                                "scope": "user",
+                                "installPath": str(unselected),
+                                "version": "9.9.9",
+                            }
+                        ],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (source / "plugins/known_marketplaces.json").write_text(
+            json.dumps(
+                {
+                    "local-marketplace": {
+                        "source": {"source": "github", "repo": "safe/plugins"}
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return root, source
+
+    def _run_migration(
+        self,
+        root: Path,
+        source: Path,
+        *extra: str,
+    ) -> tuple[int, StringIO, StringIO, list]:
+        stdout = StringIO()
+        stderr = StringIO()
+        calls = []
+        result = main(
+            [
+                "migrate",
+                "claude",
+                "demo",
+                "--from",
+                str(source),
+                "--plugin",
+                "issue-ops@local-marketplace",
+                *extra,
+            ],
+            environment={"AGENT_CONTAINER_HOME": str(root)},
+            runner=lambda spec: calls.append(spec),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        return result, stdout, stderr, calls
+
+    def test_migrate_dry_run_prints_safe_plan_without_creating_destination(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, source = self._migration_state(temp)
+
+            result, stdout, stderr, calls = self._run_migration(root, source)
+
+            destination = root / "projects/demo/claude-config"
+            self.assertEqual(result, 0)
+            self.assertEqual(stderr.getvalue(), "")
+            self.assertEqual(calls, [])
+            self.assertFalse(destination.exists())
+            output = stdout.getvalue()
+            self.assertIn("COPY file CLAUDE.md\n", output)
+            self.assertIn(
+                "COPY file plugins/cache/local-marketplace/issue-ops/1.2.3/plugin.json\n",
+                output,
+            )
+            self.assertIn("COPY file plugins/installed_plugins.json\n", output)
+            self.assertIn("COPY file plugins/known_marketplaces.json\n", output)
+            self.assertIn(f"DESTINATION {destination}\n", output)
+            self.assertTrue(output.endswith("MODE dry-run\n"))
+            self.assertNotIn("unselected", output)
+            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", output)
+
+    def test_migrate_apply_publishes_only_selected_state_without_runner(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, source = self._migration_state(temp)
+
+            result, stdout, stderr, calls = self._run_migration(
+                root, source, "--apply"
+            )
+
+            destination = root / "projects/demo/claude-config"
+            self.assertEqual(result, 0)
+            self.assertEqual(stderr.getvalue(), "")
+            self.assertEqual(calls, [])
+            self.assertTrue((destination / "CLAUDE.md").is_file())
+            self.assertTrue(
+                (
+                    destination
+                    / "plugins/cache/local-marketplace/issue-ops/1.2.3/plugin.json"
+                ).is_file()
+            )
+            self.assertFalse(
+                (destination / "plugins/cache/local-marketplace/unselected").exists()
+            )
+            installed = json.loads(
+                (destination / "plugins/installed_plugins.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                set(installed["plugins"]), {"issue-ops@local-marketplace"}
+            )
+            self.assertTrue(stdout.getvalue().endswith("MODE apply\n"))
+
+    def test_migrate_rejects_invalid_identifiers_before_filesystem_access(self) -> None:
+        cases = (
+            ("../invalid-project", "issue-ops@local-marketplace", "project_id"),
+            ("demo", "invalid-plugin", "plugin"),
+        )
+        for project, plugin, expected_error in cases:
+            with (
+                self.subTest(project=project, plugin=plugin),
+                TemporaryDirectory() as temp,
+            ):
+                root = Path(temp) / "must-not-be-created"
+                calls = []
+                stderr = StringIO()
+
+                result = main(
+                    [
+                        "migrate",
+                        "claude",
+                        project,
+                        "--from",
+                        "/DO-NOT-PRINT-CREDENTIAL-BODY",
+                        "--plugin",
+                        plugin,
+                    ],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec),
+                    stderr=stderr,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertFalse(root.exists())
+                self.assertIn(expected_error, stderr.getvalue())
+                self.assertNotIn(
+                    "DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue()
+                )
+
+    def test_migrate_validates_all_inputs_before_destination_mutation(self) -> None:
+        cases = ("missing-project-metadata", "missing-source", "existing-destination")
+        for case in cases:
+            with self.subTest(case=case), TemporaryDirectory() as temp:
+                root, source = self._migration_state(temp)
+                destination = root / "projects/demo/claude-config"
+                if case == "missing-project-metadata":
+                    (root / "projects/demo/project.json").unlink()
+                elif case == "missing-source":
+                    shutil.rmtree(source)
+                else:
+                    destination.mkdir(mode=0o700)
+                    (destination / "DO-NOT-PRINT-CREDENTIAL-BODY").write_text(
+                        "unchanged", encoding="utf-8"
+                    )
+
+                result, stdout, stderr, calls = self._run_migration(
+                    root, source, "--apply"
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
+                if case != "existing-destination":
+                    self.assertFalse(destination.exists())
+                else:
+                    self.assertEqual(
+                        (destination / "DO-NOT-PRINT-CREDENTIAL-BODY").read_text(
+                            encoding="utf-8"
+                        ),
+                        "unchanged",
+                    )
+
+    def test_migrate_metadata_error_hides_secret_values_and_never_runs_podman(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, source = self._migration_state(temp)
+            (source / "plugins/known_marketplaces.json").write_text(
+                '{"local-marketplace": "DO-NOT-PRINT-CREDENTIAL-BODY"}',
+                encoding="utf-8",
+            )
+
+            result, stdout, stderr, calls = self._run_migration(
+                root, source, "--apply"
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(calls, [])
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertNotIn("DO-NOT-PRINT-CREDENTIAL-BODY", stderr.getvalue())
+            self.assertFalse((root / "projects/demo/claude-config").exists())
+
+
+class AgentCtlParserTest(unittest.TestCase):
+    def test_new_command_contract(self) -> None:
+        build = parser().parse_args(["build"])
+        self.assertEqual(
+            (
+                getattr(build, "node_version", None),
+                build.codex_version,
+                build.claude_version,
+            ),
+            ("latest", "latest", "latest"),
+        )
+        self.assertEqual(parser().parse_args(["run", "p"]).agent, "codex")
+        self.assertEqual(
+            parser().parse_args(["run", "p", "--agent", "claude"]).agent,
+            "claude",
+        )
+        self.assertEqual(
+            parser().parse_args(["doctor", "p", "--agent", "all"]).agent,
+            "all",
+        )
+        migrate = parser().parse_args(
+            ["migrate", "claude", "p", "--from", "/old/.claude",
+             "--plugin", "issue-ops@local-marketplace"]
+        )
+        self.assertEqual(migrate.source, Path("/old/.claude"))
+        self.assertEqual(migrate.plugins, ["issue-ops@local-marketplace"])
+        self.assertFalse(migrate.apply)
 
 
 if __name__ == "__main__":

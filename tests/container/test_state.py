@@ -7,7 +7,11 @@ from agent_container.state import Repository
 from agent_container.state import StateLayout
 from agent_container.state import ensure_private_directory
 from agent_container.state import ensure_private_file
+from agent_container.state import validate_agent
+from agent_container.state import validate_plugin_identifier
 from agent_container.state import validate_project_id
+from agent_container.state import validate_version
+from agent_container.state import validate_claude_oauth_token
 from agent_container.state import validate_workspace_origin
 
 
@@ -31,6 +35,62 @@ class StateValidationTest(unittest.TestCase):
             self.assertEqual(layout.root, Path(temp).resolve())
             self.assertEqual(layout.workspace, Path(temp).resolve() / "workspaces/agent-container")
             self.assertEqual(layout.codex_auth_file, Path(temp).resolve() / "shared-auth/codex/auth.json")
+
+    def test_state_layout_has_setup_token_and_legacy_paths(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        self.assertEqual(
+            layout.claude_token_file,
+            Path("/state/shared-auth/claude/oauth-token"),
+        )
+        self.assertEqual(
+            layout.claude_legacy_credentials_file,
+            Path("/state/shared-auth/claude/.credentials.json"),
+        )
+        self.assertEqual(
+            layout.claude_legacy_metadata_file,
+            Path("/state/shared-auth/claude/.claude.json"),
+        )
+        self.assertEqual(
+            layout.claude_legacy_backups,
+            Path("/state/shared-auth/claude/backups"),
+        )
+        self.assertEqual(
+            layout.claude_quarantine_root,
+            Path("/state/quarantine/claude"),
+        )
+
+    def test_claude_oauth_token_accepts_only_safe_single_line_ascii(self) -> None:
+        self.assertEqual(validate_claude_oauth_token("x" * 32), "x" * 32)
+        self.assertEqual(validate_claude_oauth_token("Z" * 4096), "Z" * 4096)
+        for value in (
+            "x" * 31,
+            "x" * 4097,
+            "x y" + "x" * 29,
+            "x\n" + "x" * 31,
+            "é" * 32,
+            "\x7f" + "x" * 31,
+        ):
+            with self.subTest(length=len(value)), self.assertRaises(ValueError):
+                validate_claude_oauth_token(value)
+
+    def test_agent_version_and_plugin_validation(self) -> None:
+        self.assertEqual(validate_agent("claude"), "claude")
+        self.assertEqual(validate_agent("all", allow_all=True), "all")
+        self.assertEqual(validate_version("latest"), "latest")
+        self.assertEqual(validate_version("2.1.89"), "2.1.89")
+        self.assertEqual(
+            validate_plugin_identifier("issue-ops@local-marketplace"),
+            "issue-ops@local-marketplace",
+        )
+        for value in ("", "all", "../claude", "claude\nnext"):
+            with self.subTest(agent=value), self.assertRaises(ValueError):
+                validate_agent(value)
+        for value in ("", "-latest", "two words", "2.1.89\nnext"):
+            with self.subTest(version=value), self.assertRaises(ValueError):
+                validate_version(value)
+        for value in ("plugin", "../p@m", "p@../m", "p/x@m"):
+            with self.subTest(plugin=value), self.assertRaises(ValueError):
+                validate_plugin_identifier(value)
 
     def test_project_id_rejects_path_traversal(self) -> None:
         for value in ("", ".", "..", "../agent", "family/project"):

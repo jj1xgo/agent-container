@@ -5,6 +5,23 @@ import subprocess
 
 from agent_container.state import Repository
 from agent_container.state import StateLayout
+from agent_container.state import validate_project_id
+
+
+_CLAUDE_TOKEN_PATH = "/run/secrets/claude-oauth-token"
+_CLAUDE_LAUNCHER_PREFIX = (
+    "python3",
+    "-m",
+    "agent_container.claude_launcher",
+    _CLAUDE_TOKEN_PATH,
+    "--",
+    "claude",
+)
+_CLAUDE_CONFIG_TMPFS = "--tmpfs=/home/agent/.claude:rw,nosuid,nodev,noexec,size=16m"
+_CLAUDE_RUNTIME_HOME_TMPFS_MOUNT = (
+    "type=tmpfs,dst=/home/agent,tmpfs-size=16777216,"
+    "tmpfs-mode=0700,U=true,noexec,nosuid,nodev"
+)
 
 
 @dataclass(frozen=True)
@@ -33,10 +50,12 @@ def _runtime_prefix(uid: int, gid: int) -> list[str]:
     ]
 
 
-def _git_environment_args() -> list[str]:
+def _git_environment_args(
+    gh_config_dir: str = "/home/agent/.config/gh",
+) -> list[str]:
     return [
         "--env",
-        "GH_CONFIG_DIR=/home/agent/.config/gh",
+        f"GH_CONFIG_DIR={gh_config_dir}",
         "--env",
         "GIT_CONFIG_COUNT=1",
         "--env",
@@ -46,10 +65,152 @@ def _git_environment_args() -> list[str]:
     ]
 
 
-def build_image_spec(repo_root: Path, image: str) -> CommandSpec:
+def build_image_spec(
+    repo_root: Path,
+    image: str,
+    node_version: str,
+    codex_version: str,
+    claude_version: str,
+    cachebuster: str,
+) -> CommandSpec:
     root = repo_root.resolve()
     return CommandSpec(
-        ("podman", "build", "--tag", image, "--file", str(root / "Containerfile"), str(root)),
+        (
+            "podman",
+            "build",
+            "--build-arg",
+            f"NODE_VERSION={node_version}",
+            "--build-arg",
+            f"CODEX_VERSION={codex_version}",
+            "--build-arg",
+            f"CLAUDE_VERSION={claude_version}",
+            "--build-arg",
+            f"AGENT_CLI_CACHEBUST={cachebuster}",
+            "--tag",
+            image,
+            "--file",
+            str(root / "Containerfile"),
+            str(root),
+        ),
+        {},
+    )
+
+
+def podman_image_id_spec(image: str) -> CommandSpec:
+    return CommandSpec(
+        ("podman", "image", "inspect", "--format", "{{.Id}}", image), {}
+    )
+
+
+def podman_architecture_spec() -> CommandSpec:
+    return CommandSpec(("podman", "info", "--format", "{{.Host.Arch}}"), {})
+
+
+def podman_project_images_spec(project_id: str) -> CommandSpec:
+    project_id = validate_project_id(project_id)
+    reference = f"localhost/agent-container-project:{project_id}-*"
+    return CommandSpec(
+        (
+            "podman",
+            "images",
+            "--filter",
+            f"reference={reference}",
+            "--format",
+            "{{.Repository}}:{{.Tag}}",
+        ),
+        {},
+    )
+
+
+def build_project_image_spec(
+    context: Path,
+    containerfile: Path,
+    base_image: str,
+    image: str,
+) -> CommandSpec:
+    resolved_context = context.resolve()
+    resolved_containerfile = containerfile.resolve()
+    if resolved_containerfile.parent != resolved_context:
+        raise ValueError("project Containerfile must be inside its build context")
+    return CommandSpec(
+        (
+            "podman",
+            "build",
+            "--pull=never",
+            "--build-arg",
+            f"BASE_IMAGE={base_image}",
+            "--tag",
+            image,
+            "--file",
+            str(resolved_containerfile),
+            str(resolved_context),
+        ),
+        {},
+    )
+
+
+def cli_version_spec(image: str, agent: str) -> CommandSpec:
+    return CommandSpec(
+        (
+            "podman",
+            "run",
+            "--rm",
+            "--read-only",
+            "--cap-drop=all",
+            "--security-opt=no-new-privileges",
+            "--userns=keep-id:uid=1000,gid=1000",
+            "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
+            image,
+            agent,
+            "--version",
+        ),
+        {},
+    )
+
+
+def node_version_spec(image: str) -> CommandSpec:
+    return _fixed_node_version_spec(image, "/opt/agent-node/bin/node")
+
+
+def project_node_version_spec(image: str) -> CommandSpec:
+    return _fixed_node_version_spec(image, "/opt/project-node/bin/node")
+
+
+def _fixed_node_version_spec(image: str, executable: str) -> CommandSpec:
+    return CommandSpec(
+        (
+            "podman",
+            "run",
+            "--rm",
+            "--read-only",
+            "--cap-drop=all",
+            "--security-opt=no-new-privileges",
+            "--userns=keep-id:uid=1000,gid=1000",
+            "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
+            image,
+            executable,
+            "--version",
+        ),
+        {},
+    )
+
+
+def claude_policy_status_spec(image: str) -> CommandSpec:
+    return CommandSpec(
+        (
+            "podman",
+            "run",
+            "--rm",
+            "--read-only",
+            "--cap-drop=all",
+            "--security-opt=no-new-privileges",
+            "--userns=keep-id:uid=1000,gid=1000",
+            "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
+            image,
+            "python3",
+            "-m",
+            "agent_container.claude_policy",
+        ),
         {},
     )
 
@@ -65,6 +226,26 @@ def codex_login_status_spec(layout: StateLayout, image: str) -> CommandSpec:
     argv = _runtime_prefix(os.getuid(), os.getgid())
     argv += ["--mount", _mount(layout.codex_auth_dir, "/home/agent/.codex")]
     argv += [image, "codex", "login", "status"]
+    return CommandSpec(tuple(argv), {})
+
+
+def _claude_setup_prefix() -> list[str]:
+    argv = _runtime_prefix(os.getuid(), os.getgid())
+    argv += [_CLAUDE_CONFIG_TMPFS]
+    argv += ["--env", "CLAUDE_CONFIG_DIR=/home/agent/.claude"]
+    return argv
+
+
+def claude_setup_token_spec(image: str) -> CommandSpec:
+    argv = _claude_setup_prefix()
+    argv += [image, "claude", "setup-token"]
+    return CommandSpec(tuple(argv), {})
+
+
+def claude_token_status_spec(token_file: Path, image: str) -> CommandSpec:
+    argv = _claude_setup_prefix()
+    argv += ["--mount", _mount(token_file, _CLAUDE_TOKEN_PATH, True)]
+    argv += [image, *_CLAUDE_LAUNCHER_PREFIX, "auth", "status"]
     return CommandSpec(tuple(argv), {})
 
 
@@ -109,6 +290,36 @@ def run_codex_spec(
     for source, target, read_only in mounts:
         argv += ["--mount", _mount(source, target, read_only)]
     argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image, "codex"]
+    return CommandSpec(tuple(argv), {})
+
+
+def run_claude_spec(
+    layout: StateLayout,
+    handover_project: Path,
+    image: str,
+    uid: int,
+    gid: int,
+) -> CommandSpec:
+    if uid != os.getuid() or gid != os.getgid():
+        raise ValueError("runtime uid and gid must match the current user")
+    gh_config_dir = "/home/agent/gh-config"
+    argv = _runtime_prefix(uid, gid)
+    argv += ["--mount", _CLAUDE_RUNTIME_HOME_TMPFS_MOUNT]
+    argv += _git_environment_args(gh_config_dir)
+    mounts = (
+        (layout.workspace, "/workspace", False),
+        (layout.claude_config, "/home/agent/.claude", False),
+        (layout.claude_token_file, _CLAUDE_TOKEN_PATH, True),
+        (layout.cache, "/home/agent/.cache", False),
+        (layout.gh_dir, gh_config_dir, True),
+        (handover_project, f"/handovers/{layout.project_id}", False),
+    )
+    for source, target, read_only in mounts:
+        argv += ["--mount", _mount(source, target, read_only)]
+    argv += ["--env", "CLAUDE_CONFIG_DIR=/home/agent/.claude"]
+    argv += ["--env", "AGENT_HANDOVER_ROOT=/handovers"]
+    argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image]
+    argv += _CLAUDE_LAUNCHER_PREFIX
     return CommandSpec(tuple(argv), {})
 
 
