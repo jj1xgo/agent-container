@@ -80,15 +80,19 @@ remote helperはGitの要求する`git-upload-pack`または`git-receive-pack` s
 
 brokerは登録済みrepositoryからGitHubのexact HTTPS endpointを構築し、installation tokenをAuthorizationへ注入する。redirectは原則拒否し、許可する場合も同一originの既知pathだけに限定する。TLS検証を無効化しない。
 
+brokerはreceive-packのserver advertisementをcontainerへ転送した後、containerから届く最初のcommand packet列をpackfileより前に検査する。各commandの`old OID`、`new OID`、ref名と、最初のcommandに付くcapabilityだけをbounded parserで受け付ける。未知のobject format、壊れたpkt-line、push certificate、push optionは初期実装で拒否する。
+
 初期push policyは次のとおりとする。
 
 - delete refを拒否する。
-- force updateを拒否する。
 - `main`、`master`とproject policyで指定したprotected refへのupdateを拒否する。
 - `refs/heads/`以外へのpushを拒否する。
+- commandの`old OID`が直前にGitHubからadvertiseされた同じrefのOIDと一致しない場合は拒否する。
 - 一度のrequestで更新できるref数と転送量に上限を設ける。
 
-receive-packのref updateをbrokerが検査できるまではpush対応を有効にしない。単なる認証付きbyte proxyを「branch制限済み」として公開しない。GitHub側branch protectionも重ねて設定する。
+Git wire protocolは更新commandにforce flagを持たず、`old OID`と`new OID`だけではnew commitがold commitの子孫か判定できない。brokerがpackfileを展開してuntrusted Git object graphを処理する方式は初期実装で採用しない。そのためnon-fast-forward拒否は、対象repositoryのGitHub rulesetで全`refs/heads/**`に対してforce pushを禁止することを必須条件とする。brokerのlease一致検査とGitHub rulesetを重ね、どちらかを省略した状態を「force-push拒否済み」と扱わない。`doctor`はruleset確認に必要なpermissionをbrokerへ追加せず、初期版では利用者がGitHub設定を確認したことをproject policyへ明示登録する。
+
+receive-packのref update parserとGitHub ruleset確認が完成するまではpush対応を有効にしない。単なる認証付きbyte proxyを「branch制限済み」として公開しない。
 
 host brokerはuntrusted workspaceで`git`、hook、filter、credential helperを実行しない。Git object処理はcontainer側Gitに残し、brokerはprotocol framing、policy検査、GitHubとのnetwork transportだけを担当する。
 
@@ -186,7 +190,8 @@ token、JWT、private key、Authorization header、request body、PR本文、Git
 
 - exact repositoryのcloneとfetchが成功する。
 - 作業branchへの通常pushが成功する。
-- `main`直接push、force-push、ref delete、別repository accessが失敗する。
+- `main`直接push、ref delete、別repository accessがbrokerで失敗する。
+- non-fast-forward pushが必須GitHub rulesetで失敗し、broker auditにはGitHub拒否として記録される。
 - PR create/view/checksが成功し、mergeとgeneric APIが利用できない。
 - container内の環境、mount、process argv、helper応答、filesystemにtokenが存在しない。
 - broker停止後にGit操作とPR操作がfail closedになる。
@@ -200,14 +205,13 @@ token、JWT、private key、Authorization header、request body、PR本文、Git
 2. project別Unix socket lifecycleとsecret-free auditを実装する。
 3. GitHub App JWTとrepository-scoped installation token発行を実装する。
 4. read-only Git remote helperとupload-pack transportを実装する。
-5. receive-pack parserとpush policyを実装する。
+5. receive-pack command parser、lease/ref policy、GitHub ruleset前提の検証を実装する。
 6. PR create/view/checks clientを実装する。
 7. `agentctl doctor`とruntime orchestrationへ統合する。
 8. 実host security gate後にlegacy `gh` runtime mountを削除する。
 
 ## 13. 未決事項
 
-- Git receive-pack protocolのref update検査を自前実装する範囲と、十分に小さい既存libraryを採用するか。
 - broker processをruntimeごとに起動するか、user serviceとして常駐させるか。初期実装はruntimeごとのprocessを優先する。
 - PR本文の最大長とaudit上の識別方法。
 - GitHub App作成・installationを`agentctl auth github-broker`で補助する範囲。private key自動生成やGitHub設定変更は初期CLIの対象外とする。
@@ -217,3 +221,5 @@ token、JWT、private key、Authorization header、request body、PR本文、Git
 - [GitHub App installationとして認証する](https://docs.github.com/en/enterprise-cloud@latest/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation)
 - [installation access tokenを生成する](https://docs.github.com/en/enterprise-cloud@latest/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app)
 - [GitHub App REST API](https://docs.github.com/en/rest/apps/apps)
+- [Git remote helper protocol](https://git-scm.com/docs/gitremote-helpers)
+- [Git pack protocol](https://git-scm.com/docs/pack-protocol)
