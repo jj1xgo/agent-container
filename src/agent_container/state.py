@@ -153,6 +153,18 @@ class StateLayout:
     def workspace(self) -> Path:
         return self.root / "workspaces" / self.project_id
 
+    @property
+    def github_broker_root(self) -> Path:
+        return self.root / "github-broker"
+
+    @property
+    def github_broker_run_root(self) -> Path:
+        return self.github_broker_root / "run" / self.project_id
+
+    @property
+    def github_broker_policy_file(self) -> Path:
+        return self.project_dir / "github-broker.json"
+
 
 def ensure_private_directory(path: Path, create: bool = False) -> Path:
     if path.is_symlink():

@@ -58,6 +58,14 @@ class StateValidationTest(unittest.TestCase):
             layout.claude_quarantine_root,
             Path("/state/quarantine/claude"),
         )
+        self.assertEqual(
+            layout.github_broker_run_root,
+            Path("/state/github-broker/run/agent-container"),
+        )
+        self.assertEqual(
+            layout.github_broker_policy_file,
+            Path("/state/projects/agent-container/github-broker.json"),
+        )
 
     def test_claude_oauth_token_accepts_only_safe_single_line_ascii(self) -> None:
         self.assertEqual(validate_claude_oauth_token("x" * 32), "x" * 32)
