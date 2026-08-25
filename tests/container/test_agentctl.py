@@ -1300,8 +1300,12 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
 
             def runtime_spec_builder(*args):
                 builder_calls.append(args)
-                self.assertEqual(len(calls), 3)
-                self.assertEqual(calls[-1].argv[:3], ("podman", "image", "exists"))
+                self.assertEqual(len(calls), 4)
+                self.assertEqual(calls[-2].argv[:3], ("podman", "image", "exists"))
+                self.assertEqual(
+                    calls[-1].argv[-3:],
+                    ("python3", "-m", "agent_container.claude_policy"),
+                )
                 self.assertTrue(config.is_dir())
                 self.assertEqual(config.stat().st_mode & 0o777, 0o700)
                 return run_claude_spec(*args)
@@ -1317,7 +1321,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
 
             self.assertEqual(result, 0)
             self.assertEqual(len(builder_calls), 1)
-            self.assertEqual(len(calls), 4)
+            self.assertEqual(len(calls), 5)
             self.assertEqual(calls[-1].argv[-1], "claude")
             self.assertIn(
                 f"src={handover_project},dst=/handovers/agent-container",
@@ -1325,6 +1329,56 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             )
             self.assertEqual(
                 output.getvalue(), "Starting Claude for project: agent-container\n"
+            )
+
+    def test_run_claude_rejects_invalid_managed_policy_before_state_or_runtime(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            calls = []
+            builder_calls = []
+            stdout = StringIO()
+            stderr = StringIO()
+            config = root / "projects/agent-container/claude-config"
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-3:] == (
+                    "python3", "-m", "agent_container.claude_policy"
+                ):
+                    return subprocess.CompletedProcess(
+                        spec.argv,
+                        9,
+                        stdout="DO-NOT-PRINT-POLICY-OUTPUT",
+                        stderr="DO-NOT-PRINT-POLICY-ERROR",
+                    )
+                return successful_podman_result(spec)
+
+            result = main(
+                ["run", "agent-container", "--agent", "claude"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                runtime_spec_builders={
+                    "claude": lambda *args: builder_calls.append(args)
+                    or run_claude_spec(*args)
+                },
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 9)
+            self.assertEqual(builder_calls, [])
+            self.assertFalse(config.exists())
+            self.assertNotIn("Starting Claude", stdout.getvalue())
+            self.assertNotIn("DO-NOT-PRINT-POLICY", stdout.getvalue())
+            self.assertNotIn("DO-NOT-PRINT-POLICY", stderr.getvalue())
+            self.assertEqual(
+                sum(
+                    call.argv[-3:]
+                    == ("python3", "-m", "agent_container.claude_policy")
+                    for call in calls
+                ),
+                1,
             )
 
     def test_run_claude_missing_image_does_not_create_config(self) -> None:

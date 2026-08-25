@@ -974,6 +974,8 @@ def main(
                 stdout=stdout,
             )
             if arguments.agent == "claude":
+                policy_spec = claude_policy_status_spec(resolution.image)
+                _require_success(_suppressed_run(runner, policy_spec), policy_spec)
                 _prepare_claude_project_state(layout)
             builders = (
                 {"codex": run_codex_spec, "claude": run_claude_spec}
