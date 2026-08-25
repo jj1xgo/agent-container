@@ -52,6 +52,15 @@ class BrokerSessionTest(unittest.TestCase):
         self.assertEqual(len(capability), 43)
         self.assertEqual(capability, self.session._capability)
 
+    @mock.patch("agent_container.github_broker.socket.socket")
+    def test_rejects_overlong_socket_path_before_socket_creation(
+        self, socket_factory: mock.Mock
+    ) -> None:
+        self.session.socket_path = Path("/" + "x" * 108)
+        with self.assertRaisesRegex(ValueError, "too long"):
+            self.session.open_listener()
+        socket_factory.assert_not_called()
+
     def test_authorizes_exact_version_capability_project_sequence_and_operation(self) -> None:
         authorized = self.session.authorize(self.request())
         self.assertEqual(authorized["operation"], "pr-view")

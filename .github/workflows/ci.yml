@@ -36,6 +36,12 @@ jobs:
         env:
           PYTHONPATH: src
 
+      - name: Run Git broker socket integration test
+        run: python3 -m unittest tests.integration.test_github_broker_socket -v
+        env:
+          PYTHONPATH: src
+          AGENT_CONTAINER_RUN_SOCKET_INTEGRATION: "1"
+
       - name: Check whitespace
         run: git diff --check HEAD^ HEAD
 

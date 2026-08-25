@@ -23,6 +23,7 @@ _AUDIT_STATUSES = frozenset(
     {"ok", "denied", "error", "client-disconnected", "timeout"}
 )
 _POLICY_VERSION = 1
+_MAX_UNIX_SOCKET_PATH_BYTES = 107
 
 
 def _create_private_file(path: Path, body: str) -> None:
@@ -130,6 +131,8 @@ class BrokerSession:
     def open_listener(self, backlog: int = 4) -> socket.socket:
         if self._closed or self._listener is not None:
             raise ValueError("broker listener state is invalid")
+        if len(os.fsencode(self.socket_path)) > _MAX_UNIX_SOCKET_PATH_BYTES:
+            raise ValueError("broker socket path is too long")
         if self.socket_path.exists() or self.socket_path.is_symlink():
             raise FileExistsError("broker socket path already exists")
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
