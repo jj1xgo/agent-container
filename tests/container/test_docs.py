@@ -164,3 +164,48 @@ class Phase2DocumentationTest(unittest.TestCase):
 
         self.assertIn("Claudeのmanaged sandbox", codex)
         self.assertIn("Codexのhook設定とは別", codex)
+
+
+class Phase3DocumentationTest(unittest.TestCase):
+    def test_operator_guide_documents_broker_setup_and_fixed_operations(self) -> None:
+        body = (ROOT / "docs/phase3-github-broker.md").read_text(encoding="utf-8")
+        for expected in (
+            "Only select repositories",
+            "Contents | write",
+            "Pull requests | write",
+            "Checks | read",
+            "app.json",
+            "private-key.pem",
+            "--confirm-force-push-ruleset",
+            "agent-github pr create",
+            "agent-github pr view",
+            "agent-github pr checks",
+            "legacy `gh` credentialへfallbackしません",
+        ):
+            self.assertIn(expected, body)
+
+    def test_operator_guide_distinguishes_local_doctor_from_host_gate(self) -> None:
+        body = (ROOT / "docs/phase3-github-broker.md").read_text(encoding="utf-8")
+        self.assertIn("local stateだけの判定", body)
+        self.assertIn("実GitHub App", body)
+        self.assertIn("利用者承認後にだけ実行", body)
+        self.assertIn("外向きnetworkはdomain allowlistされていません", body)
+
+    def test_smoke_guide_covers_negative_and_secret_free_gates(self) -> None:
+        body = (ROOT / "docs/phase3-github-broker-smoke-test.md").read_text(encoding="utf-8")
+        for expected in (
+            "credential本文を表示しない",
+            "/proc/*/environ",
+            "mainへ直接pushしない",
+            "non-fast-forward",
+            "agent-github pr merge",
+            "generic API",
+            "smoke PRはmergeしません",
+            "broker停止後",
+            "not run",
+        ):
+            self.assertIn(expected, body)
+
+    def test_base_image_does_not_leak_legacy_gh_environment_into_broker_mode(self) -> None:
+        containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
+        self.assertNotIn("GH_CONFIG_DIR=", containerfile)

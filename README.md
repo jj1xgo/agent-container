@@ -4,7 +4,7 @@ AI coding agentsをホスト環境から分離して動かす、Linux・rootless
 
 Current release: `v0.1.0`
 
-現在はPhase 2まで実装済みの初期公開版です。`0.x`の間はCLI、state配置、security boundaryが互換性なく変更される可能性があります。
+現在はPhase 3のGitHub App brokerを明示opt-inで利用できます。`0.x`の間はCLI、state配置、security boundaryが互換性なく変更される可能性があります。
 
 ## 必要なもの
 
@@ -136,6 +136,25 @@ bin/agentctl project add OWNER/ANOTHER_REPOSITORY \
 
 projectはagent-container専用state内へcloneされます。ホスト上の既存開発workspaceをmountしたり上書きしたりしません。
 
+## GitHub App brokerを使う
+
+Phase 3のbroker modeでは、GitHub App private keyとinstallation tokenをhost側だけに置き、containerへはproject別Unix socketと一時的なcapabilityだけを渡します。exact repositoryのclone/fetch、作業branch push、`agent-github pr create/view/checks`だけを提供し、merge、release、generic APIは提供しません。
+
+GitHub Appのselected repository installation、最小permission、全branch force-push禁止ruleset、private stateを準備してから、project登録・doctor・runに`--github-broker`を明示します。
+
+```bash
+bin/agentctl project add OWNER/REPOSITORY \
+  --handover-root "$HANDOVER_ROOT" \
+  --github-broker \
+  --protected-branch main \
+  --confirm-force-push-ruleset
+
+bin/agentctl doctor REPOSITORY --github-broker
+bin/agentctl run REPOSITORY --github-broker
+```
+
+broker failureから専用`gh` credentialへ自動fallbackしません。設定と実host検証の全手順は[Phase 3 GitHub App broker運用ガイド](docs/phase3-github-broker.md)を参照してください。
+
 ## Imageの更新
 
 次のcommandはagent用Node.js、Codex、Claude Codeの現在のlatestを解決してimageを再buildします。
@@ -159,6 +178,9 @@ project固有のDebian packageやNode.js versionは、対象repositoryの`.agent
 | `bin/agentctl project add OWNER/REPOSITORY --handover-root PATH` | projectを専用workspaceへ登録 |
 | `bin/agentctl doctor PROJECT [--agent codex\|claude\|all]` | 起動前の状態をread-onlyで診断 |
 | `bin/agentctl run PROJECT [--agent codex\|claude]` | agentを起動 |
+| `bin/agentctl project add ... --github-broker --confirm-force-push-ruleset` | GitHub App broker modeでprojectを登録 |
+| `bin/agentctl doctor PROJECT --github-broker` | local broker stateとproject policyを診断 |
+| `bin/agentctl run PROJECT --github-broker` | credential-free Git/PR broker付きでagentを起動 |
 
 ## 困ったとき
 
@@ -180,6 +202,8 @@ runtimeはrootless Podman、read-only root filesystem、capability削除、`no-n
 - [Phase 1実host smoke test](docs/phase1-smoke-test.md)
 - [Phase 2 Claude Code operator guide](docs/phase2-claude-code.md)
 - [Phase 2実host smoke test](docs/phase2-smoke-test.md)
+- [Phase 3 GitHub App broker operator guide](docs/phase3-github-broker.md)
+- [Phase 3実host smoke test](docs/phase3-github-broker-smoke-test.md)
 - [設計文書](docs/superpowers/specs/2026-08-22-agent-container-design.md)
 - [Changelog](CHANGELOG.md)
 

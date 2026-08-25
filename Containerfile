@@ -83,7 +83,6 @@ COPY --chmod=0644 profiles/claude/managed-mcp.json /etc/claude-code/managed-mcp.
 ENV HOME=/home/agent \
     PATH=/usr/local/bin:/opt/agent-node/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
     PYTHONPATH=/opt/agent-container/src \
-    GH_CONFIG_DIR=/home/agent/.config/gh \
     DISABLE_UPDATES=1
 
 USER agent
