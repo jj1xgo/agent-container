@@ -4,6 +4,7 @@ import unittest
 
 from agent_container.github_app import InstallationToken
 from agent_container.github_git_transport import GitHubUploadPackTransport
+from agent_container.github_git_transport import GitHubReceivePackTransport
 from agent_container.state import Repository
 
 
@@ -144,3 +145,87 @@ class GitHubUploadPackTransportTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     list(self.transport.rpc(request))
         self.assertEqual(self.calls, [])
+
+
+class GitHubReceivePackTransportTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tokens = FakeTokens()
+        self.calls = []
+        self.responses: list[FakeResponse] = []
+
+        def open_http(method, url, headers, body):  # type: ignore[no-untyped-def]
+            self.calls.append((method, url, dict(headers), body))
+            return self.responses.pop(0)
+
+        self.transport = GitHubReceivePackTransport(
+            Repository.parse("jj1xgo/agent-container"),
+            self.tokens,  # type: ignore[arg-type]
+            open_http,
+        )
+
+    def test_strips_exact_smart_http_preamble_from_advertisement(self) -> None:
+        refs = b"00b1" + b"1" * 40 + b" refs/heads/feat/test\0report-status\n0000"
+        response = FakeResponse(
+            200,
+            "application/x-git-receive-pack-advertisement",
+            b"001f# service=git-receive-pack\n0000" + refs,
+        )
+        self.responses.append(response)
+
+        self.assertEqual(self.transport.discover(), refs)
+        method, url, headers, body = self.calls[0]
+        self.assertEqual(method, "GET")
+        self.assertEqual(
+            url,
+            "https://github.com/jj1xgo/agent-container.git/info/refs?service=git-receive-pack",
+        )
+        self.assertIn("Authorization", headers)
+        self.assertIsNone(body)
+        self.assertTrue(response.closed)
+
+    def test_posts_receive_pack_only_to_fixed_endpoint(self) -> None:
+        request = b"commands-and-pack"
+        response = FakeResponse(
+            200, "application/x-git-receive-pack-result", b"000eunpack ok\n0000"
+        )
+        self.responses.append(response)
+
+        self.assertEqual(list(self.transport.rpc(request)), [b"000eunpack ok\n0000"])
+        method, url, headers, body = self.calls[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(
+            url, "https://github.com/jj1xgo/agent-container.git/git-receive-pack"
+        )
+        self.assertEqual(
+            headers["Content-Type"], "application/x-git-receive-pack-request"
+        )
+        self.assertEqual(body, request)
+        self.assertTrue(response.closed)
+
+    def test_retries_401_once_and_rejects_malformed_or_empty_responses(self) -> None:
+        first = FakeResponse(401, "application/json", b"secret-marker")
+        second = FakeResponse(
+            200,
+            "application/x-git-receive-pack-advertisement",
+            b"001f# service=git-receive-pack\n0000refs",
+        )
+        self.responses.extend((first, second))
+        self.assertEqual(self.transport.discover(), b"refs")
+        self.assertEqual(self.tokens.invalidations, 1)
+        self.assertTrue(first.closed)
+
+        for body in (b"wrong", b"001f# service=git-receive-pack\n0000"):
+            self.responses[:] = [
+                FakeResponse(
+                    200, "application/x-git-receive-pack-advertisement", body
+                )
+            ]
+            with self.assertRaises(ValueError) as raised:
+                self.transport.discover()
+            self.assertNotIn("secret-marker", str(raised.exception))
+
+        self.responses[:] = [
+            FakeResponse(200, "application/x-git-receive-pack-result", b"")
+        ]
+        with self.assertRaises(ValueError):
+            list(self.transport.rpc(b"request"))
