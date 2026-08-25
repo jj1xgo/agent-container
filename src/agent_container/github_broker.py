@@ -15,6 +15,7 @@ from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_policy import validate_pr_number
 from agent_container.github_broker_protocol import BrokerRequest
 from agent_container.github_broker_protocol import PROTOCOL_VERSION
+from agent_container.github_broker_protocol import MAX_REQUEST_NONCE
 from agent_container.state import ensure_private_directory
 
 
@@ -66,7 +67,7 @@ class BrokerSession:
     capability_path: Path
     audit_file: Path
     _capability: str = field(repr=False)
-    _next_sequence: int = field(default=1, repr=False)
+    _seen_sequences: set[int] = field(default_factory=set, repr=False)
     _listener: socket.socket | None = field(default=None, repr=False)
     _closed: bool = field(default=False, repr=False)
 
@@ -122,10 +123,14 @@ class BrokerSession:
             raise ValueError("broker request is not authorized")
         if request.project_id != self.policy.project_id:
             raise ValueError("broker request project is not allowed")
-        if request.sequence != self._next_sequence:
+        if (
+            not 1 <= request.sequence <= MAX_REQUEST_NONCE
+            or request.sequence in self._seen_sequences
+            or len(self._seen_sequences) >= 4096
+        ):
             raise ValueError("broker request sequence is invalid")
         operation = self.policy.validate_operation(request.operation)
-        self._next_sequence += 1
+        self._seen_sequences.add(request.sequence)
         return {"operation": operation, "payload": request.payload}
 
     def open_listener(self, backlog: int = 4) -> socket.socket:
