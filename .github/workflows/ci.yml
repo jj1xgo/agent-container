@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Run Codex tests
+        run: python3 -m unittest discover -s tests/codex -v
+        env:
+          PYTHONPATH: src
+
+      - name: Run container unit tests
+        run: python3 -m unittest discover -s tests/container -v
+        env:
+          PYTHONPATH: src
+
+      - name: Check whitespace
+        run: git diff --check HEAD^ HEAD
+
+  podman-integration:
+    name: Podman integration
+    needs: unit-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      BASE_IMAGE: localhost/agent-container:ci
+      NODE_VERSION: 26.7.0
+      CODEX_VERSION: 0.149.1
+      CLAUDE_VERSION: 2.1.243
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify rootless Podman
+        run: |
+          podman --version
+          test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+
+      - name: Record available storage
+        run: df -h "$GITHUB_WORKSPACE"
+
+      - name: Build base image
+        run: |
+          podman build \
+            --build-arg "NODE_VERSION=$NODE_VERSION" \
+            --build-arg "CODEX_VERSION=$CODEX_VERSION" \
+            --build-arg "CLAUDE_VERSION=$CLAUDE_VERSION" \
+            --build-arg AGENT_CLI_CACHEBUST=ci-v1 \
+            --tag "$BASE_IMAGE" \
+            --file Containerfile \
+            .
+
+      - name: Verify base image
+        run: |
+          podman image inspect --format '{{.Id}}' "$BASE_IMAGE"
+          podman run --rm "$BASE_IMAGE" node --version
+          podman run --rm "$BASE_IMAGE" codex --version
+          podman run --rm "$BASE_IMAGE" claude --version
+
+      - name: Run real Podman integration test
+        run: python3 -m unittest tests.integration.test_project_image_podman -v
+        env:
+          PYTHONPATH: src
+          AGENT_CONTAINER_RUN_PODMAN_INTEGRATION: "1"
+          AGENT_CONTAINER_INTEGRATION_BASE_IMAGE: ${{ env.BASE_IMAGE }}
+
+      - name: Record final storage
+        if: always()
+        run: |
+          df -h "$GITHUB_WORKSPACE"
+          podman system df
