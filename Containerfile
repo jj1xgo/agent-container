@@ -6,6 +6,11 @@ ARG CLAUDE_VERSION=latest
 ARG AGENT_CLI_CACHEBUST=0
 
 RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && sed -i \
+      's|URIs: http://deb.debian.org|URIs: https://deb.debian.org|g' \
+      /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
       bubblewrap ca-certificates curl git libatomic1 passwd python3 socat xz-utils \
     && rm -rf /var/lib/apt/lists/*

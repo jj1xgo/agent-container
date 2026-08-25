@@ -42,6 +42,43 @@ EXPECTED_MCP = {"mcpServers": {}}
 _MAX_POLICY_BYTES = 64 * 1024
 
 
+def _open_policy_directory(path: Path, expected_uid: int | None) -> int | None:
+    if not path.is_absolute() or any(part in (".", "..") for part in path.parts):
+        return None
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open("/", flags)
+    except OSError:
+        return None
+    try:
+        for component in path.parts[1:]:
+            next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or (
+                expected_uid is not None
+                and (
+                    metadata.st_uid != expected_uid
+                    or metadata.st_mode & 0o022
+                )
+            )
+        ):
+            os.close(descriptor)
+            return None
+        return descriptor
+    except OSError:
+        os.close(descriptor)
+        return None
+
+
 def _load_json(path: Path, expected_uid: int | None) -> object:
     flags = (
         os.O_RDONLY
@@ -49,10 +86,15 @@ def _load_json(path: Path, expected_uid: int | None) -> object:
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0)
     )
-    try:
-        descriptor = os.open(path, flags)
-    except OSError:
+    directory_descriptor = _open_policy_directory(path.parent, expected_uid)
+    if directory_descriptor is None:
         return None
+    try:
+        descriptor = os.open(path.name, flags, dir_fd=directory_descriptor)
+    except OSError:
+        os.close(directory_descriptor)
+        return None
+    os.close(directory_descriptor)
     try:
         metadata = os.fstat(descriptor)
         if (

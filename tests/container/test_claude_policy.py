@@ -124,6 +124,47 @@ class ClaudeManagedPolicyTest(unittest.TestCase):
                 validate_managed_policy(settings, mcp, expected_uid=os.getuid() + 1)
             )
 
+    def test_rejects_policy_files_beneath_a_symlinked_directory(self) -> None:
+        baseline = json.loads(
+            (ROOT / "profiles/claude/managed-settings.json").read_text()
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Path(temporary)
+            real_directory = fixture / "real-policy"
+            real_directory.mkdir()
+            settings, mcp = self._write_policy(
+                real_directory, baseline, {"mcpServers": {}}
+            )
+            linked_directory = fixture / "linked-policy"
+            linked_directory.symlink_to(real_directory, target_is_directory=True)
+
+            self.assertFalse(
+                validate_managed_policy(
+                    linked_directory / settings.name,
+                    linked_directory / mcp.name,
+                )
+            )
+
+    def test_rejects_writable_policy_directory_when_owner_is_required(self) -> None:
+        baseline = json.loads(
+            (ROOT / "profiles/claude/managed-settings.json").read_text()
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            policy_directory = Path(temporary) / "policy"
+            policy_directory.mkdir()
+            settings, mcp = self._write_policy(
+                policy_directory, baseline, {"mcpServers": {}}
+            )
+            policy_directory.chmod(0o777)
+
+            self.assertFalse(
+                validate_managed_policy(
+                    settings,
+                    mcp,
+                    expected_uid=os.getuid(),
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

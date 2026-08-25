@@ -88,6 +88,20 @@ class ContainerImageContractTest(unittest.TestCase):
             set(),
         )
 
+    def test_image_bootstraps_ca_then_uses_https_for_debian_packages(self) -> None:
+        body = (ROOT / "Containerfile").read_text(encoding="utf-8")
+
+        ca_install = body.index(
+            "apt-get install -y --no-install-recommends ca-certificates"
+        )
+        https_source = body.index("URIs: http://deb.debian.org")
+        main_install = body.index("bubblewrap ca-certificates curl git")
+
+        self.assertLess(ca_install, https_source)
+        self.assertLess(https_source, main_install)
+        self.assertIn("URIs: https://deb.debian.org", body)
+        self.assertGreaterEqual(body.count("apt-get update"), 2)
+
     def test_image_installs_checksum_verified_official_github_cli(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
 
