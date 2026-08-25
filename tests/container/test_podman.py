@@ -240,6 +240,7 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertIn("src=/vault/handovers/agent-container,dst=/handovers/agent-container", joined)
         self.assertNotIn("/vault,dst=", joined)
         self.assertNotIn("token", joined.lower())
+        self.assertEqual(spec.argv[-3:], (IMAGE, "codex", "--approve-for-me"))
 
     def test_claude_relocates_gh_config_without_changing_codex(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")

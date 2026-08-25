@@ -1160,6 +1160,10 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(len(calls), 4)
             self.assertIn("codex", calls[-1].argv)
+            self.assertEqual(
+                calls[-1].argv[-3:],
+                ("localhost/agent-container:dev", "codex", "--approve-for-me"),
+            )
             self.assertIn("AGENT_PROJECT_ID=agent-container", calls[-1].argv)
             self.assertIn(
                 f"src={handover_project},dst=/handovers/agent-container",

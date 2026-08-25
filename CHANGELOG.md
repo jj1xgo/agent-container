@@ -2,6 +2,12 @@
 
 このprojectは[Semantic Versioning](https://semver.org/)に従います。`0.x`の間は、CLI、state配置、security boundaryが互換性なく変更される可能性があります。
 
+## [Unreleased]
+
+### Changed
+
+- Codex runtimeを`--approve-for-me`付きで起動し、内側のworkspace-write sandboxを維持しながらapproval requestを自動reviewするようにしました。完全なapproval／sandbox bypassは有効にしません。
+
 ## [0.1.0] - 2026-08-25
 
 最初の公開releaseです。

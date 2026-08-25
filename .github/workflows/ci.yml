@@ -79,6 +79,7 @@ jobs:
           podman image inspect --format '{{.Id}}' "$BASE_IMAGE"
           podman run --rm "$BASE_IMAGE" node --version
           podman run --rm "$BASE_IMAGE" codex --version
+          podman run --rm "$BASE_IMAGE" codex --approve-for-me --help >/dev/null
           podman run --rm "$BASE_IMAGE" claude --version
 
       - name: Run real Podman integration test

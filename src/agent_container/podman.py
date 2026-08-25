@@ -289,7 +289,13 @@ def run_codex_spec(
     )
     for source, target, read_only in mounts:
         argv += ["--mount", _mount(source, target, read_only)]
-    argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image, "codex"]
+    argv += [
+        "--env",
+        f"AGENT_PROJECT_ID={layout.project_id}",
+        image,
+        "codex",
+        "--approve-for-me",
+    ]
     return CommandSpec(tuple(argv), {})
 
 
