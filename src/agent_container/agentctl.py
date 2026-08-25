@@ -12,6 +12,7 @@ from typing import Callable
 from typing import Mapping
 from typing import TextIO
 
+from agent_container import __version__
 from agent_container.claude_auth import discard_staged_token
 from agent_container.claude_auth import install_claude_token
 from agent_container.claude_auth import quarantine_legacy_claude_state
@@ -103,6 +104,9 @@ def _validate_image(value: str) -> str:
 
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog="agentctl")
+    command.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
     command.add_argument("--image", default=DEFAULT_IMAGE)
     subcommands = command.add_subparsers(dest="command", required=True)
     build = subcommands.add_parser("build")

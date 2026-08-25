@@ -2682,6 +2682,15 @@ class AgentCtlMigrationTest(unittest.TestCase):
 
 
 class AgentCtlParserTest(unittest.TestCase):
+    def test_version_reports_project_version(self) -> None:
+        stdout = StringIO()
+
+        with patch("sys.stdout", stdout), self.assertRaises(SystemExit) as raised:
+            parser().parse_args(["--version"])
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(stdout.getvalue(), "agentctl 0.1.0\n")
+
     def test_new_command_contract(self) -> None:
         build = parser().parse_args(["build"])
         self.assertEqual(
