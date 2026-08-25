@@ -93,6 +93,35 @@ class ProjectImagePodmanIntegrationTest(unittest.TestCase):
             self.assertTrue(self._run(first.image, "codex", "--version"))
             self.assertTrue(self._run(first.image, "claude", "--version"))
 
+            (config / "packages.txt").write_text(
+                "make\nxz-utils\n", encoding="utf-8"
+            )
+            changed = _resolve_project_image(
+                layout,
+                BASE_IMAGE,
+                runner,
+                build_missing=True,
+                stdout=StringIO(),
+            )
+            self.addCleanup(
+                subprocess.run,
+                ("podman", "image", "rm", "--force", changed.image),
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            self.assertEqual(changed.state, "current")
+            self.assertNotEqual(changed.key, first.key)
+            self.assertNotEqual(changed.image, first.image)
+            self.assertEqual(
+                sum(argv[:2] == ("podman", "build") for argv in calls),
+                first_build_count + 1,
+            )
+            self.assertTrue(
+                self._run(changed.image, "xz", "--version").startswith("xz")
+            )
+
     def _run(self, image: str, *command: str) -> str:
         completed = subprocess.run(
             (
