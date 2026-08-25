@@ -22,6 +22,8 @@ from agent_container.migration import add_plugin_entries
 from agent_container.migration import apply_claude_migration
 from agent_container.migration import plan_claude_migration
 from agent_container.migration import render_migration_plan
+from agent_container.github_broker_runtime import GitHubBrokerRuntimeError
+from agent_container.github_broker_runtime import UploadPackBrokerRuntime
 from agent_container.podman import CommandSpec
 from agent_container.podman import auth_codex_spec
 from agent_container.podman import build_image_spec
@@ -126,6 +128,7 @@ def parser() -> argparse.ArgumentParser:
     run = subcommands.add_parser("run")
     run.add_argument("project")
     run.add_argument("--agent", choices=("codex", "claude"), default="codex")
+    run.add_argument("--github-broker", action="store_true")
     doctor = subcommands.add_parser("doctor")
     doctor.add_argument("project")
     doctor.add_argument("--agent", choices=("codex", "claude", "all"), default="codex")
@@ -1066,18 +1069,31 @@ def main(
             )
             if runtime_spec_builder is not None:
                 builders = {**builders, "codex": runtime_spec_builder}
-            spec = builders[arguments.agent](
-                layout,
-                handover_project,
-                resolution.image,
-                uid,
-                gid,
-            )
-            print(
-                f"Starting {arguments.agent.title()} for project: {layout.project_id}",
-                file=stdout,
-            )
-            runner(spec)
+            if arguments.github_broker:
+                record = _read_runtime_project(layout.project_file)
+                with UploadPackBrokerRuntime.create(layout, record) as broker:
+                    spec = builders[arguments.agent](
+                        layout,
+                        handover_project,
+                        resolution.image,
+                        uid,
+                        gid,
+                        broker,
+                    )
+                    print(
+                        f"Starting {arguments.agent.title()} for project: {layout.project_id}",
+                        file=stdout,
+                    )
+                    runner(spec)
+            else:
+                spec = builders[arguments.agent](
+                    layout, handover_project, resolution.image, uid, gid
+                )
+                print(
+                    f"Starting {arguments.agent.title()} for project: {layout.project_id}",
+                    file=stdout,
+                )
+                runner(spec)
             return 0
         if arguments.command == "doctor":
             checks = _doctor(
@@ -1122,6 +1138,9 @@ def main(
         return 1
     except _ClaudeRuntimeStateError:
         print("error: Claude runtime state validation failed", file=stderr)
+        return 1
+    except GitHubBrokerRuntimeError:
+        print("error: GitHub broker failed", file=stderr)
         return 1
     except (ValueError, PermissionError, FileNotFoundError) as error:
         print(f"error: {error}", file=stderr)

@@ -13,6 +13,7 @@ from agent_container.agentctl import main
 from agent_container.agentctl import parser
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
+from agent_container.podman import BrokerRuntimeMount
 from agent_container.project_image import ProjectImageConfig
 from agent_container.project_image import project_image_key
 from agent_container.project_image import project_image_name
@@ -1218,6 +1219,47 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(builder_calls[0][2], expected_image)
             self.assertEqual(sum(call.argv[:2] == ("podman", "build") for call in calls), 1)
             self.assertIn("project image missing; building", output.getvalue())
+
+    def test_run_github_broker_starts_context_before_broker_only_spec(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            repository = Repository.parse("jj1xgo/agent-container")
+            broker = BrokerRuntimeMount(root / "github-broker/run/session", repository)
+            builder_calls = []
+            calls = []
+
+            def builder(*args):
+                builder_calls.append(args)
+                return run_codex_spec(*args)
+
+            with patch(
+                "agent_container.agentctl.UploadPackBrokerRuntime.create"
+            ) as create:
+                context = create.return_value
+                context.__enter__.return_value = broker
+                context.__exit__.return_value = None
+                result = main(
+                    ["run", "agent-container", "--github-broker"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    runtime_spec_builder=builder,
+                    stdout=StringIO(),
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(len(builder_calls), 1)
+            self.assertIs(builder_calls[0][-1], broker)
+            create.assert_called_once()
+            context.__enter__.assert_called_once_with()
+            context.__exit__.assert_called_once()
+            runtime = " ".join(calls[-1].argv)
+            self.assertIn("dst=/run/agent-broker,ro=true", runtime)
+            self.assertNotIn("src=" + str(root / "gh"), runtime)
+            self.assertNotIn("gh auth git-credential", runtime)
 
     def test_run_uses_current_project_image_without_build(self) -> None:
         with TemporaryDirectory() as temp:
