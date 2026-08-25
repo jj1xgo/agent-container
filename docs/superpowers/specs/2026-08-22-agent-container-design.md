@@ -224,6 +224,8 @@ CPU、メモリ、ディスク容量、コンテナ稼働時間はCodexの会話
 - container resource監視
 - 必要性が確認できた場合のみ英語文書や追加platformを拡張
 
+開発GitHub認証brokerの具体的なtrust boundary、Git transport、GitHub App permission、migrationと受け入れ条件は[Phase 3開発GitHub認証broker設計](2026-08-25-phase-3-github-broker-design.md)で定義する。
+
 ## 12. 初期受け入れ条件
 
 - ホストの実`~/.codex`、`~/.claude`、開発workspaceをread-writeマウントしない
