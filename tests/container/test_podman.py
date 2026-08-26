@@ -302,6 +302,10 @@ class PodmanCommandTest(unittest.TestCase):
             "GIT_CONFIG_KEY_0=url.agent-broker://jj1xgo/agent-container.insteadOf",
             joined,
         )
+        self.assertIn(
+            "GIT_CONFIG_VALUE_0=https://github.com/jj1xgo/agent-container.git",
+            joined,
+        )
         self.assertEqual(
             spec.argv[-4:],
             (

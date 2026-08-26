@@ -4,6 +4,7 @@ import unittest
 
 from agent_container.github_app import HttpResponse
 from agent_container.github_app import InstallationToken
+from agent_container.github_broker_error import BrokerStageError
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_pr import GitHubPullRequestTransport
 
@@ -20,6 +21,24 @@ class FakeTokens:
 
     def invalidate(self) -> None:
         self.invalidations += 1
+
+
+class FailingTokens:
+    def get(self) -> InstallationToken:
+        raise RuntimeError("secret-token-marker")
+
+    def invalidate(self) -> None:
+        raise AssertionError("token invalidation must not run")
+
+
+class WrongStageTokens(FailingTokens):
+    def get(self) -> InstallationToken:
+        raise BrokerStageError("pr-request")
+
+
+class FailingInvalidationTokens(FakeTokens):
+    def invalidate(self) -> None:
+        raise RuntimeError("secret-invalidation-marker")
 
 
 class GitHubPullRequestTransportTest(unittest.TestCase):
@@ -70,6 +89,21 @@ class GitHubPullRequestTransportTest(unittest.TestCase):
         self.assertIn("Authorization", headers)
         self.assertNotIn("body", result)
 
+    def test_classifies_token_failure_without_secret(self) -> None:
+        self.client.tokens = FailingTokens()  # type: ignore[assignment]
+
+        with self.assertRaises(BrokerStageError) as raised:
+            self.client.view(12)
+
+        self.assertEqual(raised.exception.stage, "token")
+        self.assertNotIn("secret-token-marker", str(raised.exception))
+        self.assertNotIn("secret-token-marker", repr(raised.exception))
+
+        self.client.tokens = WrongStageTokens()  # type: ignore[assignment]
+        with self.assertRaises(BrokerStageError) as wrong_stage:
+            self.client.view(12)
+        self.assertEqual(wrong_stage.exception.stage, "token")
+
     def test_view_and_checks_use_only_numeric_pr_and_head_sha(self) -> None:
         summary = {
             "number": 12,
@@ -105,9 +139,11 @@ class GitHubPullRequestTransportTest(unittest.TestCase):
         self.responses.append(
             HttpResponse(403, {"Content-Type": "application/json"}, b"secret-marker")
         )
-        with self.assertRaises(RuntimeError) as raised:
+        with self.assertRaises(BrokerStageError) as raised:
             self.client.view(12)
+        self.assertEqual(raised.exception.stage, "pr-request")
         self.assertNotIn("secret-marker", str(raised.exception))
+        self.assertNotIn("secret-marker", repr(raised.exception))
 
     def test_retries_one_unauthorized_response(self) -> None:
         summary = {
@@ -125,3 +161,13 @@ class GitHubPullRequestTransportTest(unittest.TestCase):
         self.assertEqual(self.client.view(12)["number"], 12)
         self.assertEqual(self.tokens.invalidations, 1)
         self.assertEqual(len(self.calls), 2)
+
+    def test_classifies_token_invalidation_failure_without_secret(self) -> None:
+        self.client.tokens = FailingInvalidationTokens()  # type: ignore[assignment]
+        self.responses.append(self.response({"message": "secret-marker"}, 401))
+
+        with self.assertRaises(BrokerStageError) as raised:
+            self.client.view(12)
+
+        self.assertEqual(raised.exception.stage, "token")
+        self.assertNotIn("secret-invalidation-marker", repr(raised.exception))

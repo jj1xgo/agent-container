@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -39,6 +40,11 @@ def validate_project_id(value: str) -> str:
     if value in {".", ".."} or PROJECT_ID.fullmatch(value) is None:
         raise ValueError("project_id must be a single safe repository-style slug")
     return value
+
+
+def github_broker_project_label(project_id: str) -> str:
+    validated = validate_project_id(project_id)
+    return hashlib.sha256(validated.encode("ascii")).hexdigest()[:12]
 
 
 def validate_claude_oauth_token(value: str) -> str:
@@ -159,7 +165,11 @@ class StateLayout:
 
     @property
     def github_broker_run_root(self) -> Path:
-        return self.github_broker_root / "run" / self.project_id
+        return (
+            self.github_broker_root
+            / "r"
+            / github_broker_project_label(self.project_id)
+        )
 
     @property
     def github_broker_policy_file(self) -> Path:

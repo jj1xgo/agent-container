@@ -71,6 +71,7 @@ class GitHubAppTest(unittest.TestCase):
                         "contents": "write",
                         "pull_requests": "write",
                         "checks": "read",
+                        "metadata": "read",
                     },
                     "repositories": [{"id": 456, "name": "agent-container"}],
                 }
@@ -201,6 +202,7 @@ class GitHubAppTest(unittest.TestCase):
                 "permissions": {
                     "checks": "read",
                     "contents": "write",
+                    "metadata": "read",
                     "pull_requests": "write",
                 },
             },

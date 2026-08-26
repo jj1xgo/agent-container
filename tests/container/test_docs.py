@@ -212,7 +212,8 @@ class Phase3DocumentationTest(unittest.TestCase):
             "generic API",
             "smoke PRはmergeしません",
             "broker停止後",
-            "not run",
+            "PARTIAL",
+            "実host smoke",
         ):
             self.assertIn(expected, body)
 

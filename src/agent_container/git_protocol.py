@@ -220,7 +220,9 @@ def gate_receive_pack_commands(
             if b"\0" not in line:
                 raise ValueError("Git push capabilities are missing")
             raw_command, raw_capabilities = line.split(b"\0", 1)
-            parsed_capabilities = _parse_capabilities(raw_capabilities)
+            parsed_capabilities = _parse_capabilities(
+                raw_capabilities.removeprefix(b" ")
+            )
             capabilities = _validate_client_capabilities(
                 parsed_capabilities, advertisement
             )

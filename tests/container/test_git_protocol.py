@@ -233,6 +233,19 @@ class ReceivePackGateTest(unittest.TestCase):
         self.assertIn("report-status", gated.capabilities)
         self.assertIn("agent=git/2.51.0", gated.capabilities)
 
+    def test_accepts_git_push_capability_separator_space(self) -> None:
+        data = commands(
+            (ZERO_OID_SHA1, NEW, "refs/heads/feat/new"),
+            capabilities=(
+                " report-status-v2 side-band-64k quiet object-format=sha1 "
+                "agent=git/2.53.0-Linux"
+            ),
+        )
+
+        gated = gate_receive_pack_commands(data, self.advertisement, self.policy)
+
+        self.assertIn("report-status-v2", gated.capabilities)
+
     def test_rejects_empty_commands_ref_limit_and_object_format_mismatch(self) -> None:
         with self.assertRaises(ValueError):
             gate_receive_pack_commands(FLUSH + b"PACK", self.advertisement, self.policy)

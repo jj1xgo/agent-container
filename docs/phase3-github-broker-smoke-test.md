@@ -126,13 +126,13 @@ smoke PRはmergeしません。closeやbranch cleanupはbrokerの許可操作で
 
 | check | expected | observed | date |
 | --- | --- | --- | --- |
-| App installation/permission | exact repository; minimal permission | not run | YYYY-MM-DD |
-| force-push ruleset | all branches protected from force push | not run | YYYY-MM-DD |
-| broker doctor | required checks PASS; local-only classification | not run | YYYY-MM-DD |
-| credential non-exposure | all probes false; no value output | not run | YYYY-MM-DD |
-| clone/fetch | exact repository succeeds; other repository denied | not run | YYYY-MM-DD |
-| work-branch push | normal push succeeds; protected/delete/stale/NFF denied | not run | YYYY-MM-DD |
-| PR create/view/checks | allowed operations succeed; generic/merge absent | not run | YYYY-MM-DD |
-| audit/cleanup | secret-free records; runtime artifacts removed | not run | YYYY-MM-DD |
+| App installation/permission | exact repository; minimal permission | PASS: selected repository 1件、Metadata read、Contents write、Pull requests write、Checks read | 2026-08-26 |
+| force-push ruleset | all branches protected from force push | PASS: active all-branch ruleset、force push禁止、bypassなし | 2026-08-26 |
+| broker doctor | required checks PASS; local-only classification | PASS: Codex／Claude両方で`github-broker`を含む必須check成功 | 2026-08-26 |
+| credential non-exposure | all probes false; no value output | PASS: credential環境・host gh config・App state非露出、`gh auth status`失敗 | 2026-08-26 |
+| clone/fetch | exact repository succeeds; other repository denied | PASS: clone／fetch成功、別repositoryはexit 255で拒否、remote URLにcredentialなし | 2026-08-26 |
+| work-branch push | normal push succeeds; protected/delete/stale/NFF denied | PARTIAL: `test/github-broker-smoke-20260826-1`の通常push成功。危険なnegative pushは未実施 | 2026-08-26 |
+| PR create/view/checks | allowed operations succeed; generic/merge absent | PASS: PR #38 create／view／checks成功。generic API、merge、releaseはexit 2 | 2026-08-26 |
+| audit/cleanup | secret-free records; runtime artifacts removed | PASS: allowlist fieldにGit／PR成功記録、終了後socket／capabilityなし | 2026-08-26 |
 
-この文書作成時点では実GitHub App smokeを未実施です。`not run`を成功へ書き換えず、実行日時、exit status、secret-free observationを確認後に記録します。
+実host smokeではclone、fetch、作業branch push、PR #38のcreate／view／checksまで成功しました。shared repositoryを変更するprotected branch、delete、stale lease、non-fast-forwardのnegative pushは安全上実行していないため、work-branch push項目は`PARTIAL`のままです。PRはmerge／closeしていません。

@@ -149,6 +149,27 @@ rollbackはbroker障害からの自動fallbackではなく、利用者が明示�
 - protected branch、delete、stale leaseの拒否: policyどおりです。制約を迂回せず、作業branchとPRを使います。
 - broker停止後: Git/PR操作がfail closedになることが期待動作です。
 
+認可後の既知の外部・protocol failureは、auditへ`status=error`と次の固定`stage`だけを記録します。
+
+- `token`
+- `upload-discovery`
+- `upload-rpc`
+- `receive-discovery`
+- `receive-rpc`
+- `pr-request`
+- `response-stream`
+
+1 connectionの既知failureはそのconnectionだけをfail closedにし、brokerは次のconnectionを受け付けます。認可違反は従来どおり`denied`であり、予期しないprogramming／listener／thread failureはruntime全体のfailureです。
+
+診断時はraw auditを表示せず、allowlist済みfieldだけを選択します。
+
+```bash
+jq -c '{timestamp,operation,status,stage}' \
+  "$AGENT_CONTAINER_HOME/github-broker/audit/events.jsonl" | tail -n 5
+```
+
+exception本文、GitHub response body、token、JWT、private key、capability、Authorization header、PR body、Git advertisement、packfile、commit内容を採取しません。
+
 ## 既知の境界
 
 - 外向きnetworkはdomain allowlistされていません。

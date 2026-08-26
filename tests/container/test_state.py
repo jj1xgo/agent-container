@@ -60,7 +60,7 @@ class StateValidationTest(unittest.TestCase):
         )
         self.assertEqual(
             layout.github_broker_run_root,
-            Path("/state/github-broker/run/agent-container"),
+            Path("/state/github-broker/r/1f630d4dd972"),
         )
         self.assertEqual(
             layout.github_broker_policy_file,

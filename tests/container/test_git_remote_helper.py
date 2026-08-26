@@ -98,7 +98,7 @@ class RemoteHelperTest(unittest.TestCase):
         self.assertEqual(transport.requests, [request])
         self.assertEqual(
             stdout.getvalue(),
-            b"stateless-connect\n\n\n"
+            b"connect\nstateless-connect\n\n\n"
             + transport.discover()
             + pkt(b"response\n")
             + b"0002",
@@ -108,7 +108,7 @@ class RemoteHelperTest(unittest.TestCase):
         transport = FakeReceiveTransport()
         push = b"commands-and-pack"
         stdin = BytesIO(
-            b"capabilities\nstateless-connect git-receive-pack\n" + push
+            b"capabilities\nconnect git-receive-pack\n" + push
         )
         stdout = BytesIO()
 
@@ -124,7 +124,7 @@ class RemoteHelperTest(unittest.TestCase):
         self.assertEqual(transport.requests, [push])
         self.assertEqual(
             stdout.getvalue(),
-            b"stateless-connect\n\n\nadvertisementpush-result",
+            b"connect\nstateless-connect\n\n\nadvertisementpush-result",
         )
 
     def test_rejects_push_and_unknown_commands(self) -> None:

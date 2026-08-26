@@ -155,7 +155,7 @@ def run_remote_helper(
     command = stdin.readline(4097)
     if command != b"capabilities\n":
         raise ValueError("Git remote helper command is not allowed")
-    stdout.write(b"stateless-connect\n\n")
+    stdout.write(b"connect\nstateless-connect\n\n")
     stdout.flush()
     connect = stdin.readline(4097)
     if connect == b"stateless-connect git-upload-pack\n":
@@ -169,7 +169,7 @@ def run_remote_helper(
         return StatelessRemoteHelper(
             repository, selected, stdin, stdout  # type: ignore[arg-type]
         ).run()
-    if connect == b"stateless-connect git-receive-pack\n":
+    if connect == b"connect git-receive-pack\n":
         selected = (
             transport.for_service("git-receive-pack")  # type: ignore[union-attr]
             if hasattr(transport, "for_service")
