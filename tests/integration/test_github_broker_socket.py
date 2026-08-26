@@ -203,7 +203,7 @@ class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
                         push_client,
                         BytesIO(
                             b"capabilities\n"
-                            b"stateless-connect git-receive-pack\n"
+                            b"connect git-receive-pack\n"
                             + push
                         ),
                         push_stdout,
@@ -227,7 +227,7 @@ class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
             self.assertEqual(receive.requests, [push])
             self.assertEqual(
                 stdout.getvalue(),
-                b"stateless-connect\n\n"
+                b"connect\nstateless-connect\n\n"
                 b"\n"
                 b"000eversion 2\n0000"
                 b"0008NAK\n0002"
@@ -235,7 +235,7 @@ class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
             )
             self.assertEqual(
                 push_stdout.getvalue(),
-                b"stateless-connect\n\n\n"
+                b"connect\nstateless-connect\n\n\n"
                 + receive.advertisement
                 + b"000eunpack ok\n0000",
             )
