@@ -177,6 +177,36 @@ class Phase2DocumentationTest(unittest.TestCase):
 
 
 class Phase3DocumentationTest(unittest.TestCase):
+    def test_resource_monitor_and_cross_agent_review_are_documented(self) -> None:
+        guide = (ROOT / "docs/phase3-resource-review.md").read_text(
+            encoding="utf-8"
+        )
+        for expected in (
+            "agentctl stats PROJECT",
+            "CPU",
+            "MEMORY",
+            "PIDS",
+            "UPTIME",
+            "環境変数",
+            "cgroups v2",
+            "labelは認証された所有証明ではなく",
+            "AI reviewだけで正しいと断定しません",
+        ):
+            self.assertIn(expected, guide)
+
+        template = (ROOT / ".github/pull_request_template.md").read_text(
+            encoding="utf-8"
+        )
+        for expected in (
+            "## Security boundary",
+            "## Agent review",
+            "Implementation agent",
+            "Review agent",
+            "## Verification",
+            "## Host gates and residual risk",
+        ):
+            self.assertIn(expected, template)
+
     def test_operator_guide_documents_broker_setup_and_fixed_operations(self) -> None:
         body = (ROOT / "docs/phase3-github-broker.md").read_text(encoding="utf-8")
         for expected in (

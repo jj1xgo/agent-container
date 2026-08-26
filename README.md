@@ -227,6 +227,7 @@ project固有のDebian packageやNode.js versionは、対象repositoryの`.agent
 | `bin/agentctl superpowers update --all-projects` | 登録済み全projectのSuperpowersを最新版へ更新 |
 | `bin/agentctl doctor PROJECT [--agent codex\|claude\|all]` | 起動前の状態をread-onlyで診断 |
 | `bin/agentctl run PROJECT [--agent codex\|claude]` | agentを起動 |
+| `bin/agentctl stats PROJECT` | 実行中agent containerのsecret-free resource snapshotを表示 |
 | `bin/agentctl project add ... --github-broker --confirm-force-push-ruleset` | GitHub App broker modeでprojectを登録 |
 | `bin/agentctl doctor PROJECT --github-broker` | local broker stateとproject policyを診断 |
 | `bin/agentctl run PROJECT --github-broker` | credential-free Git/PR broker付きでagentを起動 |
@@ -253,6 +254,7 @@ runtimeはrootless Podman、read-only root filesystem、capability削除、`no-n
 - [Phase 2実host smoke test](docs/phase2-smoke-test.md)
 - [Phase 3 GitHub App broker operator guide](docs/phase3-github-broker.md)
 - [Phase 3実host smoke test](docs/phase3-github-broker-smoke-test.md)
+- [Phase 3 resource監視・cross-agent review](docs/phase3-resource-review.md)
 - [設計文書](docs/superpowers/specs/2026-08-22-agent-container-design.md)
 - [Changelog](CHANGELOG.md)
 

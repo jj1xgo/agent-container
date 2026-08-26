@@ -14,6 +14,8 @@ from agent_container.agentctl import parser
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.podman import BrokerRuntimeMount
+from agent_container.podman import podman_running_agent_containers_spec
+from agent_container.podman import podman_stats_spec
 from agent_container.project_image import ProjectImageConfig
 from agent_container.project_image import project_image_key
 from agent_container.project_image import project_image_name
@@ -31,6 +33,91 @@ def successful_podman_result(spec):
 class AgentCtlBuildAuthTest(unittest.TestCase):
     OLD_TOKEN = "o" * 32
     NEW_TOKEN = "n" * 32
+
+    def test_stats_reports_only_fixed_resource_fields_for_matching_agents(self) -> None:
+        stdout = StringIO()
+
+        def runner(spec):
+            if spec.argv == ("podman", "--version"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
+            if spec.argv[:2] == ("podman", "info"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+            if spec == podman_running_agent_containers_spec("agent-container", "codex"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="0123456789ab\n")
+            if spec == podman_running_agent_containers_spec("agent-container", "claude"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="abcdef012345\n")
+            if spec == podman_stats_spec("0123456789ab"):
+                return subprocess.CompletedProcess(
+                    spec.argv, 0, stdout="0123456789ab\t1.25%\t10MiB / 1GiB\t8\t2m\n"
+                )
+            if spec == podman_stats_spec("abcdef012345"):
+                return subprocess.CompletedProcess(
+                    spec.argv, 0, stdout="abcdef012345\t0.50%\t20MiB / 1GiB\t9\t3m\n"
+                )
+            raise AssertionError(spec.argv)
+
+        result = main(["stats", "agent-container"], runner=runner, stdout=stdout)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            stdout.getvalue(),
+            "AGENT\tCONTAINER\tCPU\tMEMORY\tPIDS\tUPTIME\n"
+            "codex\t0123456789ab\t1.25%\t10MiB / 1GiB\t8\t2m\n"
+            "claude\tabcdef012345\t0.50%\t20MiB / 1GiB\t9\t3m\n",
+        )
+
+    def test_stats_fails_closed_when_no_runtime_or_output_is_invalid(self) -> None:
+        def no_runtime(spec):
+            if spec.argv == ("podman", "--version"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
+            if spec.argv[:2] == ("podman", "info"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+            return subprocess.CompletedProcess(spec.argv, 0, stdout="")
+
+        stderr = StringIO()
+        result = main(
+            ["stats", "agent-container"], runner=no_runtime, stderr=stderr
+        )
+        self.assertEqual(result, 1)
+        self.assertIn("no running agent container", stderr.getvalue())
+
+        calls = []
+        result = main(
+            ["stats", "../bad"], runner=lambda spec: calls.append(spec)
+        )
+        self.assertEqual(result, 1)
+        self.assertEqual(calls, [])
+
+    def test_stats_rejects_malformed_podman_output_without_echoing_it(self) -> None:
+        marker = "private-command-marker"
+
+        def runner(spec):
+            if spec.argv == ("podman", "--version"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
+            if spec.argv[:2] == ("podman", "info"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+            if spec == podman_running_agent_containers_spec("agent-container", "codex"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="0123456789ab\n")
+            if spec == podman_running_agent_containers_spec("agent-container", "claude"):
+                return subprocess.CompletedProcess(spec.argv, 0, stdout="")
+            return subprocess.CompletedProcess(
+                spec.argv,
+                0,
+                stdout=f"0123456789ab\t1%\t2MiB\t3\t4m\t{marker}\n",
+            )
+
+        stdout = StringIO()
+        stderr = StringIO()
+        result = main(
+            ["stats", "agent-container"],
+            runner=runner,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+        self.assertEqual(result, 1)
+        self.assertNotIn(marker, stdout.getvalue())
+        self.assertNotIn(marker, stderr.getvalue())
 
     @staticmethod
     def _successful_probe(spec):
