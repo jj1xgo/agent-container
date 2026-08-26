@@ -63,6 +63,13 @@ def _runtime_prefix(uid: int, gid: int) -> list[str]:
     ]
 
 
+def _noninteractive_prefix(uid: int, gid: int) -> list[str]:
+    argv = _runtime_prefix(uid, gid)
+    argv.remove("--interactive")
+    argv.remove("--tty")
+    return argv
+
+
 def _git_environment_args(
     gh_config_dir: str = "/home/agent/.config/gh",
 ) -> list[str]:
@@ -311,6 +318,70 @@ def clone_project_spec(
     else:
         argv += [image, "git", "clone", repository.https_url]
     argv += [f"/workspaces/{layout.project_id}"]
+    return CommandSpec(tuple(argv), {})
+
+
+def codex_superpowers_marketplace_spec(
+    layout: StateLayout, image: str, *, update: bool = False
+) -> CommandSpec:
+    argv = _noninteractive_prefix(os.getuid(), os.getgid())
+    argv += ["--mount", _mount(layout.codex_home, "/home/agent/.codex")]
+    argv += [image, "codex", "plugin", "marketplace"]
+    if update:
+        argv += ["upgrade", "superpowers-dev", "--json"]
+    else:
+        argv += ["add", "obra/superpowers", "--ref", "main", "--json"]
+    return CommandSpec(tuple(argv), {})
+
+
+def codex_superpowers_install_spec(layout: StateLayout, image: str) -> CommandSpec:
+    argv = _noninteractive_prefix(os.getuid(), os.getgid())
+    argv += ["--mount", _mount(layout.codex_home, "/home/agent/.codex")]
+    argv += [
+        image,
+        "codex",
+        "plugin",
+        "add",
+        "superpowers@superpowers-dev",
+        "--json",
+    ]
+    return CommandSpec(tuple(argv), {})
+
+
+def claude_superpowers_marketplace_spec(
+    layout: StateLayout, image: str, *, update: bool = False
+) -> CommandSpec:
+    argv = _noninteractive_prefix(os.getuid(), os.getgid())
+    argv += ["--mount", _CLAUDE_RUNTIME_HOME_TMPFS_MOUNT]
+    argv += ["--mount", _mount(layout.claude_config, "/home/agent/.claude")]
+    argv += ["--env", "CLAUDE_CONFIG_DIR=/home/agent/.claude"]
+    action = "update" if update else "add"
+    argv += [image, "claude", "plugin", "marketplace", action]
+    if update:
+        argv += ["claude-plugins-official"]
+    else:
+        argv += ["anthropics/claude-plugins-official"]
+    return CommandSpec(tuple(argv), {})
+
+
+def claude_superpowers_spec(
+    layout: StateLayout, image: str, *, update: bool = False
+) -> CommandSpec:
+    argv = _noninteractive_prefix(os.getuid(), os.getgid())
+    argv += ["--mount", _CLAUDE_RUNTIME_HOME_TMPFS_MOUNT]
+    argv += ["--mount", _mount(layout.claude_config, "/home/agent/.claude")]
+    argv += ["--env", "CLAUDE_CONFIG_DIR=/home/agent/.claude"]
+    action = "update" if update else "install"
+    argv += [
+        image,
+        "claude",
+        "plugin",
+        action,
+        "superpowers@claude-plugins-official",
+        "--scope",
+        "user",
+        "--yes",
+    ]
     return CommandSpec(tuple(argv), {})
 
 
