@@ -6,6 +6,31 @@ Current release: `v0.1.0`
 
 現在はPhase 3のGitHub App brokerを明示opt-inで利用できます。`0.x`の間はCLI、state配置、security boundaryが互換性なく変更される可能性があります。
 
+## 最短で使う
+
+必要なsoftwareを準備したLinux hostで、repositoryをcloneしてsetup scriptを実行します。引数は、agentに作業させるGitHub repositoryです。
+
+```bash
+git clone https://github.com/jj1xgo/agent-container.git
+cd agent-container
+bin/setup.sh OWNER/REPOSITORY
+```
+
+scriptは専用GitHub認証、image build、Codex認証、project登録、診断を順番に案内します。認証済みの項目とbuild済みimageは再利用するため、途中で止まっても同じcommandを再実行できます。既定ではstateとhandoverを`~/.local/share/agent-container`以下へ保存します。
+
+setup完了後は、次の一行でCodexを起動します。
+
+```bash
+bin/agentctl run REPOSITORY
+```
+
+別名で登録する場合は、第2引数にproject名を指定します。
+
+```bash
+bin/setup.sh OWNER/REPOSITORY PROJECT_NAME
+bin/agentctl run PROJECT_NAME
+```
+
 ## 必要なもの
 
 - Linux
@@ -53,9 +78,9 @@ source "$HOME/.bashrc"
 
 すでに同じ設定が`~/.bashrc`にある場合は重複して追記せず、既存行を利用してください。
 
-## 最短セットアップ
+## 手動でセットアップする
 
-以下は`OWNER/REPOSITORY`をCodexで使い始める例です。agent-container repositoryをcloneし、そのdirectoryで実行してください。
+保存先や各工程を個別に管理したい場合は、以下を順番に実行します。agent-container repositoryをcloneし、そのdirectoryで実行してください。
 
 ```bash
 git clone https://github.com/jj1xgo/agent-container.git
