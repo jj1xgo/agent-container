@@ -50,6 +50,7 @@ from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.podman import run_command
 from agent_container.profile import seed_codex_home
+from agent_container.profile import update_codex_handover_profile
 from agent_container.project_image import ProjectImageConfig
 from agent_container.project_image import ProjectImageResolution
 from agent_container.project_image import load_project_image_config
@@ -133,6 +134,8 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument("--default-branch", default="main")
     add.add_argument("--protected-branch", action="append", default=[])
     add.add_argument("--confirm-force-push-ruleset", action="store_true")
+    update_profile = project_subcommands.add_parser("update-profile")
+    update_profile.add_argument("project")
     run = subcommands.add_parser("run")
     run.add_argument("project")
     run.add_argument("--agent", choices=("codex", "claude"), default="codex")
@@ -1045,6 +1048,8 @@ def main(
             )
             if broker_options and not arguments.github_broker:
                 raise ValueError("GitHub broker options require --github-broker")
+        elif arguments.command == "project" and arguments.project_command == "update-profile":
+            validate_project_id(arguments.project)
         elif arguments.command == "doctor":
             validate_agent(arguments.agent, allow_all=True)
         elif arguments.command == "migrate":
@@ -1139,6 +1144,22 @@ def main(
                 arguments.default_branch,
                 tuple(arguments.protected_branch),
                 arguments.confirm_force_push_ruleset,
+            )
+            return 0
+        if arguments.command == "project" and arguments.project_command == "update-profile":
+            layout = StateLayout.from_environment(arguments.project, environment)
+            _ensure_exact_state_root(layout, environment)
+            ensure_private_directory(layout.root)
+            ensure_private_directory(layout.project_dir.parent)
+            ensure_private_directory(layout.project_dir)
+            ensure_private_directory(layout.codex_home)
+            _read_runtime_project(layout.project_file)
+            update_codex_handover_profile(
+                repository_root / "profiles/codex", layout.codex_home
+            )
+            print(
+                f"Updated managed handover profile for project: {layout.project_id}",
+                file=stdout,
             )
             return 0
         if arguments.command == "run":

@@ -112,10 +112,10 @@ bin/agentctl project add OWNER/REPOSITORY \
 
 新規projectのCodex stateには、`gh pr view/list/checks/status`、`gh issue view/list`、`gh run view/list`、`gh repo view`だけを読み取り用の初期approval rulesとして配置します。既存projectのrulesは暗黙に追加・上書きしません。
 
-handover作成には保存先を環境から固定する専用`agent-handover create`を使い、このcommandだけを初期approval rulesで事前許可します。これによりhandoverごとの承認は不要です。既存projectへはrulesを自動追記しないため、image更新後にprojectの`codex-home/rules/default.rules`へ次の一行をreviewして追加してください。
+handover作成には保存先を環境から固定する専用`agent-handover create`を使い、このcommandだけを初期approval rulesで事前許可します。これによりhandoverごとの承認は不要です。既存projectではimage更新後、次のcommandでcustom rulesを残したまま専用ruleを追加し、managed handover skillを更新します。
 
-```text
-prefix_rule(pattern=["agent-handover", "create"], decision="allow")
+```bash
+bin/agentctl project update-profile PROJECT
 ```
 
 診断がPASSしたらCodexを起動できます。
@@ -209,6 +209,7 @@ project固有のDebian packageやNode.js versionは、対象repositoryの`.agent
 | `bin/agentctl auth codex` | Codex専用認証を作成・更新 |
 | `bin/agentctl auth claude` | Claude専用認証を作成・更新 |
 | `bin/agentctl project add OWNER/REPOSITORY --handover-root PATH` | projectを専用workspaceへ登録 |
+| `bin/agentctl project update-profile PROJECT` | 既存projectのmanaged handover skillと専用approval ruleを更新 |
 | `bin/agentctl doctor PROJECT [--agent codex\|claude\|all]` | 起動前の状態をread-onlyで診断 |
 | `bin/agentctl run PROJECT [--agent codex\|claude]` | agentを起動 |
 | `bin/agentctl project add ... --github-broker --confirm-force-push-ruleset` | GitHub App broker modeでprojectを登録 |

@@ -3,6 +3,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from agent_container.profile import seed_codex_home
+from agent_container.profile import update_codex_handover_profile
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -58,3 +59,46 @@ class ProfileSeedTest(unittest.TestCase):
             self.assertEqual(
                 (codex_home / "config.toml").read_text(encoding="utf-8"), "existing\n"
             )
+
+    def test_update_handover_profile_preserves_custom_rules_and_is_idempotent(self) -> None:
+        with TemporaryDirectory() as temp:
+            codex_home = Path(temp) / "codex-home"
+            seed_codex_home(ROOT / "profiles/codex", codex_home)
+            rules_file = codex_home / "rules/default.rules"
+            rules_file.write_text("custom-rule\n", encoding="utf-8")
+            skill_file = codex_home / "skills/handover/SKILL.md"
+            skill_file.write_text("old managed skill\n", encoding="utf-8")
+
+            update_codex_handover_profile(ROOT / "profiles/codex", codex_home)
+            update_codex_handover_profile(ROOT / "profiles/codex", codex_home)
+
+            rules = rules_file.read_text(encoding="utf-8")
+            self.assertIn("custom-rule\n", rules)
+            self.assertEqual(rules.count('agent-handover", "create'), 1)
+            self.assertEqual(
+                skill_file.read_text(encoding="utf-8"),
+                (ROOT / "profiles/codex/skills/handover/SKILL.md").read_text(
+                    encoding="utf-8"
+                ),
+            )
+            self.assertEqual(
+                (codex_home / "managed-profile.version").read_text(
+                    encoding="utf-8"
+                ),
+                "3\n",
+            )
+
+    def test_update_handover_profile_rejects_symlinked_rules(self) -> None:
+        with TemporaryDirectory() as temp:
+            codex_home = Path(temp) / "codex-home"
+            seed_codex_home(ROOT / "profiles/codex", codex_home)
+            rules_file = codex_home / "rules/default.rules"
+            rules_file.unlink()
+            outside = Path(temp) / "outside.rules"
+            outside.write_text("outside\n", encoding="utf-8")
+            rules_file.symlink_to(outside)
+
+            with self.assertRaisesRegex(ValueError, "must not be a symlink"):
+                update_codex_handover_profile(ROOT / "profiles/codex", codex_home)
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")

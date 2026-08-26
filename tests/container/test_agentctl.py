@@ -17,6 +17,7 @@ from agent_container.podman import BrokerRuntimeMount
 from agent_container.project_image import ProjectImageConfig
 from agent_container.project_image import project_image_key
 from agent_container.project_image import project_image_name
+from agent_container.profile import seed_codex_home
 from agent_container.state import ProjectRecord
 from agent_container.state import Repository
 
@@ -729,6 +730,38 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
 
 
 class AgentCtlProjectTest(unittest.TestCase):
+    def test_project_update_profile_preserves_custom_rules_without_runner(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            project_dir = root / "projects/agent-container"
+            codex_home = project_dir / "codex-home"
+            for directory in (root, root / "projects", project_dir):
+                directory.mkdir(exist_ok=True, mode=0o700)
+                directory.chmod(0o700)
+            seed_codex_home(Path(__file__).resolve().parents[2] / "profiles/codex", codex_home)
+            codex_home.chmod(0o700)
+            rules_file = codex_home / "rules/default.rules"
+            rules_file.write_text("custom-rule\n", encoding="utf-8")
+            ProjectRecord(
+                Repository.parse("jj1xgo/agent-container"),
+                Path(temp) / "handovers",
+            ).write(project_dir / "project.json")
+            calls = []
+            stdout = StringIO()
+
+            result = main(
+                ["project", "update-profile", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec),
+                stdout=stdout,
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(calls, [])
+            self.assertIn("custom-rule\n", rules_file.read_text(encoding="utf-8"))
+            self.assertIn("agent-handover", rules_file.read_text(encoding="utf-8"))
+            self.assertIn("Updated managed handover profile", stdout.getvalue())
+
     def _authenticated_state(self, root: Path) -> None:
         hosts = root / "gh/hosts.yml"
         hosts.parent.mkdir(parents=True, mode=0o700)
