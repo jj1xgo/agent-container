@@ -1128,6 +1128,7 @@ def main(
                     arguments.codex_version,
                     arguments.claude_version,
                     cachebuster_reader(),
+                    __version__,
                 )
             )
             probes = (

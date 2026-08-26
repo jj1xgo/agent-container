@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from agent_container import __version__
 from agent_container.agentctl import main
 from agent_container.agentctl import parser
 from agent_container.podman import run_codex_spec
@@ -256,6 +257,7 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
         self.assertIn("CODEX_VERSION=0.149.0", calls[2].argv)
         self.assertIn("CLAUDE_VERSION=1.2.3", calls[2].argv)
         self.assertIn("AGENT_CLI_CACHEBUST=12345", calls[2].argv)
+        self.assertIn(f"AGENT_CONTAINER_VERSION={__version__}", calls[2].argv)
         self.assertEqual(
             [call.argv[-2:] for call in calls[3:]],
             [
@@ -3090,7 +3092,10 @@ class AgentCtlParserTest(unittest.TestCase):
             parser().parse_args(["--version"])
 
         self.assertEqual(raised.exception.code, 0)
-        self.assertEqual(stdout.getvalue(), "agentctl 0.2.0-dev.0\n")
+        self.assertRegex(
+            stdout.getvalue(),
+            r"^agentctl 0\.2\.0-dev\.\d+(?:\+g[0-9a-f]{7}(?:\.dirty)?)?\n$",
+        )
 
     def test_new_command_contract(self) -> None:
         build = parser().parse_args(["build"])
