@@ -9,9 +9,13 @@ from agent_container.podman import build_image_spec
 from agent_container.podman import build_project_image_spec
 from agent_container.podman import claude_setup_token_spec
 from agent_container.podman import claude_policy_status_spec
+from agent_container.podman import claude_superpowers_spec
+from agent_container.podman import claude_superpowers_marketplace_spec
 from agent_container.podman import claude_token_status_spec
 from agent_container.podman import cli_version_spec
 from agent_container.podman import clone_project_spec
+from agent_container.podman import codex_superpowers_install_spec
+from agent_container.podman import codex_superpowers_marketplace_spec
 from agent_container.podman import podman_architecture_spec
 from agent_container.podman import podman_image_id_spec
 from agent_container.podman import podman_project_images_spec
@@ -26,6 +30,59 @@ DERIVED = "localhost/agent-container-project:sotlas-frontend-0123456789abcdef"
 
 
 class PodmanCommandTest(unittest.TestCase):
+    def test_superpowers_commands_use_agent_specific_project_state(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+
+        marketplace = " ".join(
+            codex_superpowers_marketplace_spec(layout, IMAGE).argv
+        )
+        self.assertNotIn("--interactive", marketplace)
+        self.assertNotIn("--tty", marketplace)
+        self.assertIn(
+            "src=/state/projects/agent-container/codex-home,dst=/home/agent/.codex",
+            marketplace,
+        )
+        self.assertIn(
+            "codex plugin marketplace add obra/superpowers --ref main --json",
+            marketplace,
+        )
+        install = " ".join(codex_superpowers_install_spec(layout, IMAGE).argv)
+        self.assertIn("superpowers@superpowers-dev", install)
+
+        update = " ".join(
+            codex_superpowers_marketplace_spec(layout, IMAGE, update=True).argv
+        )
+        self.assertIn("marketplace upgrade superpowers-dev --json", update)
+
+        claude_marketplace = " ".join(
+            claude_superpowers_marketplace_spec(layout, IMAGE).argv
+        )
+        self.assertIn(
+            "claude plugin marketplace add anthropics/claude-plugins-official",
+            claude_marketplace,
+        )
+        claude_marketplace_update = " ".join(
+            claude_superpowers_marketplace_spec(layout, IMAGE, update=True).argv
+        )
+        self.assertIn(
+            "claude plugin marketplace update claude-plugins-official",
+            claude_marketplace_update,
+        )
+
+        claude = " ".join(claude_superpowers_spec(layout, IMAGE).argv)
+        self.assertIn(
+            "src=/state/projects/agent-container/claude-config,dst=/home/agent/.claude",
+            claude,
+        )
+        self.assertIn(
+            "claude plugin install superpowers@claude-plugins-official --scope user --yes",
+            claude,
+        )
+        claude_update = " ".join(
+            claude_superpowers_spec(layout, IMAGE, update=True).argv
+        )
+        self.assertIn("claude plugin update superpowers@claude-plugins-official", claude_update)
+
     def test_claude_policy_probe_is_hardened_and_mount_free(self) -> None:
         spec = claude_policy_status_spec(IMAGE)
 

@@ -38,6 +38,10 @@ from agent_container.podman import codex_login_status_spec
 from agent_container.podman import claude_setup_token_spec
 from agent_container.podman import claude_token_status_spec
 from agent_container.podman import claude_policy_status_spec
+from agent_container.podman import claude_superpowers_spec
+from agent_container.podman import claude_superpowers_marketplace_spec
+from agent_container.podman import codex_superpowers_install_spec
+from agent_container.podman import codex_superpowers_marketplace_spec
 from agent_container.podman import node_version_spec
 from agent_container.podman import podman_image_exists_spec
 from agent_container.podman import podman_architecture_spec
@@ -136,6 +140,13 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument("--confirm-force-push-ruleset", action="store_true")
     update_profile = project_subcommands.add_parser("update-profile")
     update_profile.add_argument("project")
+    superpowers = subcommands.add_parser("superpowers")
+    superpowers_subcommands = superpowers.add_subparsers(
+        dest="superpowers_command", required=True
+    )
+    superpowers_update = superpowers_subcommands.add_parser("update")
+    superpowers_update.add_argument("project", nargs="?")
+    superpowers_update.add_argument("--all-projects", action="store_true")
     run = subcommands.add_parser("run")
     run.add_argument("project")
     run.add_argument("--agent", choices=("codex", "claude"), default="codex")
@@ -312,6 +323,43 @@ def _seed_project_codex_home(layout: StateLayout, profile_root: Path) -> None:
     ensure_private_directory(layout.codex_home)
 
 
+def _install_superpowers(
+    layout: StateLayout,
+    image: str,
+    runner: Callable[[CommandSpec], subprocess.CompletedProcess],
+    *,
+    update: bool = False,
+) -> None:
+    ensure_private_directory(layout.codex_home)
+    ensure_private_directory(layout.claude_config, create=True)
+    codex_marketplace = layout.codex_home / ".tmp/marketplaces/superpowers-dev"
+    claude_marketplace = (
+        layout.claude_config / "plugins/marketplaces/claude-plugins-official"
+    )
+    claude_plugin = (
+        layout.claude_config / "plugins/cache/claude-plugins-official/superpowers"
+    )
+    for path in (codex_marketplace, claude_marketplace, claude_plugin):
+        if path.is_symlink():
+            raise ValueError(f"managed plugin path must not be a symlink: {path}")
+    marketplace = codex_superpowers_marketplace_spec(
+        layout, image, update=update and codex_marketplace.is_dir()
+    )
+    _require_success(runner(marketplace), marketplace)
+    codex_install = codex_superpowers_install_spec(layout, image)
+    _require_success(runner(codex_install), codex_install)
+    claude_marketplace_command = claude_superpowers_marketplace_spec(
+        layout, image, update=update and claude_marketplace.is_dir()
+    )
+    _require_success(
+        runner(claude_marketplace_command), claude_marketplace_command
+    )
+    claude_install = claude_superpowers_spec(
+        layout, image, update=update and claude_plugin.is_dir()
+    )
+    _require_success(runner(claude_install), claude_install)
+
+
 def _add_project(
     repository_value: str,
     project_value: str | None,
@@ -378,6 +426,7 @@ def _add_project(
             layout.workspace, repository, git_remote_reader(layout.workspace)
         )
     _seed_project_codex_home(layout, profile_root)
+    _install_superpowers(layout, image, runner)
     record.write(layout.project_file)
 
 
@@ -1050,6 +1099,11 @@ def main(
                 raise ValueError("GitHub broker options require --github-broker")
         elif arguments.command == "project" and arguments.project_command == "update-profile":
             validate_project_id(arguments.project)
+        elif arguments.command == "superpowers":
+            if bool(arguments.project) == bool(arguments.all_projects):
+                raise ValueError("choose one project or --all-projects")
+            if arguments.project:
+                validate_project_id(arguments.project)
         elif arguments.command == "doctor":
             validate_agent(arguments.agent, allow_all=True)
         elif arguments.command == "migrate":
@@ -1161,6 +1215,38 @@ def main(
                 f"Updated managed handover profile for project: {layout.project_id}",
                 file=stdout,
             )
+            return 0
+        if arguments.command == "superpowers" and arguments.superpowers_command == "update":
+            _podman_preflight(runner, image_required=arguments.image)
+            if arguments.all_projects:
+                root = _configured_state_root(environment)
+                ensure_private_directory(root)
+                projects_root = ensure_private_directory(root / "projects")
+                project_ids = sorted(
+                    path.name
+                    for path in projects_root.iterdir()
+                    if path.is_dir()
+                    and not path.is_symlink()
+                    and (path / "project.json").is_file()
+                    and not (path / "project.json").is_symlink()
+                )
+                if not project_ids:
+                    raise ValueError("no registered projects found")
+            else:
+                project_ids = [arguments.project]
+            for project_id in project_ids:
+                validate_project_id(project_id)
+                layout = StateLayout.from_environment(project_id, environment)
+                _ensure_exact_state_root(layout, environment)
+                ensure_private_directory(layout.project_dir)
+                ensure_private_directory(layout.codex_home)
+                ensure_private_directory(layout.claude_config)
+                _read_runtime_project(layout.project_file)
+                _install_superpowers(layout, arguments.image, runner, update=True)
+                print(
+                    f"Updated Superpowers for project: {layout.project_id}",
+                    file=stdout,
+                )
             return 0
         if arguments.command == "run":
             layout, handover_project, uid, gid = _runtime_preflight(

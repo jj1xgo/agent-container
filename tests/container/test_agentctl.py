@@ -730,6 +730,95 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
 
 
 class AgentCtlProjectTest(unittest.TestCase):
+    def test_superpowers_update_refreshes_upstream_codex_and_official_claude(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            project_dir = root / "projects/agent-container"
+            codex_home = project_dir / "codex-home"
+            claude_config = project_dir / "claude-config"
+            for directory in (
+                root,
+                root / "projects",
+                project_dir,
+                codex_home,
+                claude_config,
+            ):
+                directory.mkdir(exist_ok=True, mode=0o700)
+                directory.chmod(0o700)
+            (codex_home / ".tmp/marketplaces/superpowers-dev").mkdir(
+                parents=True, mode=0o700
+            )
+            (claude_config / "plugins/marketplaces/claude-plugins-official").mkdir(
+                parents=True, mode=0o700
+            )
+            (claude_config / "plugins/cache/claude-plugins-official/superpowers").mkdir(
+                parents=True, mode=0o700
+            )
+            ProjectRecord(
+                Repository.parse("jj1xgo/agent-container"),
+                Path(temp) / "handovers",
+            ).write(project_dir / "project.json")
+            calls = []
+            stdout = StringIO()
+
+            result = main(
+                ["superpowers", "update", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec) or successful_podman_result(spec),
+                stdout=stdout,
+            )
+
+            self.assertEqual(result, 0)
+            joined = [" ".join(call.argv) for call in calls]
+            self.assertTrue(any("marketplace upgrade superpowers-dev" in call for call in joined))
+            self.assertTrue(any("plugin add superpowers@superpowers-dev" in call for call in joined))
+            self.assertTrue(any("plugin update superpowers@claude-plugins-official" in call for call in joined))
+            self.assertIn("Updated Superpowers", stdout.getvalue())
+
+    def test_superpowers_update_all_projects_updates_each_registered_project(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            root.mkdir(mode=0o700)
+            projects = root / "projects"
+            projects.mkdir(mode=0o700)
+            for project_id in ("alpha", "beta"):
+                project_dir = projects / project_id
+                project_dir.mkdir(mode=0o700)
+                (project_dir / "codex-home").mkdir(mode=0o700)
+                (project_dir / "claude-config").mkdir(mode=0o700)
+                ProjectRecord(
+                    Repository.parse(f"owner/{project_id}"),
+                    Path(temp) / "handovers",
+                ).write(project_dir / "project.json")
+            calls = []
+            stdout = StringIO()
+
+            result = main(
+                ["superpowers", "update", "--all-projects"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec) or successful_podman_result(spec),
+                stdout=stdout,
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(stdout.getvalue().count("Updated Superpowers for project:"), 2)
+            joined = "\n".join(" ".join(call.argv) for call in calls)
+            self.assertIn("projects/alpha/codex-home", joined)
+            self.assertIn("projects/beta/codex-home", joined)
+            self.assertEqual(joined.count("marketplace add obra/superpowers"), 2)
+            self.assertEqual(
+                joined.count(
+                    "marketplace add anthropics/claude-plugins-official"
+                ),
+                2,
+            )
+            self.assertEqual(
+                joined.count(
+                    "plugin install superpowers@claude-plugins-official"
+                ),
+                2,
+            )
+
     def test_project_update_profile_preserves_custom_rules_without_runner(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp) / "state"
@@ -829,7 +918,7 @@ class AgentCtlProjectTest(unittest.TestCase):
                 )
 
             self.assertEqual(result, 0)
-            clone = " ".join(calls[-1].argv)
+            clone = " ".join(next(call.argv for call in calls if "clone" in call.argv))
             self.assertIn("git clone https://github.com/jj1xgo/agent-container.git", clone)
             self.assertIn("dst=/run/agent-broker,ro=true", clone)
             self.assertNotIn("gh auth git-credential", clone)
@@ -900,10 +989,14 @@ class AgentCtlProjectTest(unittest.TestCase):
             record = ProjectRecord.read(root / "projects/agent-container/project.json")
             self.assertEqual(record.repository.slug, "jj1xgo/agent-container")
             self.assertTrue((root / "projects/agent-container/codex-home/config.toml").is_file())
-            self.assertFalse((root / "projects/agent-container/claude-config").exists())
-            self.assertEqual(len(calls), 4)
+            self.assertTrue((root / "projects/agent-container/claude-config").is_dir())
+            self.assertEqual(len(calls), 8)
+            joined_calls = [" ".join(call.argv) for call in calls]
+            self.assertTrue(any("obra/superpowers --ref main" in call for call in joined_calls))
+            self.assertTrue(any("superpowers@superpowers-dev" in call for call in joined_calls))
+            self.assertTrue(any("superpowers@claude-plugins-official" in call for call in joined_calls))
             for forbidden in ("checkout", "reset", "clean", "fetch"):
-                self.assertNotIn(forbidden, calls[-1].argv)
+                self.assertFalse(any(forbidden in call.argv for call in calls))
 
     def test_project_add_missing_image_never_starts_clone_or_creates_project_state(self) -> None:
         with TemporaryDirectory() as temp:
@@ -1116,7 +1209,7 @@ class AgentCtlProjectTest(unittest.TestCase):
             self.assertEqual(result, 0)
             for name, marker in branches.items():
                 self.assertEqual(marker.read_text(encoding="utf-8"), name)
-            self.assertEqual(len(calls), 3)
+            self.assertEqual(len(calls), 7)
 
 
 class AgentCtlRunDoctorTest(unittest.TestCase):

@@ -169,6 +169,19 @@ bin/agentctl project add OWNER/ANOTHER_REPOSITORY \
 
 projectはagent-container専用state内へcloneされます。ホスト上の既存開発workspaceをmountしたり上書きしたりしません。
 
+## Superpowers
+
+新規projectには[Superpowers](https://github.com/obra/superpowers)をCodexとClaude Codeの両方へ自動導入します。Codexは遅延する可能性がある複製marketplaceではなく`obra/superpowers`本家の`main`を直接marketplace sourceとして登録し、install時点のsnapshotをproject別stateへ保存します。Claude Codeは公式plugin marketplaceの`superpowers@claude-plugins-official`を利用します。通常の`run`は保存済みsnapshotを使い、起動のたびに外部sourceを更新しません。
+
+本家と公式pluginの最新版へ明示的に更新するには、対象projectまたは登録済みの全projectを指定します。
+
+```bash
+bin/agentctl superpowers update PROJECT
+bin/agentctl superpowers update --all-projects
+```
+
+更新commandは外向きnetworkを使用します。更新後は対象projectで`doctor`を実行し、実際の開発作業を始める前にSuperpowersのversionとskill一覧を対話画面で確認してください。
+
 ## GitHub App brokerを使う
 
 Phase 3のbroker modeでは、GitHub App private keyとinstallation tokenをhost側だけに置き、containerへはproject別Unix socketと一時的なcapabilityだけを渡します。exact repositoryのclone/fetch、作業branch push、`agent-github pr create/view/checks`だけを提供し、merge、release、generic APIは提供しません。
@@ -210,6 +223,8 @@ project固有のDebian packageやNode.js versionは、対象repositoryの`.agent
 | `bin/agentctl auth claude` | Claude専用認証を作成・更新 |
 | `bin/agentctl project add OWNER/REPOSITORY --handover-root PATH` | projectを専用workspaceへ登録 |
 | `bin/agentctl project update-profile PROJECT` | 既存projectのmanaged handover skillと専用approval ruleを更新 |
+| `bin/agentctl superpowers update PROJECT` | 対象projectのSuperpowersを明示的に最新版へ更新 |
+| `bin/agentctl superpowers update --all-projects` | 登録済み全projectのSuperpowersを最新版へ更新 |
 | `bin/agentctl doctor PROJECT [--agent codex\|claude\|all]` | 起動前の状態をread-onlyで診断 |
 | `bin/agentctl run PROJECT [--agent codex\|claude]` | agentを起動 |
 | `bin/agentctl project add ... --github-broker --confirm-force-push-ruleset` | GitHub App broker modeでprojectを登録 |
