@@ -7,6 +7,7 @@ import unittest
 
 from agent_container.git_remote_helper import run_remote_helper
 from agent_container.github_broker import BrokerSession
+from agent_container.github_broker_error import BrokerStageError
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_runtime import UploadPackBrokerRuntime
 from agent_container.github_broker_transport import BrokerUploadPackClient
@@ -29,6 +30,18 @@ class FakeUploadPackTransport:
     def rpc(self, request: bytes):  # type: ignore[no-untyped-def]
         self.requests.append(request)
         return (b"0008NAK\n", b"0002")
+
+
+class FailFirstUploadPackTransport(FakeUploadPackTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.discovery_calls = 0
+
+    def discover(self) -> bytes:
+        self.discovery_calls += 1
+        if self.discovery_calls == 1:
+            raise BrokerStageError("upload-discovery")
+        return super().discover()
 
 
 def pkt(payload: bytes) -> bytes:
@@ -73,6 +86,58 @@ class FakePullRequestTransport:
     "set AGENT_CONTAINER_RUN_SOCKET_INTEGRATION=1 for Unix socket integration",
 )
 class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
+    def test_known_connection_failure_does_not_stop_runtime(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ab-") as temporary:
+            state = Path(temporary) / "state"
+            state.mkdir(mode=0o700)
+            policy = BrokerPolicy.create(
+                project_id="agent-container",
+                repository="jj1xgo/agent-container",
+                default_branch="main",
+                protected_branches=("main",),
+            )
+            session = BrokerSession.create(state, policy)
+            upload = FailFirstUploadPackTransport()
+            runtime = UploadPackBrokerRuntime(  # type: ignore[arg-type]
+                session,
+                upload,
+                FakeReceivePackTransport(),
+                FakePullRequestTransport(),
+            )
+
+            with runtime:
+                first = BrokerUploadPackClient(
+                    session.socket_path,
+                    session.capability_path,
+                    "agent-container",
+                    "jj1xgo/agent-container",
+                )
+                try:
+                    with self.assertRaises(RuntimeError):
+                        first.discover()
+                finally:
+                    first.close()
+
+                second = BrokerUploadPackClient(
+                    session.socket_path,
+                    session.capability_path,
+                    "agent-container",
+                    "jj1xgo/agent-container",
+                )
+                try:
+                    self.assertEqual(second.discover(), b"000eversion 2\n0000")
+                finally:
+                    second.close()
+
+            self.assertEqual(upload.discovery_calls, 2)
+            records = [
+                json.loads(line)
+                for line in session.audit_file.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(records[0]["status"], "error")
+            self.assertEqual(records[0]["stage"], "upload-discovery")
+            self.assertEqual(records[1]["status"], "ok")
+
     def test_remote_helper_crosses_real_socket_and_cleans_runtime(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ab-") as temporary:
             state = Path(temporary) / "state"
@@ -138,7 +203,7 @@ class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
                         push_client,
                         BytesIO(
                             b"capabilities\n"
-                            b"stateless-connect git-receive-pack\n"
+                            b"connect git-receive-pack\n"
                             + push
                         ),
                         push_stdout,
@@ -162,7 +227,7 @@ class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
             self.assertEqual(receive.requests, [push])
             self.assertEqual(
                 stdout.getvalue(),
-                b"stateless-connect\n\n"
+                b"connect\nstateless-connect\n\n"
                 b"\n"
                 b"000eversion 2\n0000"
                 b"0008NAK\n0002"
@@ -170,7 +235,7 @@ class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
             )
             self.assertEqual(
                 push_stdout.getvalue(),
-                b"stateless-connect\n\n\n"
+                b"connect\nstateless-connect\n\n\n"
                 + receive.advertisement
                 + b"000eunpack ok\n0000",
             )

@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 from agent_container.github_broker import BrokerSession
+from agent_container.github_broker_error import BrokerStageError
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_protocol import BrokerRequest
 from agent_container.github_broker_protocol import BrokerResponse
@@ -44,6 +45,32 @@ class Duplex:
         self.closed = True
 
 
+class FailingWriteDuplex(Duplex):
+    def __init__(self, incoming: bytes, successful_writes: int) -> None:
+        super().__init__(incoming)
+        self.successful_writes = successful_writes
+        self.write_calls = 0
+
+    def write(self, body: bytes) -> int:
+        if self.write_calls >= self.successful_writes:
+            raise OSError("secret-stream-marker")
+        self.write_calls += 1
+        return super().write(body)
+
+
+class FailingReadDuplex(Duplex):
+    def __init__(self, incoming: bytes, successful_reads: int) -> None:
+        super().__init__(incoming)
+        self.successful_reads = successful_reads
+        self.read_calls = 0
+
+    def read(self, size: int = -1) -> bytes:
+        if self.read_calls >= self.successful_reads:
+            raise OSError("secret-read-marker")
+        self.read_calls += 1
+        return super().read(size)
+
+
 class FakeSocket:
     def __init__(self, stream: Duplex) -> None:
         self.stream = stream
@@ -76,6 +103,20 @@ class FakeGitHubTransport:
         return (b"0008NAK\n", b"0002")
 
 
+class FailingGitHubTransport(FakeGitHubTransport):
+    def __init__(self, stage: str) -> None:
+        super().__init__()
+        self.stage = stage
+
+    def discover(self) -> bytes:
+        if self.stage == "upload-discovery":
+            raise BrokerStageError(self.stage)
+        return super().discover()
+
+    def rpc(self, request: bytes):  # type: ignore[no-untyped-def]
+        raise BrokerStageError(self.stage)
+
+
 class FakeReceivePackTransport:
     def __init__(self, discovery: bytes) -> None:
         self.discovery = discovery
@@ -87,6 +128,20 @@ class FakeReceivePackTransport:
     def rpc(self, request: bytes):  # type: ignore[no-untyped-def]
         self.requests.append(request)
         return (b"000eunpack ok\n", b"0000")
+
+
+class FailingReceivePackTransport(FakeReceivePackTransport):
+    def __init__(self, stage: str) -> None:
+        super().__init__(receive_advertisement())
+        self.stage = stage
+
+    def discover(self) -> bytes:
+        if self.stage == "receive-discovery":
+            raise BrokerStageError(self.stage)
+        return super().discover()
+
+    def rpc(self, request: bytes):  # type: ignore[no-untyped-def]
+        raise BrokerStageError(self.stage)
 
 
 class FakePullRequestTransport:
@@ -104,6 +159,16 @@ class FakePullRequestTransport:
     def checks(self, number):  # type: ignore[no-untyped-def]
         self.calls.append(("checks", number))
         return {"number": number, "checks": []}
+
+
+class FailingPullRequestTransport(FakePullRequestTransport):
+    def view(self, number):  # type: ignore[no-untyped-def]
+        raise BrokerStageError("pr-request")
+
+
+class BuggyPullRequestTransport(FakePullRequestTransport):
+    def view(self, number):  # type: ignore[no-untyped-def]
+        raise TypeError("programming-error-marker")
 
 
 def pkt(payload: bytes) -> bytes:
@@ -296,6 +361,42 @@ class BrokerUploadPackServerTest(unittest.TestCase):
         self.assertNotIn(marker.encode(), connection.outgoing.getvalue())
         self.assertIn(b'"status":"denied"', connection.outgoing.getvalue())
 
+    def test_audits_upload_stage_failures_without_stopping_handler(self) -> None:
+        cases = (
+            (
+                "upload-discovery",
+                Duplex(self.request(sequence=20)),
+            ),
+            (
+                "upload-rpc",
+                Duplex(
+                    self.request(sequence=21)
+                    + chunks(b"0009done\n0000")
+                ),
+            ),
+        )
+        for stage, connection in cases:
+            with self.subTest(stage=stage):
+                result = handle_upload_pack_connection(
+                    self.session,
+                    connection,
+                    FailingGitHubTransport(stage),
+                )
+                self.assertEqual(result, 1)
+                self.assertNotIn(b"secret", connection.outgoing.getvalue())
+
+        records = [
+            json.loads(line)
+            for line in self.session.audit_file.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(
+            [(record["status"], record["stage"]) for record in records],
+            [
+                ("error", "upload-discovery"),
+                ("error", "upload-rpc"),
+            ],
+        )
+
     def test_receive_pack_gates_then_forwards_work_branch(self) -> None:
         connection = Duplex(
             self.request(operation="git-receive-pack") + chunks(receive_request())
@@ -319,6 +420,102 @@ class BrokerUploadPackServerTest(unittest.TestCase):
             handle_receive_pack_connection(self.session, connection, transport), 1
         )
         self.assertEqual(transport.requests, [])
+
+    def test_audits_receive_stage_failures(self) -> None:
+        cases = (
+            (
+                "receive-discovery",
+                Duplex(self.request(sequence=30, operation="git-receive-pack")),
+            ),
+            (
+                "receive-rpc",
+                Duplex(
+                    self.request(sequence=31, operation="git-receive-pack")
+                    + chunks(receive_request())
+                ),
+            ),
+        )
+        for stage, connection in cases:
+            with self.subTest(stage=stage):
+                result = handle_receive_pack_connection(
+                    self.session,
+                    connection,
+                    FailingReceivePackTransport(stage),
+                )
+                self.assertEqual(result, 1)
+
+        records = [
+            json.loads(line)
+            for line in self.session.audit_file.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(
+            [(record["status"], record["stage"]) for record in records],
+            [
+                ("error", "receive-discovery"),
+                ("error", "receive-rpc"),
+            ],
+        )
+
+    def test_audits_authorized_stream_failure(self) -> None:
+        connection = Duplex(
+            self.request(sequence=32)
+            + b"\x00\x00\x00\x01"
+        )
+
+        result = handle_upload_pack_connection(
+            self.session,
+            connection,
+            FakeGitHubTransport(),
+        )
+
+        self.assertEqual(result, 1)
+        record = json.loads(
+            self.session.audit_file.read_text(encoding="utf-8").splitlines()[-1]
+        )
+        self.assertEqual(record["status"], "error")
+        self.assertEqual(record["stage"], "response-stream")
+
+    def test_audits_authorized_write_failure_without_stopping_handler(self) -> None:
+        connection = FailingWriteDuplex(
+            self.request(sequence=33),
+            successful_writes=1,
+        )
+
+        result = handle_upload_pack_connection(
+            self.session,
+            connection,
+            FakeGitHubTransport(),
+        )
+
+        self.assertEqual(result, 1)
+        record = json.loads(
+            self.session.audit_file.read_text(encoding="utf-8").splitlines()[-1]
+        )
+        self.assertEqual(record["status"], "error")
+        self.assertEqual(record["stage"], "response-stream")
+        self.assertNotIn(
+            "secret-stream-marker",
+            self.session.audit_file.read_text(encoding="utf-8"),
+        )
+
+    def test_audits_authorized_read_failure_without_stopping_handler(self) -> None:
+        connection = FailingReadDuplex(
+            self.request(sequence=34),
+            successful_reads=2,
+        )
+
+        result = handle_upload_pack_connection(
+            self.session,
+            connection,
+            FakeGitHubTransport(),
+        )
+
+        self.assertEqual(result, 1)
+        audit = self.session.audit_file.read_text(encoding="utf-8")
+        record = json.loads(audit.splitlines()[-1])
+        self.assertEqual(record["status"], "error")
+        self.assertEqual(record["stage"], "response-stream")
+        self.assertNotIn("secret-read-marker", audit)
 
     def test_pull_request_operations_return_bounded_json_and_audit(self) -> None:
         transport = FakePullRequestTransport()
@@ -348,6 +545,44 @@ class BrokerUploadPackServerTest(unittest.TestCase):
         self.assertEqual(transport.calls, [])
         self.assertIn(b'"status":"denied"', connection.outgoing.getvalue())
         self.assertNotIn(marker.encode(), connection.outgoing.getvalue())
+
+    def test_audits_pull_request_stage_failure(self) -> None:
+        connection = Duplex(
+            self.request(
+                sequence=40,
+                operation="pr-view",
+                payload={"number": 12},
+            )
+        )
+
+        result = handle_pull_request_connection(
+            self.session,
+            connection,
+            FailingPullRequestTransport(),
+        )
+
+        self.assertEqual(result, 1)
+        record = json.loads(
+            self.session.audit_file.read_text(encoding="utf-8").splitlines()[-1]
+        )
+        self.assertEqual(record["status"], "error")
+        self.assertEqual(record["stage"], "pr-request")
+
+    def test_pull_request_programming_error_surfaces(self) -> None:
+        connection = Duplex(
+            self.request(
+                sequence=41,
+                operation="pr-view",
+                payload={"number": 12},
+            )
+        )
+
+        with self.assertRaisesRegex(TypeError, "programming-error-marker"):
+            handle_pull_request_connection(
+                self.session,
+                connection,
+                BuggyPullRequestTransport(),
+            )
 
 
 class BrokerRuntimePathTest(unittest.TestCase):

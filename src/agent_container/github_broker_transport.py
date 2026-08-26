@@ -13,6 +13,7 @@ from agent_container.git_remote_helper import MAX_RECEIVE_PACK_REQUEST_BYTES
 from agent_container.git_protocol import gate_receive_pack_commands
 from agent_container.git_protocol import parse_receive_pack_advertisement
 from agent_container.github_broker import BrokerSession
+from agent_container.github_broker_error import BrokerStageError
 from agent_container.github_broker_protocol import BrokerRequest
 from agent_container.github_broker_protocol import BrokerResponse
 from agent_container.github_broker_protocol import MAX_STREAM_CHUNK_BYTES
@@ -35,6 +36,17 @@ from agent_container.github_pr import MAX_PR_RESPONSE_BYTES
 
 _CAPABILITY = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _PR_OPERATIONS = frozenset({"pr-create", "pr-view", "pr-checks"})
+
+
+def _write_response(connection: BinaryIO, status: str) -> bool:
+    try:
+        connection.write(
+            encode_response_frame(BrokerResponse(PROTOCOL_VERSION, status))
+        )
+        connection.flush()
+    except (ValueError, OSError):
+        return False
+    return True
 
 
 def _validate_exact_path(path: Path) -> Path:
@@ -239,13 +251,36 @@ def handle_upload_pack_connection(
         }:
             raise ValueError("broker upload-pack request is not allowed")
     except (ValueError, OSError):
-        connection.write(encode_response_frame(BrokerResponse(PROTOCOL_VERSION, "denied")))
-        connection.flush()
+        _write_response(connection, "denied")
         return 1
 
-    connection.write(encode_response_frame(BrokerResponse(PROTOCOL_VERSION, "ok")))
-    discovery = transport.discover()
-    transferred = write_chunk_stream(connection, (discovery,))
+    try:
+        discovery = transport.discover()
+    except BrokerStageError as error:
+        session.audit(
+            operation="git-upload-pack",
+            status="error",
+            stage=error.stage,
+        )
+        _write_response(connection, "error")
+        return 1
+
+    if not _write_response(connection, "ok"):
+        session.audit(
+            operation="git-upload-pack",
+            status="error",
+            stage="response-stream",
+        )
+        return 1
+    try:
+        transferred = write_chunk_stream(connection, (discovery,))
+    except (ValueError, OSError):
+        session.audit(
+            operation="git-upload-pack",
+            status="error",
+            stage="response-stream",
+        )
+        return 1
     while True:
         try:
             chunks = iter_chunk_stream(
@@ -254,8 +289,12 @@ def handle_upload_pack_connection(
                 allow_initial_eof=True,
             )
             request_body = b"".join(chunks)
-        except ValueError:
-            session.audit(operation="git-upload-pack", status="denied")
+        except (ValueError, OSError):
+            session.audit(
+                operation="git-upload-pack",
+                status="error",
+                stage="response-stream",
+            )
             return 1
         if not request_body:
             session.audit(
@@ -264,7 +303,22 @@ def handle_upload_pack_connection(
                 bytes_transferred=transferred,
             )
             return 0
-        transferred += write_chunk_stream(connection, transport.rpc(request_body))
+        try:
+            transferred += write_chunk_stream(connection, transport.rpc(request_body))
+        except BrokerStageError as error:
+            session.audit(
+                operation="git-upload-pack",
+                status="error",
+                stage=error.stage,
+            )
+            return 1
+        except (ValueError, OSError):
+            session.audit(
+                operation="git-upload-pack",
+                status="error",
+                stage="response-stream",
+            )
+            return 1
 
 
 def handle_receive_pack_connection(
@@ -280,27 +334,81 @@ def handle_receive_pack_connection(
             "repository": session.policy.repository.slug
         }:
             raise ValueError("broker receive-pack request is not allowed")
-        discovery = transport.discover()
-        advertisement = parse_receive_pack_advertisement(discovery)
-    except (ValueError, RuntimeError, OSError):
-        connection.write(encode_response_frame(BrokerResponse(PROTOCOL_VERSION, "denied")))
-        connection.flush()
+    except (ValueError, OSError):
+        _write_response(connection, "denied")
         return 1
 
-    connection.write(encode_response_frame(BrokerResponse(PROTOCOL_VERSION, "ok")))
-    write_chunk_stream(connection, (discovery,))
+    try:
+        discovery = transport.discover()
+        advertisement = parse_receive_pack_advertisement(discovery)
+    except BrokerStageError as error:
+        session.audit(
+            operation="git-receive-pack",
+            status="error",
+            stage=error.stage,
+        )
+        _write_response(connection, "error")
+        return 1
+    except ValueError:
+        session.audit(
+            operation="git-receive-pack",
+            status="error",
+            stage="receive-discovery",
+        )
+        _write_response(connection, "error")
+        return 1
+
+    if not _write_response(connection, "ok"):
+        session.audit(
+            operation="git-receive-pack",
+            status="error",
+            stage="response-stream",
+        )
+        return 1
+    try:
+        write_chunk_stream(connection, (discovery,))
+    except (ValueError, OSError):
+        session.audit(
+            operation="git-receive-pack",
+            status="error",
+            stage="response-stream",
+        )
+        return 1
     try:
         request_body = b"".join(
             iter_chunk_stream(
                 connection, maximum_total=MAX_RECEIVE_PACK_REQUEST_BYTES
             )
         )
+    except (ValueError, OSError):
+        session.audit(
+            operation="git-receive-pack",
+            status="error",
+            stage="response-stream",
+        )
+        return 1
+    try:
         gated = gate_receive_pack_commands(
             request_body, advertisement, session.policy
         )
-        transferred = write_chunk_stream(connection, transport.rpc(request_body))
-    except (ValueError, RuntimeError, OSError):
+    except ValueError:
         session.audit(operation="git-receive-pack", status="denied")
+        return 1
+    try:
+        transferred = write_chunk_stream(connection, transport.rpc(request_body))
+    except BrokerStageError as error:
+        session.audit(
+            operation="git-receive-pack",
+            status="error",
+            stage=error.stage,
+        )
+        return 1
+    except (ValueError, OSError):
+        session.audit(
+            operation="git-receive-pack",
+            status="error",
+            stage="response-stream",
+        )
         return 1
     for update in gated.updates:
         session.audit(
@@ -312,10 +420,9 @@ def handle_receive_pack_connection(
     return 0
 
 
-def _pr_result(
+def _validate_pr_payload(
     operation: str,
     payload: dict[str, object],
-    transport: GitHubPullRequestTransport,
 ) -> dict[str, object]:
     if operation == "pr-create" and set(payload) == {
         "base",
@@ -328,16 +435,12 @@ def _pr_result(
         )
         if not all(isinstance(value, str) for value in (base, head, title, body)):
             raise ValueError("broker pull request payload is invalid")
-        return transport.create(base=base, head=head, title=title, body=body)
+        return {"base": base, "head": head, "title": title, "body": body}
     if operation in {"pr-view", "pr-checks"} and set(payload) == {"number"}:
         number = payload["number"]
         if isinstance(number, bool) or not isinstance(number, int):
             raise ValueError("broker pull request payload is invalid")
-        return (
-            transport.view(number)
-            if operation == "pr-view"
-            else transport.checks(number)
-        )
+        return {"number": number}
     raise ValueError("broker pull request payload is invalid")
 
 
@@ -355,29 +458,45 @@ def handle_pull_request_connection(
         operation = authorized["operation"]
         if operation not in _PR_OPERATIONS:
             raise ValueError("broker pull request operation is not allowed")
-        result = _pr_result(operation, authorized["payload"], transport)
-        body = json.dumps(
-            result,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        if not body or len(body) > MAX_PR_RESPONSE_BYTES:
-            raise ValueError("broker pull request response is invalid")
-    except (TypeError, ValueError, RuntimeError, OSError):
-        connection.write(
-            encode_response_frame(BrokerResponse(PROTOCOL_VERSION, "denied"))
-        )
-        connection.flush()
+        payload = _validate_pr_payload(operation, authorized["payload"])
+    except (ValueError, OSError):
+        _write_response(connection, "denied")
         try:
             session.audit(operation=operation, status="denied")
         except ValueError:
             pass
         return 1
 
-    connection.write(encode_response_frame(BrokerResponse(PROTOCOL_VERSION, "ok")))
-    transferred = write_chunk_stream(connection, (body,))
+    try:
+        if operation == "pr-create":
+            result = transport.create(**payload)  # type: ignore[arg-type]
+        elif operation == "pr-view":
+            result = transport.view(payload["number"])  # type: ignore[arg-type]
+        else:
+            result = transport.checks(payload["number"])  # type: ignore[arg-type]
+    except BrokerStageError as error:
+        _write_response(connection, "error")
+        session.audit(operation=operation, status="error", stage=error.stage)
+        return 1
+
+    body = json.dumps(
+        result,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if not body or len(body) > MAX_PR_RESPONSE_BYTES:
+        raise ValueError("broker pull request response is invalid")
+
+    if not _write_response(connection, "ok"):
+        session.audit(operation=operation, status="error", stage="response-stream")
+        return 1
+    try:
+        transferred = write_chunk_stream(connection, (body,))
+    except (ValueError, OSError):
+        session.audit(operation=operation, status="error", stage="response-stream")
+        return 1
     number = result.get("number")
     session.audit(
         operation=operation,
@@ -402,8 +521,7 @@ def handle_broker_connection(
     try:
         request = read_request_frame(connection)
     except (ValueError, OSError):
-        connection.write(encode_response_frame(BrokerResponse(PROTOCOL_VERSION, "denied")))
-        connection.flush()
+        _write_response(connection, "denied")
         return 1
     if request.operation == "git-upload-pack":
         return handle_upload_pack_connection(
@@ -417,6 +535,5 @@ def handle_broker_connection(
         return handle_pull_request_connection(
             session, connection, pr_transport, request
         )
-    connection.write(encode_response_frame(BrokerResponse(PROTOCOL_VERSION, "denied")))
-    connection.flush()
+    _write_response(connection, "denied")
     return 1

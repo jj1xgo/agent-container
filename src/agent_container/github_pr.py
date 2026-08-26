@@ -4,8 +4,10 @@ from typing import Callable, Mapping
 import urllib.error
 import urllib.request
 
-from agent_container.github_app import InstallationTokenProvider
 from agent_container.github_app import HttpResponse
+from agent_container.github_app import InstallationToken
+from agent_container.github_app import InstallationTokenProvider
+from agent_container.github_broker_error import BrokerStageError
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_policy import validate_pr_body
 from agent_container.github_broker_policy import validate_pr_number
@@ -15,6 +17,36 @@ from agent_container.github_broker_policy import validate_pr_title
 GITHUB_API = "https://api.github.com"
 MAX_PR_RESPONSE_BYTES = 2 * 1024 * 1024
 RestTransport = Callable[[str, str, Mapping[str, str], bytes | None], HttpResponse]
+
+
+def _get_installation_token(
+    tokens: InstallationTokenProvider,
+) -> InstallationToken:
+    try:
+        return tokens.get()
+    except (BrokerStageError, ValueError, RuntimeError, OSError):
+        raise BrokerStageError("token") from None
+
+
+def _invalidate_installation_token(tokens: InstallationTokenProvider) -> None:
+    try:
+        tokens.invalidate()
+    except (BrokerStageError, ValueError, RuntimeError, OSError):
+        raise BrokerStageError("token") from None
+
+
+def _validated_json(response: HttpResponse, expected: int) -> dict[str, object]:
+    try:
+        return _json_object(response, expected)
+    except (ValueError, RuntimeError):
+        raise BrokerStageError("pr-request") from None
+
+
+def _validated_summary(payload: dict[str, object]) -> dict[str, object]:
+    try:
+        return GitHubPullRequestTransport._summary(payload)
+    except ValueError:
+        raise BrokerStageError("pr-request") from None
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -65,22 +97,25 @@ class GitHubPullRequestTransport:
 
     def _request(self, method: str, path: str, body: bytes | None = None) -> HttpResponse:
         for attempt in range(2):
-            token = self.tokens.get()
-            response = self.transport(
-                method,
-                f"{GITHUB_API}/repos/{self.policy.repository.slug}{path}",
-                {
-                    "Accept": "application/vnd.github+json",
-                    "Authorization": f"Bearer {token.token}",
-                    "Content-Type": "application/json",
-                    "X-GitHub-Api-Version": "2026-03-10",
-                    "User-Agent": "agent-container-github-broker",
-                },
-                body,
-            )
+            token = _get_installation_token(self.tokens)
+            try:
+                response = self.transport(
+                    method,
+                    f"{GITHUB_API}/repos/{self.policy.repository.slug}{path}",
+                    {
+                        "Accept": "application/vnd.github+json",
+                        "Authorization": f"Bearer {token.token}",
+                        "Content-Type": "application/json",
+                        "X-GitHub-Api-Version": "2026-03-10",
+                        "User-Agent": "agent-container-github-broker",
+                    },
+                    body,
+                )
+            except (RuntimeError, OSError):
+                raise BrokerStageError("pr-request") from None
             if response.status != 401 or attempt == 1:
                 return response
-            self.tokens.invalidate()
+            _invalidate_installation_token(self.tokens)
         raise AssertionError("unreachable")
 
     @staticmethod
@@ -113,22 +148,34 @@ class GitHubPullRequestTransport:
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
-        return self._summary(_json_object(self._request("POST", "/pulls", request), 201))
+        return _validated_summary(
+            _validated_json(self._request("POST", "/pulls", request), 201)
+        )
 
     def view(self, number: int) -> dict[str, object]:
         number = validate_pr_number(number)
-        return self._summary(_json_object(self._request("GET", f"/pulls/{number}"), 200))
+        return _validated_summary(
+            _validated_json(self._request("GET", f"/pulls/{number}"), 200)
+        )
 
     def checks(self, number: int) -> dict[str, object]:
         number = validate_pr_number(number)
-        pull = _json_object(self._request("GET", f"/pulls/{number}"), 200)
+        try:
+            return self._checks(number)
+        except BrokerStageError:
+            raise
+        except ValueError:
+            raise BrokerStageError("pr-request") from None
+
+    def _checks(self, number: int) -> dict[str, object]:
+        pull = _validated_json(self._request("GET", f"/pulls/{number}"), 200)
         head = pull.get("head")
         sha = head.get("sha") if isinstance(head, dict) else None
         if not isinstance(sha, str) or len(sha) not in {40, 64} or any(
             character not in "0123456789abcdef" for character in sha
         ):
             raise ValueError("GitHub pull request response is invalid")
-        checks = _json_object(
+        checks = _validated_json(
             self._request("GET", f"/commits/{sha}/check-runs"), 200
         )
         runs = checks.get("check_runs")

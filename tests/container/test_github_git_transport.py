@@ -3,6 +3,7 @@ from io import BytesIO
 import unittest
 
 from agent_container.github_app import InstallationToken
+from agent_container.github_broker_error import BrokerStageError
 from agent_container.github_git_transport import GitHubUploadPackTransport
 from agent_container.github_git_transport import GitHubReceivePackTransport
 from agent_container.state import Repository
@@ -26,6 +27,19 @@ class FakeTokens:
         self.invalidations += 1
 
 
+class FailingTokens:
+    def get(self) -> InstallationToken:
+        raise RuntimeError("secret-token-marker")
+
+    def invalidate(self) -> None:
+        raise AssertionError("token invalidation must not run")
+
+
+class WrongStageTokens(FailingTokens):
+    def get(self) -> InstallationToken:
+        raise BrokerStageError("upload-rpc")
+
+
 class FakeResponse:
     def __init__(self, status: int, content_type: str, body: bytes) -> None:
         self.status = status
@@ -38,6 +52,16 @@ class FakeResponse:
 
     def close(self) -> None:
         self.closed = True
+
+
+class FailingCloseResponse(FakeResponse):
+    def close(self) -> None:
+        raise OSError("secret-close-marker")
+
+
+class FailingInvalidationTokens(FakeTokens):
+    def invalidate(self) -> None:
+        raise RuntimeError("secret-invalidation-marker")
 
 
 class GitHubUploadPackTransportTest(unittest.TestCase):
@@ -59,7 +83,9 @@ class GitHubUploadPackTransportTest(unittest.TestCase):
     def test_discovers_exact_repository_with_protocol_v2(self) -> None:
         advertisement = b"000eversion 2\n0000"
         response = FakeResponse(
-            200, "application/x-git-upload-pack-advertisement", advertisement
+            200,
+            "application/x-git-upload-pack-advertisement",
+            b"001e# service=git-upload-pack\n0000" + advertisement,
         )
         self.responses.append(response)
 
@@ -76,18 +102,34 @@ class GitHubUploadPackTransportTest(unittest.TestCase):
         self.assertIsNone(body)
         self.assertTrue(response.closed)
 
+    def test_classifies_token_failure_without_secret(self) -> None:
+        self.transport.tokens = FailingTokens()  # type: ignore[assignment]
+
+        with self.assertRaises(BrokerStageError) as raised:
+            self.transport.discover()
+
+        self.assertEqual(raised.exception.stage, "token")
+        self.assertNotIn("secret-token-marker", str(raised.exception))
+        self.assertNotIn("secret-token-marker", repr(raised.exception))
+
+        self.transport.tokens = WrongStageTokens()  # type: ignore[assignment]
+        with self.assertRaises(BrokerStageError) as wrong_stage:
+            self.transport.discover()
+        self.assertEqual(wrong_stage.exception.stage, "token")
+
     def test_streams_upload_pack_response_in_chunks(self) -> None:
         request = b"0009done\n0000"
         response = FakeResponse(
             200,
             "application/x-git-upload-pack-result",
-            b"x" * 69_996 + b"0002",
+            b"x" * 69_996 + b"0000",
         )
         self.responses.append(response)
 
         chunks = list(self.transport.rpc(request))
 
-        self.assertEqual([len(chunk) for chunk in chunks], [65_536, 4_464])
+        self.assertEqual(b"".join(chunks), b"x" * 69_996 + b"0002")
+        self.assertNotIn(b"00000002", b"".join(chunks)[-8:])
         method, url, headers, body = self.calls[0]
         self.assertEqual(method, "POST")
         self.assertEqual(
@@ -100,12 +142,38 @@ class GitHubUploadPackTransportTest(unittest.TestCase):
         self.assertEqual(body, request)
         self.assertTrue(response.closed)
 
+    def test_classifies_discovery_and_rpc_failures_without_secret(self) -> None:
+        cases = (
+            (
+                "upload-discovery",
+                lambda: self.transport.discover(),
+                FakeResponse(200, "text/plain", b"secret-response-marker"),
+            ),
+            (
+                "upload-rpc",
+                lambda: list(self.transport.rpc(b"0009done\n0000")),
+                FakeResponse(
+                    200,
+                    "application/x-git-upload-pack-result",
+                    b"secret-response-marker0002",
+                ),
+            ),
+        )
+        for stage, operation, response in cases:
+            with self.subTest(stage=stage):
+                self.responses.append(response)
+                with self.assertRaises(BrokerStageError) as raised:
+                    operation()
+                self.assertEqual(raised.exception.stage, stage)
+                self.assertNotIn("secret-response-marker", str(raised.exception))
+                self.assertNotIn("secret-response-marker", repr(raised.exception))
+
     def test_retries_401_once_with_invalidated_token(self) -> None:
         first = FakeResponse(401, "application/json", b"secret-error-body")
         second = FakeResponse(
             200,
             "application/x-git-upload-pack-advertisement",
-            b"000eversion 2\n0000",
+            b"001e# service=git-upload-pack\n0000000eversion 2\n0000",
         )
         self.responses.extend((first, second))
 
@@ -118,6 +186,31 @@ class GitHubUploadPackTransportTest(unittest.TestCase):
         )
         self.assertTrue(first.closed)
 
+    def test_classifies_retry_and_response_cleanup_failures(self) -> None:
+        self.responses.append(
+            FailingCloseResponse(
+                200,
+                "application/x-git-upload-pack-advertisement",
+                b"001e# service=git-upload-pack\n0000000eversion 2\n0000",
+            )
+        )
+        with self.assertRaises(BrokerStageError) as close_error:
+            self.transport.discover()
+        self.assertEqual(close_error.exception.stage, "upload-discovery")
+        self.assertNotIn("secret-close-marker", repr(close_error.exception))
+
+        self.transport.tokens = FailingInvalidationTokens()  # type: ignore[assignment]
+        self.responses[:] = [
+            FakeResponse(401, "application/json", b"secret-response-marker")
+        ]
+        with self.assertRaises(BrokerStageError) as invalidation_error:
+            self.transport.discover()
+        self.assertEqual(invalidation_error.exception.stage, "token")
+        self.assertNotIn(
+            "secret-invalidation-marker",
+            repr(invalidation_error.exception),
+        )
+
     def test_rejects_second_401_wrong_content_type_and_empty_discovery(self) -> None:
         cases = (
             [
@@ -128,6 +221,13 @@ class GitHubUploadPackTransportTest(unittest.TestCase):
             [
                 FakeResponse(
                     200, "application/x-git-upload-pack-advertisement", b""
+                )
+            ],
+            [
+                FakeResponse(
+                    200,
+                    "application/x-git-upload-pack-advertisement",
+                    b"000eversion 2\n0000",
                 )
             ],
         )
@@ -183,6 +283,16 @@ class GitHubReceivePackTransportTest(unittest.TestCase):
         self.assertIsNone(body)
         self.assertTrue(response.closed)
 
+    def test_classifies_token_failure_without_secret(self) -> None:
+        self.transport.tokens = FailingTokens()  # type: ignore[assignment]
+
+        with self.assertRaises(BrokerStageError) as raised:
+            self.transport.discover()
+
+        self.assertEqual(raised.exception.stage, "token")
+        self.assertNotIn("secret-token-marker", str(raised.exception))
+        self.assertNotIn("secret-token-marker", repr(raised.exception))
+
     def test_posts_receive_pack_only_to_fixed_endpoint(self) -> None:
         request = b"commands-and-pack"
         response = FakeResponse(
@@ -202,6 +312,36 @@ class GitHubReceivePackTransportTest(unittest.TestCase):
         self.assertEqual(body, request)
         self.assertTrue(response.closed)
 
+    def test_classifies_discovery_and_rpc_failures_without_secret(self) -> None:
+        cases = (
+            (
+                "receive-discovery",
+                lambda: self.transport.discover(),
+                FakeResponse(
+                    200,
+                    "application/x-git-receive-pack-advertisement",
+                    b"secret-response-marker",
+                ),
+            ),
+            (
+                "receive-rpc",
+                lambda: list(self.transport.rpc(b"commands-and-pack")),
+                FakeResponse(
+                    200,
+                    "application/x-git-receive-pack-result",
+                    b"",
+                ),
+            ),
+        )
+        for stage, operation, response in cases:
+            with self.subTest(stage=stage):
+                self.responses.append(response)
+                with self.assertRaises(BrokerStageError) as raised:
+                    operation()
+                self.assertEqual(raised.exception.stage, stage)
+                self.assertNotIn("secret-response-marker", str(raised.exception))
+                self.assertNotIn("secret-response-marker", repr(raised.exception))
+
     def test_retries_401_once_and_rejects_malformed_or_empty_responses(self) -> None:
         first = FakeResponse(401, "application/json", b"secret-marker")
         second = FakeResponse(
@@ -220,12 +360,29 @@ class GitHubReceivePackTransportTest(unittest.TestCase):
                     200, "application/x-git-receive-pack-advertisement", body
                 )
             ]
-            with self.assertRaises(ValueError) as raised:
+            with self.assertRaises(BrokerStageError) as raised:
                 self.transport.discover()
+            self.assertEqual(raised.exception.stage, "receive-discovery")
             self.assertNotIn("secret-marker", str(raised.exception))
 
         self.responses[:] = [
             FakeResponse(200, "application/x-git-receive-pack-result", b"")
         ]
-        with self.assertRaises(ValueError):
+        with self.assertRaises(BrokerStageError) as raised:
             list(self.transport.rpc(b"request"))
+        self.assertEqual(raised.exception.stage, "receive-rpc")
+
+    def test_classifies_response_cleanup_failure(self) -> None:
+        self.responses.append(
+            FailingCloseResponse(
+                200,
+                "application/x-git-receive-pack-advertisement",
+                b"001f# service=git-receive-pack\n0000refs",
+            )
+        )
+
+        with self.assertRaises(BrokerStageError) as raised:
+            self.transport.discover()
+
+        self.assertEqual(raised.exception.stage, "receive-discovery")
+        self.assertNotIn("secret-close-marker", repr(raised.exception))

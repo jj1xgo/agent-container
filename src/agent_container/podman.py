@@ -93,7 +93,7 @@ def _broker_git_args(
     if broker.repository.name == "" or broker.repository.slug.count("/") != 1:
         raise ValueError("broker repository is invalid")
     broker_url = f"agent-broker://{broker.repository.slug}"
-    github_url = f"https://github.com/{broker.repository.slug}"
+    github_url = broker.repository.https_url
     return [
         "--mount",
         _mount(broker.run_dir, _BROKER_RUNTIME_PATH, True),

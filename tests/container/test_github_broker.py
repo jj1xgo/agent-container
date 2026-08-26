@@ -8,6 +8,8 @@ import unittest
 from unittest import mock
 
 from agent_container.github_broker import BrokerSession
+from agent_container.github_broker_error import BROKER_FAILURE_STAGES
+from agent_container.github_broker_error import BrokerStageError
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_protocol import BrokerRequest
 
@@ -41,12 +43,28 @@ class BrokerSessionTest(unittest.TestCase):
         }
         return BrokerRequest(**(baseline | changes))  # type: ignore[arg-type]
 
+    def test_accepts_only_fixed_failure_stages(self) -> None:
+        for stage in BROKER_FAILURE_STAGES:
+            with self.subTest(stage=stage):
+                error = BrokerStageError(stage)
+                self.assertEqual(error.stage, stage)
+                self.assertEqual(str(error), "GitHub broker operation failed")
+
+        for stage in ("", "secret-marker", 123):
+            with self.subTest(stage=stage):
+                with self.assertRaises(ValueError) as raised:
+                    BrokerStageError(stage)  # type: ignore[arg-type]
+                self.assertEqual(
+                    str(raised.exception),
+                    "GitHub broker failure stage is invalid",
+                )
+
     def test_creates_private_project_scoped_runtime(self) -> None:
         self.assertEqual(stat.S_IMODE(self.session.run_dir.stat().st_mode), 0o700)
         self.assertEqual(
             stat.S_IMODE(self.session.capability_path.stat().st_mode), 0o600
         )
-        self.assertEqual(self.session.run_dir.parent.name, "agent-container")
+        self.assertEqual(self.session.run_dir.parent.name, "1f630d4dd972")
         self.assertFalse(self.session.socket_path.exists())
         capability = self.session.capability_path.read_text(encoding="utf-8").strip()
         self.assertEqual(len(capability), 43)
@@ -139,6 +157,27 @@ class BrokerSessionTest(unittest.TestCase):
         finally:
             client.close()
 
+    @mock.patch("agent_container.github_broker.os.chmod")
+    @mock.patch("agent_container.github_broker.socket.socket")
+    def test_default_length_state_root_is_within_socket_limit(
+        self, socket_factory: mock.Mock, _: mock.Mock
+    ) -> None:
+        root_prefix = os.fsencode(f"{self.temporary.name}/")
+        padding = 38 - len(root_prefix)
+        if padding <= 0:
+            self.skipTest("temporary directory is longer than the default state root")
+        realistic_root = Path(
+            os.fsdecode(root_prefix + (b"x" * padding))
+        )
+        realistic_root.mkdir(mode=0o700)
+        session = BrokerSession.create(realistic_root, self.policy)
+        try:
+            self.assertEqual(len(os.fsencode(realistic_root)), 38)
+            listener = session.open_listener()
+            listener.bind.assert_called_once_with(str(session.socket_path))
+        finally:
+            session.close()
+
     def test_audit_contains_only_allowlisted_metadata(self) -> None:
         capability = self.session._capability
         self.session.audit(
@@ -148,12 +187,18 @@ class BrokerSessionTest(unittest.TestCase):
             bytes_transferred=123,
         )
         self.session.audit(operation="pr-view", status="denied", pr_number=12)
+        self.session.audit(
+            operation="git-upload-pack",
+            status="error",
+            stage="upload-rpc",
+        )
 
         body = self.session.audit_file.read_text(encoding="utf-8")
         records = [json.loads(line) for line in body.splitlines()]
         self.assertEqual(records[0]["ref"], "refs/heads/feat/broker")
         self.assertEqual(records[0]["bytes"], 123)
         self.assertEqual(records[1]["pr_number"], 12)
+        self.assertEqual(records[2]["stage"], "upload-rpc")
         self.assertNotIn(capability, body)
         self.assertNotIn(self.session.run_id, body)
         self.assertEqual(stat.S_IMODE(self.session.audit_file.stat().st_mode), 0o600)
@@ -165,6 +210,22 @@ class BrokerSessionTest(unittest.TestCase):
             {"operation": "git-receive-pack", "status": "ok", "ref": "refs/heads/main"},
             {"operation": "pr-view", "status": "ok", "pr_number": 0},
             {"operation": "pr-view", "status": "ok", "bytes_transferred": -1},
+            {"operation": "git-upload-pack", "status": "error"},
+            {
+                "operation": "git-upload-pack",
+                "status": "error",
+                "stage": "secret-marker",
+            },
+            {
+                "operation": "git-upload-pack",
+                "status": "ok",
+                "stage": "upload-rpc",
+            },
+            {
+                "operation": "git-upload-pack",
+                "status": "denied",
+                "stage": "upload-rpc",
+            },
         )
         for values in cases:
             with self.subTest(values=values):

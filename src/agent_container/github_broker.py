@@ -11,12 +11,14 @@ import socket
 import stat
 from typing import Any, TextIO
 
+from agent_container.github_broker_error import BROKER_FAILURE_STAGES
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_policy import validate_pr_number
 from agent_container.github_broker_protocol import BrokerRequest
 from agent_container.github_broker_protocol import PROTOCOL_VERSION
 from agent_container.github_broker_protocol import MAX_REQUEST_NONCE
 from agent_container.state import ensure_private_directory
+from agent_container.state import github_broker_project_label
 
 
 _CAPABILITY = re.compile(r"^[A-Za-z0-9_-]{43}$")
@@ -76,12 +78,13 @@ class BrokerSession:
         root = ensure_private_directory(state_root)
         broker_root = ensure_private_directory(root / "github-broker", create=True)
         audit_root = ensure_private_directory(broker_root / "audit", create=True)
-        run_root = ensure_private_directory(broker_root / "run", create=True)
+        run_root = ensure_private_directory(broker_root / "r", create=True)
+        project_label = github_broker_project_label(policy.project_id)
         project_root = ensure_private_directory(
-            run_root / policy.project_id, create=True
+            run_root / project_label, create=True
         )
         for _ in range(8):
-            run_id = secrets.token_hex(16)
+            run_id = secrets.token_hex(8)
             run_dir = project_root / run_id
             try:
                 run_dir.mkdir(mode=0o700)
@@ -163,12 +166,18 @@ class BrokerSession:
         ref: str | None = None,
         pr_number: int | None = None,
         bytes_transferred: int = 0,
+        stage: str | None = None,
     ) -> None:
         if self._closed:
             raise ValueError("broker session is closed")
         self.policy.validate_operation(operation)
         if status not in _AUDIT_STATUSES:
             raise ValueError("broker audit status is invalid")
+        if status == "error":
+            if stage not in BROKER_FAILURE_STAGES:
+                raise ValueError("broker audit stage is invalid")
+        elif stage is not None:
+            raise ValueError("broker audit stage is invalid")
         if ref is not None:
             self.policy.validate_push_ref(ref)
         if pr_number is not None:
@@ -193,6 +202,8 @@ class BrokerSession:
             record["ref"] = ref
         if pr_number is not None:
             record["pr_number"] = pr_number
+        if stage is not None:
+            record["stage"] = stage
         with _open_audit_file(self.audit_file) as stream:
             json.dump(record, stream, ensure_ascii=True, separators=(",", ":"))
             stream.write("\n")

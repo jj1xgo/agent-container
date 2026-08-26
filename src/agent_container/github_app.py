@@ -24,6 +24,7 @@ _TOKEN_PERMISSIONS = {
     "contents": "write",
     "pull_requests": "write",
     "checks": "read",
+    "metadata": "read",
 }
 
 
