@@ -85,6 +85,8 @@ bin/agentctl project add OWNER/REPOSITORY \
 
 既定のproject名はrepository名です。たとえば`jj1xgo/agent-container`なら`agent-container`になります。同名projectを区別したい場合は`--project PROJECT_NAME`を追加します。この場合、handover directoryも`$HANDOVER_ROOT/PROJECT_NAME`として先に作ってください。
 
+新規projectのCodex stateには、`gh pr view/list/checks/status`、`gh issue view/list`、`gh run view/list`、`gh repo view`だけを読み取り用の初期approval rulesとして配置します。既存projectのrulesは暗黙に追加・上書きしません。
+
 診断がPASSしたらCodexを起動できます。
 
 ```bash
