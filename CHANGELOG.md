@@ -20,7 +20,7 @@
 
 - GitHub brokerは明示opt-inで、失敗時にlegacy `gh` credentialへfallbackしません。
 - pushのnon-fast-forward拒否には、brokerのlease/ref gateに加えてGitHub側の全branch force-push禁止rulesetが必要です。
-- 実GitHub App smoke gateは未実施で、外向きnetworkは引き続きdomain allowlistされていません。
+- 実GitHub App smokeでは、credential非露出、exact repositoryのclone／fetch、別repository拒否、通常の作業branch push、PR create／view／checks、secret-free auditとcleanupを確認しました。shared repositoryへ影響するprotected branch、delete、stale lease、non-fast-forwardのnegative pushは安全上実施していません。外向きnetworkは引き続きdomain allowlistされていません。
 
 ### Changed
 
