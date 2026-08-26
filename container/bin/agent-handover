@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 3 ] || [ "$1" != "create" ] || [ "$2" != "--title" ]; then
+    echo "usage: agent-handover create --title TITLE" >&2
+    exit 2
+fi
+
+: "${AGENT_HANDOVER_ROOT:?AGENT_HANDOVER_ROOT is required}"
+: "${AGENT_PROJECT_ID:?AGENT_PROJECT_ID is required}"
+
+title=$3
+if [ -n "${CODEX_SESSION_ID:-}" ]; then
+    exec python3 -m agent_container.handover_cli create \
+        --root="$AGENT_HANDOVER_ROOT" \
+        --project="$AGENT_PROJECT_ID" \
+        --session-id="$CODEX_SESSION_ID" \
+        --title="$title"
+fi
+
+exec python3 -m agent_container.handover_cli create \
+    --root="$AGENT_HANDOVER_ROOT" \
+    --project="$AGENT_PROJECT_ID" \
+    --title="$title"

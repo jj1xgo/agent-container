@@ -27,12 +27,13 @@ class ProfileSeedTest(unittest.TestCase):
                     'prefix_rule(pattern=["gh", "run", "view"], decision="allow")\n'
                     'prefix_rule(pattern=["gh", "run", "list"], decision="allow")\n'
                     'prefix_rule(pattern=["gh", "repo", "view"], decision="allow")\n'
+                    'prefix_rule(pattern=["agent-handover", "create"], decision="allow")\n'
                 ),
             )
             self.assertTrue((codex_home / "skills/handover/SKILL.md").is_file())
             self.assertEqual(
                 (codex_home / "managed-profile.version").read_text(encoding="utf-8"),
-                "2\n",
+                "3\n",
             )
 
     def test_seed_refuses_to_overwrite_existing_rules(self) -> None:

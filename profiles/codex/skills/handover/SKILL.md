@@ -11,10 +11,10 @@ description: Use when a user asks to create a handover, 引き継ぎ, or continu
 
 1. `AGENT_HANDOVER_ROOT`と`AGENT_PROJECT_ID`が設定されていることを、生値を出力せず確認する。未設定なら保存先を推測せず、ユーザーへ伝える。`CODEX_SESSION_ID`も確認し、設定済みなら現在のsession IDとして取得する。
 2. `git status --short --branch`、直近commit、現在の計画、実行済みtestを確認する。未実行の検証を成功したものとして書かない。
-3. 次のcommandで空のhandoverを作る。`CODEX_SESSION_ID`が設定済みなら、必ず`--session-id "$CODEX_SESSION_ID"`を加える。未設定の場合だけ省略する。
+3. 次の専用commandで空のhandoverを作る。保存先、project、設定済みの場合のsession IDはwrapperが環境から固定して渡す。別の引数や`python3 -m`へ置き換えない。
 
    ```bash
-   PYTHONPATH=/opt/agent-container/src python3 -m agent_container.handover_cli create --root "$AGENT_HANDOVER_ROOT" --project "$AGENT_PROJECT_ID" --session-id "$CODEX_SESSION_ID" --title "Codex作業引き継ぎ"
+   agent-handover create --title "Codex作業引き継ぎ"
    ```
 
 4. 作成されたファイルの全sectionを、現在確認できる事実で埋める。handover内のsession ID欄に現在の`CODEX_SESSION_ID`が記録されたことも確認する。特に「決定事項と理由」「検証結果」「未解決事項とリスク」「次の一手」を具体的に書く。
