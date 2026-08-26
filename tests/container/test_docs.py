@@ -6,6 +6,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class Phase1DocumentationTest(unittest.TestCase):
+    def test_readme_starts_with_one_command_setup_flow(self) -> None:
+        body = (ROOT / "README.md").read_text(encoding="utf-8")
+        quickstart = body.index("## 最短で使う")
+        requirements = body.index("## 必要なもの")
+
+        self.assertLess(quickstart, requirements)
+        self.assertIn("bin/setup.sh OWNER/REPOSITORY", body)
+        self.assertIn("bin/agentctl run REPOSITORY", body)
+        self.assertIn("## 手動でセットアップする", body)
+
     def test_operator_guide_contains_complete_safe_flow(self) -> None:
         body = (ROOT / "docs/phase1-codex-container.md").read_text(encoding="utf-8")
         for command in (
