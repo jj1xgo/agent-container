@@ -6,6 +6,7 @@
 
 ### Added
 
+- 保存先とprojectを環境から固定する`agent-handover` wrapperと、その`create`操作だけを許可するCodex初期ruleを追加しました。
 - GitHub認証、image build、Codex認証、project登録、診断を一度に案内する`bin/setup.sh`を追加しました。
 - 新規Codex project stateへ、読み取り専用の`gh pr`、`gh issue`、`gh run`、`gh repo view`操作を事前許可する初期rulesを追加しました。
 - GitHub App credentialをhost memory/private stateへ限定するproject-scoped brokerを追加しました。

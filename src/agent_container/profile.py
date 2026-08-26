@@ -2,7 +2,7 @@ from pathlib import Path
 import shutil
 
 
-PROFILE_VERSION = "2\n"
+PROFILE_VERSION = "3\n"
 
 
 def seed_codex_home(profile_root: Path, codex_home: Path) -> None:

@@ -112,6 +112,12 @@ bin/agentctl project add OWNER/REPOSITORY \
 
 新規projectのCodex stateには、`gh pr view/list/checks/status`、`gh issue view/list`、`gh run view/list`、`gh repo view`だけを読み取り用の初期approval rulesとして配置します。既存projectのrulesは暗黙に追加・上書きしません。
 
+handover作成には保存先を環境から固定する専用`agent-handover create`を使い、このcommandだけを初期approval rulesで事前許可します。これによりhandoverごとの承認は不要です。既存projectへはrulesを自動追記しないため、image更新後にprojectの`codex-home/rules/default.rules`へ次の一行をreviewして追加してください。
+
+```text
+prefix_rule(pattern=["agent-handover", "create"], decision="allow")
+```
+
 診断がPASSしたらCodexを起動できます。
 
 ```bash

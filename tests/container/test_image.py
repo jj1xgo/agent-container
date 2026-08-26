@@ -143,6 +143,10 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertIn("PYTHONPATH=/opt/agent-container/src", body)
         self.assertIn("COPY profiles/codex /opt/agent-container/profiles/codex", body)
         self.assertIn(
+            "COPY --chmod=0755 container/bin/agent-handover /usr/local/bin/agent-handover",
+            body,
+        )
+        self.assertIn(
             "COPY container/profile.d/10-agent-node.sh /etc/profile.d/10-agent-node.sh",
             body,
         )
@@ -201,6 +205,7 @@ class ContainerImageContractTest(unittest.TestCase):
                 "!container/bin/codex",
                 "!container/bin/claude",
                 "!container/bin/git-remote-agent-broker",
+                "!container/bin/agent-handover",
                 "!container/profile.d/",
                 "!container/profile.d/10-agent-node.sh",
                 "**/auth.json",

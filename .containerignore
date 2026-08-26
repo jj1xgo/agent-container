@@ -13,6 +13,7 @@
 !container/bin/codex
 !container/bin/claude
 !container/bin/git-remote-agent-broker
+!container/bin/agent-handover
 !container/profile.d/
 !container/profile.d/10-agent-node.sh
 **/auth.json

@@ -15,8 +15,7 @@ class HandoverSkillTest(unittest.TestCase):
             "AGENT_HANDOVER_ROOT",
             "AGENT_PROJECT_ID",
             "CODEX_SESSION_ID",
-            '--session-id "$CODEX_SESSION_ID"',
-            "agent_container.handover_cli",
+            "agent-handover create",
             "git status",
             "検証結果",
             "認証情報",
@@ -25,6 +24,8 @@ class HandoverSkillTest(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, skill)
+
+        self.assertNotIn("agent_container.handover_cli create", skill)
 
 
 if __name__ == "__main__":
