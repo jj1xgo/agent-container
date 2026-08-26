@@ -4,6 +4,7 @@ ARG NODE_VERSION=latest
 ARG CODEX_VERSION=latest
 ARG CLAUDE_VERSION=latest
 ARG AGENT_CLI_CACHEBUST=0
+ARG AGENT_CONTAINER_VERSION=0.2.0-dev.0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
@@ -84,6 +85,7 @@ COPY --chmod=0644 profiles/claude/managed-mcp.json /etc/claude-code/managed-mcp.
 ENV HOME=/home/agent \
     PATH=/usr/local/bin:/opt/agent-node/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
     PYTHONPATH=/opt/agent-container/src \
+    AGENT_CONTAINER_VERSION=${AGENT_CONTAINER_VERSION} \
     DISABLE_UPDATES=1
 
 USER agent

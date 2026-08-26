@@ -140,6 +140,7 @@ def build_image_spec(
     codex_version: str,
     claude_version: str,
     cachebuster: str,
+    agent_container_version: str,
 ) -> CommandSpec:
     root = repo_root.resolve()
     return CommandSpec(
@@ -154,6 +155,8 @@ def build_image_spec(
             f"CLAUDE_VERSION={claude_version}",
             "--build-arg",
             f"AGENT_CLI_CACHEBUST={cachebuster}",
+            "--build-arg",
+            f"AGENT_CONTAINER_VERSION={agent_container_version}",
             "--tag",
             image,
             "--file",

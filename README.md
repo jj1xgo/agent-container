@@ -4,7 +4,9 @@ AI coding agentsをホスト環境から分離して動かす、Linux・rootless
 
 Current release: `v0.1.0`
 
-Development version: `0.2.0-dev.0`
+Development builds derive their version from Git as
+`0.2.0-dev.N+gCOMMIT` (`.dirty` is appended for tracked changes). Run
+`bin/agentctl --version` to see the exact version for the current checkout.
 
 現在はPhase 3のGitHub App brokerを明示opt-inで利用できます。`0.x`の間はCLI、state配置、security boundaryが互換性なく変更される可能性があります。
 

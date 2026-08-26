@@ -23,7 +23,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Run Codex tests
@@ -59,6 +59,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Verify rootless Podman
@@ -75,6 +76,7 @@ jobs:
             --build-arg "NODE_VERSION=$NODE_VERSION" \
             --build-arg "CODEX_VERSION=$CODEX_VERSION" \
             --build-arg "CLAUDE_VERSION=$CLAUDE_VERSION" \
+            --build-arg "AGENT_CONTAINER_VERSION=$(PYTHONPATH=src python3 -c 'import agent_container; print(agent_container.__version__)')" \
             --build-arg AGENT_CLI_CACHEBUST=ci-v1 \
             --tag "$BASE_IMAGE" \
             --file Containerfile \
@@ -87,6 +89,8 @@ jobs:
           podman run --rm "$BASE_IMAGE" codex --version
           podman run --rm "$BASE_IMAGE" codex --approve-for-me --help >/dev/null
           podman run --rm "$BASE_IMAGE" claude --version
+          expected="$(PYTHONPATH=src python3 -c 'import agent_container; print(agent_container.__version__)')"
+          test "$(podman run --rm "$BASE_IMAGE" python3 -m agent_container.agentctl --version)" = "agentctl $expected"
 
       - name: Run real Podman integration test
         run: python3 -m unittest tests.integration.test_project_image_podman -v
