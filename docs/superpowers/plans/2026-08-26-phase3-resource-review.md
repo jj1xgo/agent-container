@@ -19,4 +19,3 @@ Podman command unit testを先に追加し、label一致running IDを取得す�
 ## 5. Verification
 
 focused tests、`PYTHONPATH=src python3 -m unittest`、`git diff --check`を実行する。独立reviewでCritical/Importantを解消後、hostでCodexまたはClaude runtimeを起動し、別terminalからrunning stats成功と終了後のnot-running failureを確認する。credential値、環境、argvは記録しない。
-
