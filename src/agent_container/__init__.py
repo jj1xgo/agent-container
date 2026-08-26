@@ -1,1 +1,6 @@
-__version__ = "0.2.0-dev.0"
+from pathlib import Path
+
+from agent_container.version import resolve_version
+
+
+__version__ = resolve_version(Path(__file__).resolve().parents[2])

@@ -177,7 +177,13 @@ class PodmanCommandTest(unittest.TestCase):
 
     def test_build_uses_versions_cachebuster_and_repository_context(self) -> None:
         spec = build_image_spec(
-            Path("/repo"), IMAGE, "22.23.1", "0.149.0", "1.2.3", "12345"
+            Path("/repo"),
+            IMAGE,
+            "22.23.1",
+            "0.149.0",
+            "1.2.3",
+            "12345",
+            "0.2.0-dev.7+gabcdef0",
         )
         self.assertEqual(
             spec.argv,
@@ -192,6 +198,8 @@ class PodmanCommandTest(unittest.TestCase):
                 "CLAUDE_VERSION=1.2.3",
                 "--build-arg",
                 "AGENT_CLI_CACHEBUST=12345",
+                "--build-arg",
+                "AGENT_CONTAINER_VERSION=0.2.0-dev.7+gabcdef0",
                 "--tag",
                 IMAGE,
                 "--file",

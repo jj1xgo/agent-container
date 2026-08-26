@@ -127,6 +127,7 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertIn("ARG CODEX_VERSION=latest", body)
         self.assertIn("ARG CLAUDE_VERSION=latest", body)
         self.assertIn("ARG AGENT_CLI_CACHEBUST=0", body)
+        self.assertIn("ARG AGENT_CONTAINER_VERSION=0.2.0-dev.0", body)
         self.assertIn("@openai/codex@${CODEX_VERSION}", body)
         self.assertIn("@anthropic-ai/claude-code@${CLAUDE_VERSION}", body)
         self.assertIn(
@@ -141,6 +142,7 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertIn("WORKDIR /workspace", body)
         self.assertIn("COPY src /opt/agent-container/src", body)
         self.assertIn("PYTHONPATH=/opt/agent-container/src", body)
+        self.assertIn("AGENT_CONTAINER_VERSION=${AGENT_CONTAINER_VERSION}", body)
         self.assertIn("COPY profiles/codex /opt/agent-container/profiles/codex", body)
         self.assertIn(
             "COPY --chmod=0755 container/bin/agent-handover /usr/local/bin/agent-handover",
