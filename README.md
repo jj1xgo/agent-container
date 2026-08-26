@@ -4,6 +4,8 @@ AI coding agentsをホスト環境から分離して動かす、Linux・rootless
 
 Current release: `v0.1.0`
 
+Development version: `0.2.0-dev.0`
+
 現在はPhase 3のGitHub App brokerを明示opt-inで利用できます。`0.x`の間はCLI、state配置、security boundaryが互換性なく変更される可能性があります。
 
 ## 最短で使う

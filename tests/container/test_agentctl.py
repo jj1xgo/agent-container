@@ -3090,7 +3090,7 @@ class AgentCtlParserTest(unittest.TestCase):
             parser().parse_args(["--version"])
 
         self.assertEqual(raised.exception.code, 0)
-        self.assertEqual(stdout.getvalue(), "agentctl 0.1.0\n")
+        self.assertEqual(stdout.getvalue(), "agentctl 0.2.0-dev.0\n")
 
     def test_new_command_contract(self) -> None:
         build = parser().parse_args(["build"])
