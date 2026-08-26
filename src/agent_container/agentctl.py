@@ -47,7 +47,9 @@ from agent_container.podman import podman_image_exists_spec
 from agent_container.podman import podman_architecture_spec
 from agent_container.podman import podman_image_id_spec
 from agent_container.podman import podman_project_images_spec
+from agent_container.podman import podman_running_agent_containers_spec
 from agent_container.podman import podman_rootless_spec
+from agent_container.podman import podman_stats_spec
 from agent_container.podman import podman_version_spec
 from agent_container.podman import project_node_version_spec
 from agent_container.podman import run_codex_spec
@@ -151,6 +153,8 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("project")
     run.add_argument("--agent", choices=("codex", "claude"), default="codex")
     run.add_argument("--github-broker", action="store_true")
+    stats = subcommands.add_parser("stats")
+    stats.add_argument("project")
     doctor = subcommands.add_parser("doctor")
     doctor.add_argument("project")
     doctor.add_argument("--agent", choices=("codex", "claude", "all"), default="codex")
@@ -1089,6 +1093,8 @@ def main(
             validate_agent(arguments.agent)
         elif arguments.command == "run":
             validate_agent(arguments.agent)
+        elif arguments.command == "stats":
+            validate_project_id(arguments.project)
         elif arguments.command == "project" and arguments.project_command == "add":
             broker_options = (
                 arguments.default_branch != "main"
@@ -1247,6 +1253,46 @@ def main(
                     f"Updated Superpowers for project: {layout.project_id}",
                     file=stdout,
                 )
+            return 0
+        if arguments.command == "stats":
+            _podman_preflight(runner)
+            running: list[tuple[str, str]] = []
+            seen: set[str] = set()
+            for agent in ("codex", "claude"):
+                list_spec = podman_running_agent_containers_spec(
+                    arguments.project, agent
+                )
+                listed = _required_probe_run(runner, list_spec)
+                for container_id in (listed.stdout or "").splitlines():
+                    container_id = container_id.strip()
+                    podman_stats_spec(container_id)
+                    if container_id in seen or len(running) >= 8:
+                        raise ValueError("running agent container list is invalid")
+                    seen.add(container_id)
+                    running.append((agent, container_id))
+            if not running:
+                raise ValueError("no running agent container found for project")
+            print("AGENT\tCONTAINER\tCPU\tMEMORY\tPIDS\tUPTIME", file=stdout)
+            for agent, container_id in running:
+                stats_spec = podman_stats_spec(container_id)
+                completed = _required_probe_run(runner, stats_spec)
+                body = completed.stdout or ""
+                if (
+                    len(body) > 512
+                    or body.count("\n") != 1
+                    or not body.endswith("\n")
+                    or any(
+                        ord(character) < 32 and character not in "\t\n"
+                        for character in body
+                    )
+                ):
+                    raise ValueError("container resource stats are invalid")
+                fields = body.removesuffix("\n").split("\t")
+                if len(fields) != 5 or fields[0] != container_id or any(
+                    not field for field in fields
+                ):
+                    raise ValueError("container resource stats are invalid")
+                print(agent + "\t" + "\t".join(fields), file=stdout)
             return 0
         if arguments.command == "run":
             layout, handover_project, uid, gid = _runtime_preflight(

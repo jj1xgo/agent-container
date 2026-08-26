@@ -19,6 +19,8 @@ from agent_container.podman import codex_superpowers_marketplace_spec
 from agent_container.podman import podman_architecture_spec
 from agent_container.podman import podman_image_id_spec
 from agent_container.podman import podman_project_images_spec
+from agent_container.podman import podman_running_agent_containers_spec
+from agent_container.podman import podman_stats_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.state import Repository
@@ -30,6 +32,38 @@ DERIVED = "localhost/agent-container-project:sotlas-frontend-0123456789abcdef"
 
 
 class PodmanCommandTest(unittest.TestCase):
+    def test_resource_monitor_commands_are_project_and_agent_scoped(self) -> None:
+        listed = podman_running_agent_containers_spec("agent-container", "codex")
+        self.assertEqual(
+            listed.argv,
+            (
+                "podman",
+                "ps",
+                "--filter",
+                "label=io.agent-container.managed=true",
+                "--filter",
+                "label=io.agent-container.project=agent-container",
+                "--filter",
+                "label=io.agent-container.agent=codex",
+                "--format",
+                "{{.ID}}",
+            ),
+        )
+
+        stats = podman_stats_spec("0123456789ab")
+        self.assertEqual(stats.argv[:3], ("podman", "stats", "--no-stream"))
+        rendered = " ".join(stats.argv)
+        self.assertIn("{{.CPUPerc}}", rendered)
+        self.assertIn("{{.MemUsage}}", rendered)
+        self.assertIn("{{.PIDs}}", rendered)
+        self.assertIn("{{.UpTime}}", rendered)
+        self.assertEqual(stats.argv[-1], "0123456789ab")
+
+        with self.assertRaises(ValueError):
+            podman_running_agent_containers_spec("agent-container", "other")
+        with self.assertRaises(ValueError):
+            podman_stats_spec("not-an-id")
+
     def test_superpowers_commands_use_agent_specific_project_state(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")
 
@@ -337,6 +371,24 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertNotIn("src=/state/gh", joined)
         self.assertNotIn("GH_CONFIG_DIR", joined)
         self.assertNotIn("gh auth git-credential", joined)
+
+    def test_agent_runtimes_have_exact_resource_monitor_labels(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        handover = Path("/handovers/agent-container")
+        broker = BrokerRuntimeMount(
+            Path("/state/runtime/one"),
+            Repository.parse("jj1xgo/agent-container"),
+        )
+
+        for agent, spec in (
+            ("codex", run_codex_spec(layout, handover, IMAGE, os.getuid(), os.getgid())),
+            ("claude", run_claude_spec(layout, handover, IMAGE, os.getuid(), os.getgid())),
+        ):
+            with self.subTest(agent=agent):
+                joined = " ".join(spec.argv)
+                self.assertIn("io.agent-container.managed=true", joined)
+                self.assertIn("io.agent-container.project=agent-container", joined)
+                self.assertIn(f"io.agent-container.agent={agent}", joined)
 
         claude = run_claude_spec(
             layout,

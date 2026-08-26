@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 import subprocess
 
 from agent_container.state import Repository
@@ -29,6 +30,11 @@ _CLAUDE_RUNTIME_HOME_TMPFS_MOUNT = (
     "tmpfs-mode=0700,U=true,noexec,nosuid,nodev"
 )
 _BROKER_RUNTIME_PATH = "/run/agent-broker"
+_CONTAINER_ID = re.compile(r"^[0-9a-f]{12,64}$")
+_RESOURCE_AGENTS = frozenset({"codex", "claude"})
+_RESOURCE_STATS_FORMAT = (
+    "{{.ID}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}\t{{.UpTime}}"
+)
 
 
 @dataclass(frozen=True)
@@ -68,6 +74,19 @@ def _noninteractive_prefix(uid: int, gid: int) -> list[str]:
     argv.remove("--interactive")
     argv.remove("--tty")
     return argv
+
+
+def _runtime_monitor_args(layout: StateLayout, agent: str) -> list[str]:
+    if agent not in {"codex", "claude"}:
+        raise ValueError("runtime agent is invalid")
+    return [
+        "--label",
+        "io.agent-container.managed=true",
+        "--label",
+        f"io.agent-container.project={layout.project_id}",
+        "--label",
+        f"io.agent-container.agent={agent}",
+    ]
 
 
 def _git_environment_args(
@@ -166,6 +185,45 @@ def podman_project_images_spec(project_id: str) -> CommandSpec:
             f"reference={reference}",
             "--format",
             "{{.Repository}}:{{.Tag}}",
+        ),
+        {},
+    )
+
+
+def podman_running_agent_containers_spec(
+    project_id: str, agent: str
+) -> CommandSpec:
+    project_id = validate_project_id(project_id)
+    if agent not in _RESOURCE_AGENTS:
+        raise ValueError("runtime agent is invalid")
+    return CommandSpec(
+        (
+            "podman",
+            "ps",
+            "--filter",
+            "label=io.agent-container.managed=true",
+            "--filter",
+            f"label=io.agent-container.project={project_id}",
+            "--filter",
+            f"label=io.agent-container.agent={agent}",
+            "--format",
+            "{{.ID}}",
+        ),
+        {},
+    )
+
+
+def podman_stats_spec(container_id: str) -> CommandSpec:
+    if _CONTAINER_ID.fullmatch(container_id) is None:
+        raise ValueError("container ID is invalid")
+    return CommandSpec(
+        (
+            "podman",
+            "stats",
+            "--no-stream",
+            "--format",
+            _RESOURCE_STATS_FORMAT,
+            container_id,
         ),
         {},
     )
@@ -396,6 +454,7 @@ def run_codex_spec(
     if uid != os.getuid() or gid != os.getgid():
         raise ValueError("runtime uid and gid must match the current user")
     argv = _runtime_prefix(uid, gid)
+    argv += _runtime_monitor_args(layout, "codex")
     argv += _git_environment_args() if broker is None else _broker_git_args(layout, broker)
     argv += ["--env", "AGENT_HANDOVER_ROOT=/handovers"]
     mounts = [
@@ -433,6 +492,7 @@ def run_claude_spec(
         raise ValueError("runtime uid and gid must match the current user")
     gh_config_dir = "/home/agent/gh-config"
     argv = _runtime_prefix(uid, gid)
+    argv += _runtime_monitor_args(layout, "claude")
     argv += ["--mount", _CLAUDE_RUNTIME_HOME_TMPFS_MOUNT]
     argv += (
         _git_environment_args(gh_config_dir)
