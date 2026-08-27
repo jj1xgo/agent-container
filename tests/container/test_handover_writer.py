@@ -71,6 +71,20 @@ class HandoverValidationTest(unittest.TestCase):
         )
         self.assertIn("risk-based", body)
 
+    def test_rejects_normalized_over_limit_and_surrogate_text(self) -> None:
+        exact_limit_without_newline = valid_body()
+        exact_limit_without_newline = exact_limit_without_newline[:-1] + "x" * (
+            MAX_DOCUMENT_BYTES - len(exact_limit_without_newline[:-1].encode("utf-8"))
+        )
+        cases = (
+            ("title", exact_limit_without_newline),
+            ("bad\ud800title", valid_body()),
+            ("title", valid_body() + "\ud800"),
+        )
+        for title, body in cases:
+            with self.subTest(title=title), self.assertRaises(ValueError):
+                validate_handover_content(title, body)
+
 
 class AtomicHandoverWriterTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -99,6 +113,21 @@ class AtomicHandoverWriterTest(unittest.TestCase):
         )
         self.assertEqual(list(self.project.glob(".handover-*.tmp")), [])
 
+    def test_forces_mode_0600_despite_a_restrictive_umask(self) -> None:
+        original_umask = os.umask(0o777)
+        try:
+            created = create_atomic_handover(
+                self.project,
+                "project",
+                "title",
+                valid_body(),
+                self.now,
+                lambda size: "a" * (size * 2),
+            )
+        finally:
+            os.umask(original_umask)
+        self.assertEqual(stat.S_IMODE(created.stat().st_mode), 0o600)
+
     def test_rejects_a_rendered_document_larger_than_the_protocol_limit(self) -> None:
         body = valid_body()
         body = body[:-1] + "x" * (MAX_DOCUMENT_BYTES - len(body.encode("utf-8")))
@@ -126,6 +155,45 @@ class AtomicHandoverWriterTest(unittest.TestCase):
                 create_atomic_handover(directory, project_id, "title", valid_body(), self.now)
         self.assertEqual(list(self.project.glob("*.md")), [])
         self.assertEqual(list(target.glob("*.md")), [])
+
+    def test_rejects_relative_traversal_and_symlinked_ancestor_project_paths(self) -> None:
+        original_cwd = Path.cwd()
+        ancestor = Path(self.temp.name) / "ancestor"
+        ancestor.symlink_to(Path(self.temp.name), target_is_directory=True)
+        relative = Path("project")
+        traversal = Path(".") / ".." / Path(self.temp.name).name / "project"
+        try:
+            os.chdir(self.temp.name)
+            cases = (relative, traversal, ancestor / "project")
+            for directory in cases:
+                with self.subTest(directory=directory), self.assertRaises(ValueError):
+                    create_atomic_handover(directory, "project", "title", valid_body(), self.now)
+        finally:
+            os.chdir(original_cwd)
+
+    def test_rejects_a_directory_replacement_after_pinning(self) -> None:
+        original_open = os.open
+        pinned = Path(self.temp.name) / "pinned"
+
+        def open_and_replace(path: object, flags: int, *args: object, **kwargs: object) -> int:
+            descriptor = original_open(path, flags, *args, **kwargs)
+            if path == self.project:
+                self.project.rename(pinned)
+                self.project.mkdir()
+            return descriptor
+
+        with mock.patch("agent_container.handover_writer.os.open", side_effect=open_and_replace):
+            with self.assertRaises(ValueError):
+                create_atomic_handover(
+                    self.project,
+                    "project",
+                    "title",
+                    valid_body(),
+                    self.now,
+                    lambda size: "a" * (size * 2),
+                )
+        self.assertEqual(list(self.project.iterdir()), [])
+        self.assertEqual(list(pinned.iterdir()), [])
 
     def test_cleans_up_when_writing_linking_or_fsync_fails(self) -> None:
         failures = (
