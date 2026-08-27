@@ -27,15 +27,19 @@ class DevelopmentVersionTest(unittest.TestCase):
         self._git(root, "commit", "-m", message)
 
     def test_exact_release_tag_returns_release_version(self) -> None:
-        with TemporaryDirectory() as temp:
-            root = Path(temp)
-            self._git(root, "init", "-b", "main")
-            self._git(root, "config", "user.name", "Version Test")
-            self._git(root, "config", "user.email", "version@example.invalid")
-            self._commit(root, "release", "release\n")
-            self._git(root, "tag", "v0.2.0")
+        for tag_arguments in (
+            ("v0.2.0",),
+            ("-a", "v0.2.0", "-m", "release"),
+        ):
+            with self.subTest(tag_arguments=tag_arguments), TemporaryDirectory() as temp:
+                root = Path(temp)
+                self._git(root, "init", "-b", "main")
+                self._git(root, "config", "user.name", "Version Test")
+                self._git(root, "config", "user.email", "version@example.invalid")
+                self._commit(root, "release", "release\n")
+                self._git(root, "tag", *tag_arguments)
 
-            self.assertEqual(resolve_version(root), "0.2.0")
+                self.assertEqual(resolve_version(root), "0.2.0")
 
     def test_post_release_commit_uses_next_development_version(self) -> None:
         with TemporaryDirectory() as temp:
