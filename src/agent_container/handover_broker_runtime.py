@@ -65,13 +65,14 @@ class HandoverBrokerRuntime(AbstractContextManager[HandoverRuntimeMount]):
             listener = self.session.open_listener(backlog=_LISTENER_BACKLOG)
             listener.settimeout(_LISTENER_TIMEOUT_SECONDS)
             self._listener = listener
-            self._thread = threading.Thread(
+            thread = threading.Thread(
                 target=self._serve,
                 args=(listener,),
                 name="handover-broker",
                 daemon=True,
             )
-            self._thread.start()
+            thread.start()
+            self._thread = thread
         except BaseException:
             if listener is not None:
                 try:

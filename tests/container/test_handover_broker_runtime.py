@@ -215,6 +215,88 @@ class HandoverBrokerRuntimeTest(unittest.TestCase):
         runtime.__exit__(None, None, None)
         self.assertEqual(session.close_calls, 2)
 
+    def test_thread_start_and_first_cleanup_failure_still_allow_safe_retry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="hb-runtime-") as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            handovers = root / "handovers"
+            handovers.mkdir(mode=0o700)
+            project = handovers / "agent-container"
+            project.mkdir(mode=0o700)
+            session = HandoverBrokerSession.create(
+                state.resolve(),
+                "agent-container",
+                project.resolve(),
+            )
+            old_capability = session._capability
+            request = HandoverRequest(
+                1,
+                old_capability,
+                "agent-container",
+                "create",
+                "Safe title",
+                VALID_BODY,
+            )
+            listener = FakeListener()
+            real_close = session.close
+            close_calls = 0
+
+            def fail_first_close() -> None:
+                nonlocal close_calls
+                close_calls += 1
+                if close_calls == 1:
+                    raise ValueError("private-cleanup-marker")
+                real_close()
+
+            class StartFailureThread:
+                daemon = True
+
+                def __init__(self, **_: object) -> None:
+                    self.join_calls = 0
+
+                def start(self) -> None:
+                    raise RuntimeError("private-thread-start-marker")
+
+                def join(self, timeout: float) -> None:
+                    self.join_calls += 1
+                    raise RuntimeError("cannot join thread before it is started")
+
+                def is_alive(self) -> bool:
+                    return False
+
+            thread = StartFailureThread()
+            with mock.patch.object(
+                session,
+                "open_listener",
+                return_value=listener,
+            ), mock.patch.object(
+                session,
+                "close",
+                side_effect=fail_first_close,
+            ), mock.patch(
+                "agent_container.handover_broker_runtime.threading.Thread",
+                return_value=thread,
+            ):
+                runtime = HandoverBrokerRuntime(session)
+                with self.assertRaises(HandoverBrokerRuntimeError) as raised:
+                    runtime.__enter__()
+                self.assertEqual(
+                    str(raised.exception),
+                    "handover broker failed to start",
+                )
+
+                runtime.__exit__(None, None, None)
+
+            self.assertEqual(thread.join_calls, 0)
+            self.assertEqual(close_calls, 2)
+            self.assertFalse(session.capability_path.exists())
+            self.assertFalse(session.run_dir.exists())
+            with self.assertRaises(ValueError):
+                session.authorize(request, os.getuid())
+
     def test_handler_exception_is_captured_and_cleanup_precedes_fixed_error(self) -> None:
         client = FakeClient(os.getuid())
         session = FakeSession(FakeListener((client,)))
