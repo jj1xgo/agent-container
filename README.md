@@ -143,6 +143,8 @@ bin/agentctl run REPOSITORY --agent claude
 
 `auth claude`では`claude setup-token`が表示したtokenを、その後に現れる非表示promptへ貼り付けます。tokenをchat、shell history、環境変数、screenshotへ保存しないでください。既存のClaude設定を移行する場合は、[Claude Code運用ガイド](docs/phase2-claude-code.md#初回claude-run前のmigration)にあるdry-run-firstの手順を使います。
 
+Claudeからhandoverを作るときは、7 sectionの本文をprivateなmode `0600`の一時fileで準備し、`agent-handover create --title "TITLE" < handover-body.md`でstdinから送ります。Claudeから見えるhandover directoryはread-onlyで、hostのbrokerは選択projectへの新規`create`だけを受け付けます。broker failure時に直接writeへfallbackしません。詳細は[Claude Code運用ガイド](docs/phase2-claude-code.md#claudeからhandoverを作成する)を参照してください。
+
 CodexとClaudeをまとめて診断することもできます。
 
 ```bash

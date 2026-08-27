@@ -175,6 +175,69 @@ class Phase2DocumentationTest(unittest.TestCase):
         self.assertIn("Claudeのmanaged sandbox", codex)
         self.assertIn("Codexのhook設定とは別", codex)
 
+    def test_operator_guide_documents_claude_handover_broker_contract(self) -> None:
+        body = (ROOT / "docs/phase2-claude-code.md").read_text(encoding="utf-8")
+
+        for expected in (
+            "agent-handover create --title",
+            "`/handovers/PROJECT` | read-only",
+            "brokerは`create`だけ",
+            "direct writeへfallbackしません",
+            "本文、title、capabilityはauditしません",
+            "他projectのhandoverはmountにもbrokerにも現れません",
+            "chmod 600",
+            "< handover-body.md",
+            "## 作業の目的",
+            "## 現在地",
+            "## 決定事項と理由",
+            "## 変更したファイル・commit・PR",
+            "## 検証結果",
+            "## 未解決事項とリスク",
+            "## 次の一手",
+            "認証済みClaudeのhandover実host smokeは`not run`",
+        ):
+            self.assertIn(expected, body)
+
+    def test_handover_smoke_guide_keeps_authenticated_checks_not_run(self) -> None:
+        body = (ROOT / "docs/phase2-smoke-test.md").read_text(encoding="utf-8")
+
+        for expected in (
+            "agent-handover create --title",
+            "handover project mountはread-only",
+            "brokerは`create`だけ",
+            "direct writeへfallbackしません",
+            "本文、title、capabilityはauditしません",
+            "他projectのhandoverは利用できません",
+            "認証済みClaudeのhandover実host smokeは`not run`",
+        ):
+            self.assertIn(expected, body)
+
+        rows = {
+            columns[0]: columns
+            for line in body.splitlines()
+            if line.startswith("| Claude handover ")
+            for columns in ([column.strip() for column in line.strip("|").split("|")],)
+        }
+        self.assertEqual(
+            set(rows),
+            {
+                "Claude handover create",
+                "Claude handover direct mutation denial",
+                "Claude handover cross-project denial",
+                "Claude handover secret rejection",
+                "Claude handover non-logging",
+                "Claude handover expired capability",
+            },
+        )
+        for columns in rows.values():
+            self.assertEqual(len(columns), 4)
+            self.assertEqual(columns[2:], ["not run", "not run"])
+
+    def test_codex_retains_direct_handover_path_in_phase_1(self) -> None:
+        body = (ROOT / "docs/codex-operations.md").read_text(encoding="utf-8")
+
+        self.assertIn("Phase 1ではCodexは既存のdirect handover pathを維持します", body)
+
 
 class Phase3DocumentationTest(unittest.TestCase):
     def test_resource_monitor_and_cross_agent_review_are_documented(self) -> None:

@@ -148,6 +148,46 @@ bin/agentctl run PROJECT --agent codex
 
 Claudeを通常終了した後は同じprojectを同じ`run --agent claude`で再起動し、Claude CLIのsession resume操作は対話画面で確認します。host上の`~/.claude`や他projectのClaude stateを参照してresumeしません。
 
+## Claudeからhandoverを作成する
+
+Claude runtimeでは、選択projectに新規handoverを1つ作成する場合だけ専用commandを使います。本文をcommand lineやshell historyへ入れないよう、private workspace内の一時fileを使います。
+
+```bash
+umask 077
+: > handover-body.md
+chmod 600 handover-body.md
+```
+
+editorで`handover-body.md`を開き、次の7 sectionをそれぞれ1回、この順番で書きます。H1、Project、Created、Sessionはhost writerが付与するため書きません。credential、環境値、transcript全文も入れません。
+
+```markdown
+## 作業の目的
+
+## 現在地
+
+## 決定事項と理由
+
+## 変更したファイル・commit・PR
+
+## 検証結果
+
+## 未解決事項とリスク
+
+## 次の一手
+```
+
+完成後はstdin redirectionで一度だけ送信し、成功時に返るcontainer上のpathだけを確認します。titleにもcredentialや改行を入れません。
+
+```bash
+agent-handover create --title "引き継ぎタイトル" < handover-body.md
+```
+
+送信後の一時fileは自動削除せず、利用者自身の通常のsecure cleanup手順でだけ取り除きます。
+
+handover brokerは`create`だけを提供し、既存fileのread、list、overwrite、rename、deleteはできません。project、metadata、filename、最終pathはhostが決定します。brokerが拒否・停止・タイムアウトした場合はnonzeroで停止し、direct writeへfallbackしません。sandboxやmountを弱めたり、別pathへ作成したりしません。
+
+auditは時刻、project、operation、固定stage、status、成功pathだけを対象とし、本文、title、capabilityはauditしません。credential一致部分、環境値、raw exceptionも記録しません。他projectのhandoverはmountにもbrokerにも現れません。認証済みClaudeのhandover実host smokeは`not run`であり、merge後の別途利用者承認までPASSとしません。
+
 ## Claude runtimeの正確なmount
 
 `bin/agentctl run PROJECT --agent claude`が渡すhost sourceは次だけです。
@@ -158,8 +198,9 @@ Claudeを通常終了した後は同じprojectを同じ`run --agent claude`で�
 | 選択projectの`claude-config` | `/home/agent/.claude` | read-write |
 | 共有`oauth-token` | `/run/secrets/claude-oauth-token` | read-only file mount |
 | 選択projectのcache | `/home/agent/.cache` | read-write |
-| 専用`gh` config | `/home/agent/.config/gh` | read-only |
-| 選択projectのhandover directory | `/handovers/PROJECT` | read-write |
+| 専用`gh` config | `/home/agent/gh-config` | read-only |
+| 選択projectのhandover directory | `/handovers/PROJECT` | read-only |
+| runtime限定handover broker socket/capability | `/run/agent-handover` | read-only |
 
 containerは`--read-only`、`--cap-drop=all`、`no-new-privileges`、host userと一致するkeep-id namespace、bounded `/tmp` tmpfs、Linuxのcontainer PID namespaceを使います。Claude向けpermission bypass optionは渡しません。`CLAUDE_CONFIG_DIR=/home/agent/.claude`、`AGENT_PROJECT_ID`、`AGENT_HANDOVER_ROOT=/handovers`を設定します。
 

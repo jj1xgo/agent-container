@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Claude Codeが選択projectに新規handoverを作成できる、runtime限定のcreate-only Unix-socket brokerと`agent-handover create --title TITLE`経路を追加しました。
+- 7 section stdin contract、read-only mount、operator guide、merge後の認証済み実host smoke gateを追加しました。実host gateの新規項目はすべて`not run`です。
+
+### Security boundaries
+
+- Claudeのhandover mountはread-onlyで、brokerはread、list、overwrite、rename、deleteを提供しません。failure時のdirect writerやread-write mountへのfallbackもありません。
+- peer UID、runtime capability、固定projectでrequestを認証し、auditに本文、title、capability、credential由来情報を残しません。Codexの既存direct handover writerは変更しません。
+
 ## [0.2.0] - 2026-08-27
 
 ### Added

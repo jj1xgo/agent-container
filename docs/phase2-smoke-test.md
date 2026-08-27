@@ -138,12 +138,35 @@ setup command、hidden prompt、token format、staged `claude auth status`、act
 11. `bin/agentctl run PROJECT --agent codex`、Codexの認証状態、既存testを確認し、Codex regressionがないことを確認する。
 12. 旧claude-containerのGit statusと対象stateをsecret-freeに確認し、Phase 2実行前後で旧claude-containerが変更されていないことを証明する。旧claude-containerを変更しない。
 
+## Claude handover brokerのmerge後gate
+
+このgateは実host、Podman、認証済みClaude、disposableな専用smoke projectを使います。実装をmergeした後、利用者がこのgateを個別に承認するまで実行しません。認証済みClaudeのhandover実host smokeは`not run`です。
+
+実行時もhandover本文はprivate workspaceのmode `0600`の一時fileで準備し、7つの固定sectionを`agent-handover create --title "TITLE" < handover-body.md`でstdinから1回だけ送ります。本文をcommand line、shell history、環境変数へ入れません。
+
+このgateでは、handover project mountはread-only、brokerは`create`だけ、broker failure時はdirect writeへfallbackしません。他projectのhandoverは利用できません。auditは固定metadataに限定し、本文、title、capabilityはauditしません。確認中もcapability本文、credential一致部分、環境一覧、raw exceptionを表示・記録しません。
+
+承認後は次の順で確認します。いずれかが失敗したら停止し、sandbox、read-only mount、peer/capability認証を弱めて再試行しません。
+
+1. 正当な7 sectionをcreateし、stdoutが作成pathだけで、host上の文書がcanonical metadataと7 sectionすべてを持つことを確認する。
+2. read-only mountからの新規作成、既存fileのoverwrite、rename、deleteがすべて拒否され、既存fileが変わらないことを確認する。
+3. 別projectがmountされず、別project IDのbroker requestもfileを作らないことを確認する。
+4. malformed sectionと安全な専用dummy credential markerがcontent-policyで拒否され、final/temporary fileを残さないことを確認する。実credentialは使わない。
+5. stdout、stderr、auditに安全なsentinel本文、title、capability、credential marker由来文字列が出ないことを確認する。
+6. Claude runtime終了後にsocketとcapability mountが消え、古いruntime capabilityが再利用できないことを本文を表示せず確認する。
+
 ## 観測結果
 
 unit suiteの結果を実host観測として扱いません。実行後は、実施した行の`not run`だけを日付、exit code、secret-freeな証拠へ置換します。skipped行は`not run`のまま残します。
 
 | command/check | expected result | observed result | date |
 | --- | --- | --- | --- |
+| Claude handover create | create succeeds; path-only response; canonical metadata and seven sections | not run | not run |
+| Claude handover direct mutation denial | direct create, overwrite, rename, and delete are denied; existing files unchanged | not run | not run |
+| Claude handover cross-project denial | other project is absent from mounts and broker rejects its project ID | not run | not run |
+| Claude handover secret rejection | malformed body and dummy credential marker create no final or temporary file | not run | not run |
+| Claude handover non-logging | stdout, stderr, and audit omit body, title, capability, and credential-derived text | not run | not run |
+| Claude handover expired capability | runtime socket/capability disappear and cannot be reused after exit | not run | not run |
 | setup-token automated preflight | complete suite PASS; no whitespace errors | unittest exit 0; `Ran 243 tests`; `OK (skipped=1)` for the separately gated Podman test; `git diff --check` exit 0 | 2026-08-25 |
 | derived image Podman integration | sample package/project Node build; second resolution reuses cache; config change rebuilds; agent/project Node separation; both agent CLIs start | exit 0; `make` and project Node `v22.23.1` succeeded; fixed agent Node, Codex, and Claude probes succeeded; second resolution did not build; package-config change produced a different key/image and one new build; exact disposable test images removed | 2026-08-25 |
 | normal latest rebuild | no fixed version flags; CA bootstrap then persistent Debian HTTPS source; cachebuster invalidates CLI install; both public versions resolve | `bin/agentctl build` exit 0; HTTPS rewrite postconditions passed; main APT metadata/packages used `https://deb.debian.org`; image source records both HTTPS URIs; `localhost/agent-container:dev` image `3bf10ba7c98597e00bfc08ea3482e5095de504676591abd22532d484a7eeb547`; Node `v26.7.0`; Codex `0.149.1`; Claude `2.1.243` | 2026-08-25 |
