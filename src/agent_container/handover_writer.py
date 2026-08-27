@@ -77,21 +77,46 @@ def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
     return left.st_dev == right.st_dev and left.st_ino == right.st_ino
 
 
-def _revalidate_project_directory(
-    project_dir: Path, directory_fd: int, expected: os.stat_result
-) -> None:
+def _open_directory_components(project_dir: Path) -> int:
+    components = project_dir.parts
+    if (
+        not project_dir.is_absolute()
+        or not components
+        or components[0] != os.sep
+        or any(component in {"", ".", ".."} for component in components[1:])
+    ):
+        raise ValueError("handover project directory is invalid")
     try:
-        current = os.lstat(project_dir)
-        pinned = os.fstat(directory_fd)
+        directory_fd = os.open(os.sep, os.O_RDONLY | _DIRECTORY | _NOFOLLOW)
+    except OSError:
+        raise ValueError("handover project directory is invalid") from None
+    try:
+        for component in components[1:]:
+            child_fd = os.open(
+                component,
+                os.O_RDONLY | _DIRECTORY | _NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = child_fd
+        if not stat.S_ISDIR(os.fstat(directory_fd).st_mode):
+            raise ValueError("handover project directory is invalid")
+    except BaseException:
+        os.close(directory_fd)
+        raise
+    return directory_fd
+
+
+def _revalidate_project_directory(project_dir: Path, directory_fd: int) -> None:
+    try:
+        current_fd = _open_directory_components(project_dir)
     except OSError:
         raise ValueError("handover project directory changed") from None
-    if (
-        not stat.S_ISDIR(current.st_mode)
-        or not stat.S_ISDIR(pinned.st_mode)
-        or not _same_inode(current, expected)
-        or not _same_inode(pinned, expected)
-    ):
-        raise ValueError("handover project directory changed")
+    try:
+        if not _same_inode(os.fstat(current_fd), os.fstat(directory_fd)):
+            raise ValueError("handover project directory changed")
+    finally:
+        os.close(current_fd)
 
 
 def _open_project_directory(project_dir: Path, project_id: str) -> tuple[Path, int]:
@@ -99,18 +124,11 @@ def _open_project_directory(project_dir: Path, project_id: str) -> tuple[Path, i
     if not project_dir.is_absolute() or project_dir.name != project_id:
         raise ValueError("handover project directory is invalid")
     try:
-        resolved = project_dir.resolve(strict=True)
-        initial = os.lstat(project_dir)
-    except OSError:
-        raise ValueError("handover project directory is invalid") from None
-    if resolved != project_dir or not stat.S_ISDIR(initial.st_mode):
-        raise ValueError("handover project directory is invalid")
-    try:
-        directory_fd = os.open(project_dir, os.O_RDONLY | _DIRECTORY | _NOFOLLOW)
-    except OSError:
+        directory_fd = _open_directory_components(project_dir)
+    except (OSError, ValueError):
         raise ValueError("handover project directory is invalid") from None
     try:
-        _revalidate_project_directory(project_dir, directory_fd, initial)
+        _revalidate_project_directory(project_dir, directory_fd)
     except BaseException:
         os.close(directory_fd)
         raise
@@ -134,10 +152,10 @@ def create_atomic_handover(
     now: datetime | None = None,
     token_hex: Callable[[int], str] = secrets.token_hex,
 ) -> Path:
-    project, directory_fd = _open_project_directory(project_dir, project_id)
     timestamp = now or datetime.now(timezone.utc)
     document = render_handover(project_id, title, body, timestamp)
     timestamp = timestamp.astimezone(timezone.utc)
+    project, directory_fd = _open_project_directory(project_dir, project_id)
 
     try:
         for _ in range(8):
@@ -162,8 +180,7 @@ def create_atomic_handover(
                 os.fsync(fd)
                 os.close(fd)
                 fd = None
-                pinned = os.fstat(directory_fd)
-                _revalidate_project_directory(project, directory_fd, pinned)
+                _revalidate_project_directory(project, directory_fd)
                 try:
                     os.link(
                         temporary,
@@ -178,7 +195,7 @@ def create_atomic_handover(
                 os.unlink(temporary, dir_fd=directory_fd)
                 temporary_created = False
                 os.fsync(directory_fd)
-                _revalidate_project_directory(project, directory_fd, pinned)
+                _revalidate_project_directory(project, directory_fd)
                 complete = True
                 return project / final
             finally:

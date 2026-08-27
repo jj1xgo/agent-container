@@ -174,12 +174,15 @@ class AtomicHandoverWriterTest(unittest.TestCase):
     def test_rejects_a_directory_replacement_after_pinning(self) -> None:
         original_open = os.open
         pinned = Path(self.temp.name) / "pinned"
+        replaced = False
 
         def open_and_replace(path: object, flags: int, *args: object, **kwargs: object) -> int:
+            nonlocal replaced
             descriptor = original_open(path, flags, *args, **kwargs)
-            if path == self.project:
+            if not replaced and (path == self.project or path == "project"):
                 self.project.rename(pinned)
                 self.project.mkdir()
+                replaced = True
             return descriptor
 
         with mock.patch("agent_container.handover_writer.os.open", side_effect=open_and_replace):
@@ -194,6 +197,72 @@ class AtomicHandoverWriterTest(unittest.TestCase):
                 )
         self.assertEqual(list(self.project.iterdir()), [])
         self.assertEqual(list(pinned.iterdir()), [])
+
+    def test_rejects_an_ancestor_replacement_before_temporary_creation(self) -> None:
+        ancestor = Path(self.temp.name) / "ancestor"
+        project = ancestor / "project"
+        ancestor.mkdir()
+        project.mkdir()
+        trusted_ancestor = Path(self.temp.name) / "trusted-ancestor"
+        attacker_ancestor = Path(self.temp.name) / "attacker-ancestor"
+        original_open = os.open
+        original_write = os.write
+        swapped = False
+
+        def replace_ancestor() -> None:
+            nonlocal swapped
+            ancestor.rename(trusted_ancestor)
+            attacker_ancestor.mkdir()
+            (attacker_ancestor / "project").mkdir()
+            attacker_ancestor.rename(ancestor)
+            swapped = True
+
+        def open_and_swap(path: object, flags: int, *args: object, **kwargs: object) -> int:
+            nonlocal swapped
+            if not swapped and Path(path).name.startswith(".handover-"):
+                replace_ancestor()
+            descriptor = original_open(path, flags, *args, **kwargs)
+            if not swapped and path == "ancestor":
+                replace_ancestor()
+            return descriptor
+
+        def write_without_attacker_file(fd: int, data: bytes) -> int:
+            if list((ancestor / "project").iterdir()):
+                raise AssertionError("temporary handover entered replacement ancestor")
+            return original_write(fd, data)
+
+        with mock.patch("agent_container.handover_writer.os.open", side_effect=open_and_swap), mock.patch(
+            "agent_container.handover_writer.os.write", side_effect=write_without_attacker_file
+        ):
+            with self.assertRaises(ValueError):
+                create_atomic_handover(
+                    project,
+                    "project",
+                    "title",
+                    valid_body(),
+                    self.now,
+                    lambda size: "a" * (size * 2),
+                )
+        self.assertEqual(list((ancestor / "project").iterdir()), [])
+        self.assertEqual(list((trusted_ancestor / "project").iterdir()), [])
+
+    def test_invalid_requests_do_not_leak_project_directory_descriptors(self) -> None:
+        fd_root = Path("/proc/self/fd")
+        if not fd_root.is_dir():
+            self.skipTest("FD counting requires procfs")
+        oversized = valid_body()[:-1] + "x" * MAX_DOCUMENT_BYTES
+        cases = (
+            ("bad\ntitle", valid_body(), self.now),
+            ("title", "not a handover", self.now),
+            ("title", valid_body(), self.now.replace(tzinfo=None)),
+            ("title", oversized, self.now),
+        )
+        before = len(list(fd_root.iterdir()))
+        for title, body, now in cases:
+            with self.subTest(title=title), self.assertRaises(ValueError):
+                create_atomic_handover(self.project, "project", title, body, now)
+        self.assertEqual(len(list(fd_root.iterdir())), before)
+        self.assertEqual(list(self.project.iterdir()), [])
 
     def test_cleans_up_when_writing_linking_or_fsync_fails(self) -> None:
         failures = (
