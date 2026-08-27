@@ -82,7 +82,7 @@ class DevelopmentVersionTest(unittest.TestCase):
 
     def test_falls_back_when_git_release_metadata_is_unavailable(self) -> None:
         with TemporaryDirectory() as temp:
-            self.assertEqual(resolve_version(Path(temp)), "0.2.0-dev.0")
+            self.assertEqual(resolve_version(Path(temp), {}), "0.2.0-dev.0")
 
     def test_git_checkout_without_release_tag_still_uses_commit_identity(self) -> None:
         with TemporaryDirectory() as temp:
