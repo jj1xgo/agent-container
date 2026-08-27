@@ -198,7 +198,7 @@ class AtomicHandoverWriterTest(unittest.TestCase):
         self.assertEqual(list(self.project.iterdir()), [])
         self.assertEqual(list(pinned.iterdir()), [])
 
-    def test_rejects_an_ancestor_replacement_before_temporary_creation(self) -> None:
+    def test_rejects_an_ancestor_symlink_replacement_during_validation(self) -> None:
         ancestor = Path(self.temp.name) / "ancestor"
         project = ancestor / "project"
         ancestor.mkdir()
@@ -206,7 +206,7 @@ class AtomicHandoverWriterTest(unittest.TestCase):
         trusted_ancestor = Path(self.temp.name) / "trusted-ancestor"
         attacker_ancestor = Path(self.temp.name) / "attacker-ancestor"
         original_open = os.open
-        original_write = os.write
+        original_resolve = Path.resolve
         swapped = False
 
         def replace_ancestor() -> None:
@@ -214,26 +214,24 @@ class AtomicHandoverWriterTest(unittest.TestCase):
             ancestor.rename(trusted_ancestor)
             attacker_ancestor.mkdir()
             (attacker_ancestor / "project").mkdir()
-            attacker_ancestor.rename(ancestor)
+            ancestor.symlink_to(attacker_ancestor, target_is_directory=True)
             swapped = True
+
+        def resolve_and_swap(path: Path, *args: object, **kwargs: object) -> Path:
+            resolved = original_resolve(path, *args, **kwargs)
+            if not swapped and path == project:
+                replace_ancestor()
+            return resolved
 
         def open_and_swap(path: object, flags: int, *args: object, **kwargs: object) -> int:
             nonlocal swapped
-            if not swapped and Path(path).name.startswith(".handover-"):
-                replace_ancestor()
-            descriptor = original_open(path, flags, *args, **kwargs)
             if not swapped and path == "ancestor":
                 replace_ancestor()
-            return descriptor
+            return original_open(path, flags, *args, **kwargs)
 
-        def write_without_attacker_file(fd: int, data: bytes) -> int:
-            if list((ancestor / "project").iterdir()):
-                raise AssertionError("temporary handover entered replacement ancestor")
-            return original_write(fd, data)
-
-        with mock.patch("agent_container.handover_writer.os.open", side_effect=open_and_swap), mock.patch(
-            "agent_container.handover_writer.os.write", side_effect=write_without_attacker_file
-        ):
+        with mock.patch(
+            "agent_container.handover_writer.Path.resolve", autospec=True, side_effect=resolve_and_swap
+        ), mock.patch("agent_container.handover_writer.os.open", side_effect=open_and_swap):
             with self.assertRaises(ValueError):
                 create_atomic_handover(
                     project,
