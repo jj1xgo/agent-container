@@ -186,7 +186,7 @@ agent-handover create --title "引き継ぎタイトル" < "$handover_body"
 
 handover brokerは`create`だけを提供し、既存fileのread、list、overwrite、rename、deleteはできません。project、metadata、filename、最終pathはhostが決定します。brokerが拒否・停止・タイムアウトした場合はnonzeroで停止し、direct writeへfallbackしません。sandboxやmountを弱めたり、別pathへ作成したりしません。
 
-auditは時刻、project、operation、固定stage、status、成功pathだけを対象とし、本文、title、capabilityはauditしません。credential一致部分、環境値、raw exceptionも記録しません。他projectのhandoverはmountにもbrokerにも現れません。認証済みClaudeのhandover実host smokeは`not run`であり、merge後の別途利用者承認までPASSとしません。
+auditは時刻、project、operation、固定stage、status、成功pathだけを対象とし、本文、title、capabilityはauditしません。credential一致部分、環境値、raw exceptionも記録しません。他projectのhandoverはmountにもbrokerにも現れません。認証済みClaudeのhandover実host smokeは2026-08-27にPASSし、create、direct mutation denial、cross-project denial、dummy credential rejection、non-logging、expired runtime capabilityを確認しました。
 
 ## Claude runtimeの正確なmount
 

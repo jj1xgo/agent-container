@@ -140,7 +140,7 @@ setup command、hidden prompt、token format、staged `claude auth status`、act
 
 ## Claude handover brokerのmerge後gate
 
-このgateは実host、Podman、認証済みClaude、disposableな専用smoke projectを使います。実装をmergeした後、利用者がこのgateを個別に承認するまで実行しません。認証済みClaudeのhandover実host smokeは`not run`です。
+このgateは実host、Podman、認証済みClaude、disposableな専用smoke projectを使います。実装をmergeした後、利用者がこのgateを個別に承認するまで実行しません。認証済みClaudeのhandover実host smokeは2026-08-27にPASSしました。
 
 実行時もhandover本文はprivate workspaceのmode `0600`の一時fileで準備し、7つの固定sectionを`agent-handover create --title "TITLE" < handover-body.md`でstdinから1回だけ送ります。本文をcommand line、shell history、環境変数へ入れません。
 
@@ -161,12 +161,12 @@ unit suiteの結果を実host観測として扱いません。実行後は、実
 
 | command/check | expected result | observed result | date |
 | --- | --- | --- | --- |
-| Claude handover create | create succeeds; path-only response; canonical metadata and seven sections | not run | not run |
-| Claude handover direct mutation denial | direct create, overwrite, rename, and delete are denied; existing files unchanged | not run | not run |
-| Claude handover cross-project denial | other project is absent from mounts and broker rejects its project ID | not run | not run |
-| Claude handover secret rejection | malformed body and dummy credential marker create no final or temporary file | not run | not run |
-| Claude handover non-logging | stdout, stderr, and audit omit body, title, capability, and credential-derived text | not run | not run |
-| Claude handover expired capability | runtime socket/capability disappear and cannot be reused after exit | not run | not run |
+| Claude handover create | create succeeds; path-only response; canonical metadata and seven sections | exit 0; path-only stdout; host regular file mode 0600 owner 1000:1000; canonical metadata and seven sections | 2026-08-27 |
+| Claude handover direct mutation denial | direct create, overwrite, rename, and delete are denied; existing files unchanged | direct create, overwrite, rename, and delete denied read-only; existing file present and content hash unchanged | 2026-08-27 |
+| Claude handover cross-project denial | other project is absent from mounts and broker rejects its project ID | other mount absent; overridden project request denied; stdout empty; fixed stderr; audit authentication | 2026-08-27 |
+| Claude handover secret rejection | malformed body and dummy credential marker create no final or temporary file | malformed sections and dummy credential marker denied; stdout empty; fixed stderr; audit content-policy; no temporary or new entry | 2026-08-27 |
+| Claude handover non-logging | stdout, stderr, and audit omit body, title, capability, and credential-derived text | client output omitted sentinels; audit fixed metadata only and omitted body, title, capability, and credential marker | 2026-08-27 |
+| Claude handover expired capability | runtime socket/capability disappear and cannot be reused after exit | runtime directory, socket, and capability removed; stale client denied; stdout empty; fixed stderr; audit unchanged | 2026-08-27 |
 | setup-token automated preflight | complete suite PASS; no whitespace errors | unittest exit 0; `Ran 243 tests`; `OK (skipped=1)` for the separately gated Podman test; `git diff --check` exit 0 | 2026-08-25 |
 | derived image Podman integration | sample package/project Node build; second resolution reuses cache; config change rebuilds; agent/project Node separation; both agent CLIs start | exit 0; `make` and project Node `v22.23.1` succeeded; fixed agent Node, Codex, and Claude probes succeeded; second resolution did not build; package-config change produced a different key/image and one new build; exact disposable test images removed | 2026-08-25 |
 | normal latest rebuild | no fixed version flags; CA bootstrap then persistent Debian HTTPS source; cachebuster invalidates CLI install; both public versions resolve | `bin/agentctl build` exit 0; HTTPS rewrite postconditions passed; main APT metadata/packages used `https://deb.debian.org`; image source records both HTTPS URIs; `localhost/agent-container:dev` image `3bf10ba7c98597e00bfc08ea3482e5095de504676591abd22532d484a7eeb547`; Node `v26.7.0`; Codex `0.149.1`; Claude `2.1.243` | 2026-08-25 |

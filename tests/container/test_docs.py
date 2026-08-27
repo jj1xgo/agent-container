@@ -195,12 +195,12 @@ class Phase2DocumentationTest(unittest.TestCase):
             "## 検証結果",
             "## 未解決事項とリスク",
             "## 次の一手",
-            "認証済みClaudeのhandover実host smokeは`not run`",
+            "認証済みClaudeのhandover実host smokeは2026-08-27にPASS",
         ):
             self.assertIn(expected, body)
         self.assertNotIn(": > handover-body.md", body)
 
-    def test_handover_smoke_guide_keeps_authenticated_checks_not_run(self) -> None:
+    def test_handover_smoke_guide_records_authenticated_checks(self) -> None:
         body = (ROOT / "docs/phase2-smoke-test.md").read_text(encoding="utf-8")
 
         for expected in (
@@ -210,7 +210,7 @@ class Phase2DocumentationTest(unittest.TestCase):
             "direct writeへfallbackしません",
             "本文、title、capabilityはauditしません",
             "他projectのhandoverは利用できません",
-            "認証済みClaudeのhandover実host smokeは`not run`",
+            "認証済みClaudeのhandover実host smokeは2026-08-27にPASS",
         ):
             self.assertIn(expected, body)
 
@@ -231,9 +231,18 @@ class Phase2DocumentationTest(unittest.TestCase):
                 "Claude handover expired capability",
             },
         )
-        for columns in rows.values():
+        expected_results = {
+            "Claude handover create": "exit 0; path-only stdout; host regular file mode 0600 owner 1000:1000; canonical metadata and seven sections",
+            "Claude handover direct mutation denial": "direct create, overwrite, rename, and delete denied read-only; existing file present and content hash unchanged",
+            "Claude handover cross-project denial": "other mount absent; overridden project request denied; stdout empty; fixed stderr; audit authentication",
+            "Claude handover secret rejection": "malformed sections and dummy credential marker denied; stdout empty; fixed stderr; audit content-policy; no temporary or new entry",
+            "Claude handover non-logging": "client output omitted sentinels; audit fixed metadata only and omitted body, title, capability, and credential marker",
+            "Claude handover expired capability": "runtime directory, socket, and capability removed; stale client denied; stdout empty; fixed stderr; audit unchanged",
+        }
+        for name, columns in rows.items():
             self.assertEqual(len(columns), 4)
-            self.assertEqual(columns[2:], ["not run", "not run"])
+            self.assertEqual(columns[2], expected_results[name])
+            self.assertEqual(columns[3], "2026-08-27")
 
     def test_codex_retains_direct_handover_path_in_phase_1(self) -> None:
         body = (ROOT / "docs/codex-operations.md").read_text(encoding="utf-8")
