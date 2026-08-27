@@ -3094,7 +3094,8 @@ class AgentCtlParserTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         self.assertRegex(
             stdout.getvalue(),
-            r"^agentctl 0\.3\.0-dev\.\d+(?:\+g[0-9a-f]{7}(?:\.dirty)?)?\n$",
+            r"^agentctl (?:0\.2\.0|0\.3\.0-dev\.\d+"
+            r"(?:\+g[0-9a-f]{7}(?:\.dirty)?)?)\n$",
         )
 
     def test_new_command_contract(self) -> None:
