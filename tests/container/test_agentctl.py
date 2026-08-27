@@ -9,9 +9,15 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import agent_container.agentctl as agentctl
+import agent_container.handover_broker_client as handover_broker_client
 from agent_container import __version__
 from agent_container.agentctl import main
 from agent_container.agentctl import parser
+from agent_container.handover_broker_runtime import HandoverBrokerRuntimeError
+from agent_container.handover_broker_runtime import HandoverRuntimeMount
+from agent_container.podman import CommandSpec
+from agent_container.podman import handover_broker_client_status_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.podman import BrokerRuntimeMount
@@ -29,6 +35,29 @@ def successful_podman_result(spec):
     if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
         return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
     return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
+
+
+class _TrackingBrokerContext:
+    def __init__(self, name, mount, events, on_enter=None, enter_error=None):
+        self.name = name
+        self.mount = mount
+        self.events = events
+        self.on_enter = on_enter
+        self.enter_error = enter_error
+        self.active = False
+
+    def __enter__(self):
+        self.events.append(f"{self.name}-enter")
+        if self.on_enter is not None:
+            self.on_enter()
+        if self.enter_error is not None:
+            raise self.enter_error
+        self.active = True
+        return self.mount
+
+    def __exit__(self, *_):
+        self.events.append(f"{self.name}-exit")
+        self.active = False
 
 
 class AgentCtlBuildAuthTest(unittest.TestCase):
@@ -1328,6 +1357,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "agent-node",
         "project-node",
         "claude-managed-policy",
+        "claude-handover-client",
         "claude-version",
         "private-state",
         "claude-auth",
@@ -1349,6 +1379,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "agent-node",
         "project-node",
         "claude-managed-policy",
+        "claude-handover-client",
         "codex-version",
         "claude-version",
         "private-state",
@@ -1445,6 +1476,83 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             "auth",
             "status",
         )
+
+    def _is_handover_client_status_spec(self, spec) -> bool:
+        return spec.argv[-4:] == (
+            "python3",
+            "-m",
+            "agent_container.handover_broker_client",
+            "--self-check",
+        )
+
+    def test_handover_client_self_check_reads_no_external_inputs(self) -> None:
+        class ExplodingEnvironment(dict):
+            def get(self, *_args, **_kwargs):
+                raise AssertionError("environment read")
+
+        class ExplodingInput:
+            def read(self, *_args, **_kwargs):
+                raise AssertionError("stdin read")
+
+        output = StringIO()
+        errors = StringIO()
+        with patch.object(
+            handover_broker_client,
+            "validate_handover_socket",
+            side_effect=AssertionError("socket read"),
+        ), patch.object(
+            handover_broker_client,
+            "read_handover_capability",
+            side_effect=AssertionError("capability read"),
+        ):
+            result = handover_broker_client.run(
+                ["--self-check"],
+                ExplodingEnvironment(),
+                ExplodingInput(),
+                output,
+                errors,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(errors.getvalue(), "")
+
+        with patch.object(handover_broker_client, "PROTOCOL_VERSION", 2):
+            self.assertEqual(
+                handover_broker_client.run(
+                    ["--self-check"],
+                    ExplodingEnvironment(),
+                    ExplodingInput(),
+                    StringIO(),
+                    StringIO(),
+                ),
+                1,
+            )
+
+    def test_handover_client_status_probe_is_hardened_and_mount_free(self) -> None:
+        spec = handover_broker_client_status_spec("example/image:current")
+
+        self.assertEqual(
+            spec.argv,
+            (
+                "podman",
+                "run",
+                "--rm",
+                "--read-only",
+                "--cap-drop=all",
+                "--security-opt=no-new-privileges",
+                "--userns=keep-id:uid=1000,gid=1000",
+                "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
+                "example/image:current",
+                "python3",
+                "-m",
+                "agent_container.handover_broker_client",
+                "--self-check",
+            ),
+        )
+        self.assertNotIn("--mount", spec.argv)
+        self.assertNotIn("--env", spec.argv)
+        self.assertEqual(spec.environment, {})
 
     def _successful_doctor_runner(self, spec):
         if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
@@ -1575,12 +1683,385 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(len(builder_calls), 1)
             self.assertIs(builder_calls[0][-1], broker)
             create.assert_called_once()
-            context.__enter__.assert_called_once_with()
+            context.__enter__.assert_called_once()
             context.__exit__.assert_called_once()
             runtime = " ".join(calls[-1].argv)
             self.assertIn("dst=/run/agent-broker,ro=true", runtime)
             self.assertNotIn("src=" + str(root / "gh"), runtime)
             self.assertNotIn("gh auth git-credential", runtime)
+
+    def test_run_enters_only_selected_brokers_and_passes_independent_mounts(self) -> None:
+        combinations = (
+            ("codex", False),
+            ("codex", True),
+            ("claude", False),
+            ("claude", True),
+        )
+        for agent, github_enabled in combinations:
+            with self.subTest(agent=agent, github_enabled=github_enabled):
+                with TemporaryDirectory() as temp:
+                    root, handover_project = self._runtime_state(temp)
+                    events = []
+                    github_mount = BrokerRuntimeMount(
+                        root / "github-broker/run/session",
+                        Repository.parse("jj1xgo/agent-container"),
+                    )
+                    handover_mount = HandoverRuntimeMount(
+                        root / "handover-broker/run/session"
+                    )
+                    github_context = _TrackingBrokerContext(
+                        "github", github_mount, events
+                    )
+                    handover_context = _TrackingBrokerContext(
+                        "handover",
+                        handover_mount,
+                        events,
+                        on_enter=lambda: self.assertTrue(
+                            (root / "projects/agent-container/claude-config").is_dir()
+                        ),
+                    )
+                    builder_calls = []
+
+                    def runner(spec):
+                        if spec.argv == ("runtime", agent):
+                            events.append("runtime")
+                        elif spec.argv[-3:] == (
+                            "python3",
+                            "-m",
+                            "agent_container.claude_policy",
+                        ):
+                            events.append("policy")
+                        return successful_podman_result(spec)
+
+                    def builder(*args):
+                        events.append("builder")
+                        builder_calls.append(args)
+                        self.assertEqual(github_context.active, github_enabled)
+                        self.assertEqual(handover_context.active, agent == "claude")
+                        return CommandSpec(("runtime", agent), {})
+
+                    original_read = agentctl._read_runtime_project
+
+                    def tracked_read(path):
+                        events.append("metadata")
+                        return original_read(path)
+
+                    argv = ["run", "agent-container", "--agent", agent]
+                    if github_enabled:
+                        argv.append("--github-broker")
+                    with (
+                        patch(
+                            "agent_container.agentctl._read_runtime_project",
+                            side_effect=tracked_read,
+                        ) as read_project,
+                        patch(
+                            "agent_container.agentctl.UploadPackBrokerRuntime.create",
+                            return_value=github_context,
+                        ) as create_github,
+                        patch(
+                            "agent_container.agentctl.HandoverBrokerRuntime.create",
+                            return_value=handover_context,
+                        ) as create_handover,
+                    ):
+                        result = main(
+                            argv,
+                            environment={"AGENT_CONTAINER_HOME": str(root)},
+                            runner=runner,
+                            git_remote_reader=lambda path: (
+                                "https://github.com/jj1xgo/agent-container.git"
+                            ),
+                            runtime_spec_builders={agent: builder},
+                            stdout=StringIO(),
+                        )
+
+                    self.assertEqual(result, 0)
+                    self.assertEqual(read_project.call_count, 1)
+                    self.assertEqual(len(builder_calls), 1)
+                    args = builder_calls[0]
+                    self.assertEqual(args[:5], (
+                        agentctl.StateLayout(root, "agent-container"),
+                        handover_project,
+                        "localhost/agent-container:dev",
+                        os.getuid(),
+                        os.getgid(),
+                    ))
+                    if agent == "claude":
+                        self.assertIs(args[5], handover_mount)
+                        create_handover.assert_called_once()
+                    else:
+                        self.assertEqual(len(args), 6 if github_enabled else 5)
+                        create_handover.assert_not_called()
+                    if github_enabled:
+                        self.assertIs(args[-1], github_mount)
+                        create_github.assert_called_once()
+                    else:
+                        create_github.assert_not_called()
+                    expected = ["metadata"]
+                    if agent == "claude":
+                        expected.append("policy")
+                    if github_enabled:
+                        expected.append("github-enter")
+                    if agent == "claude":
+                        expected.append("handover-enter")
+                    expected.extend(("builder", "runtime"))
+                    if agent == "claude":
+                        expected.append("handover-exit")
+                    if github_enabled:
+                        expected.append("github-exit")
+                    self.assertEqual(events, expected)
+
+    def test_run_handover_broker_enter_failure_never_builds_or_runs_runtime(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            events = []
+            github_mount = BrokerRuntimeMount(
+                root / "github-broker/run/session",
+                Repository.parse("jj1xgo/agent-container"),
+            )
+            github_context = _TrackingBrokerContext(
+                "github", github_mount, events
+            )
+            failed_handover = _TrackingBrokerContext(
+                "handover",
+                HandoverRuntimeMount(root / "handover-broker/run/session"),
+                events,
+                enter_error=HandoverBrokerRuntimeError(
+                    "DO-NOT-PRINT-HANDOVER-RUNTIME-DETAIL"
+                ),
+            )
+            runtime_specs = []
+            builder_calls = []
+            stderr = StringIO()
+
+            def runner(spec):
+                if spec.argv and spec.argv[0] == "runtime":
+                    runtime_specs.append(spec)
+                return successful_podman_result(spec)
+
+            def builder(*args):
+                builder_calls.append(args)
+                return CommandSpec(("runtime", "claude"), {})
+
+            with (
+                patch(
+                    "agent_container.agentctl.UploadPackBrokerRuntime.create",
+                    return_value=github_context,
+                ),
+                patch(
+                    "agent_container.agentctl.HandoverBrokerRuntime.create",
+                    return_value=failed_handover,
+                ),
+            ):
+                result = main(
+                    [
+                        "run",
+                        "agent-container",
+                        "--agent",
+                        "claude",
+                        "--github-broker",
+                    ],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    runtime_spec_builders={"claude": builder},
+                    stdout=StringIO(),
+                    stderr=stderr,
+                )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(builder_calls, [])
+            self.assertEqual(runtime_specs, [])
+            self.assertEqual(
+                events, ["github-enter", "handover-enter", "github-exit"]
+            )
+            self.assertNotIn(
+                "DO-NOT-PRINT-HANDOVER-RUNTIME-DETAIL", stderr.getvalue()
+            )
+
+    def test_run_rejects_handover_overlap_before_any_broker_or_podman(self) -> None:
+        for direction in ("same", "ancestor", "descendant"):
+            with self.subTest(direction=direction), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                workspace = root / "workspaces/agent-container"
+                if direction == "same":
+                    handover_root = workspace.parent
+                elif direction == "ancestor":
+                    handover_root = root / "projects"
+                else:
+                    handover_root = workspace / "handover-root"
+                    (handover_root / "agent-container").mkdir(parents=True)
+                project_file = root / "projects/agent-container/project.json"
+                project_file.unlink()
+                ProjectRecord(
+                    Repository.parse("jj1xgo/agent-container"),
+                    handover_root.resolve(),
+                ).write(project_file)
+                podman_calls = []
+                stderr = StringIO()
+                github_context = _TrackingBrokerContext(
+                    "github",
+                    BrokerRuntimeMount(
+                        root / "github-broker/run/session",
+                        Repository.parse("jj1xgo/agent-container"),
+                    ),
+                    [],
+                )
+                handover_context = _TrackingBrokerContext(
+                    "handover",
+                    HandoverRuntimeMount(root / "handover-broker/run/session"),
+                    [],
+                )
+
+                with (
+                    patch(
+                        "agent_container.agentctl.UploadPackBrokerRuntime.create",
+                        return_value=github_context,
+                    ) as create_github,
+                    patch(
+                        "agent_container.agentctl.HandoverBrokerRuntime.create",
+                        return_value=handover_context,
+                    ) as create_handover,
+                ):
+                    result = main(
+                        [
+                            "run",
+                            "agent-container",
+                            "--agent",
+                            "claude",
+                            "--github-broker",
+                        ],
+                        environment={"AGENT_CONTAINER_HOME": str(root)},
+                        runner=lambda spec: podman_calls.append(spec)
+                        or successful_podman_result(spec),
+                        git_remote_reader=lambda path: (
+                            "https://github.com/jj1xgo/agent-container.git"
+                        ),
+                        stdout=StringIO(),
+                        stderr=stderr,
+                    )
+
+                self.assertEqual(result, 1)
+                self.assertIn("overlap", stderr.getvalue())
+                self.assertEqual(podman_calls, [])
+                create_github.assert_not_called()
+                create_handover.assert_not_called()
+
+    def test_run_rejects_state_tree_handover_before_any_broker_or_podman(self) -> None:
+        for area in ("shared-auth/claude", "github-broker", "handover-broker"):
+            with self.subTest(area=area), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                handover_root = root / area
+                handover_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                handover_project = handover_root / "agent-container"
+                handover_project.mkdir(mode=0o700)
+                project_file = root / "projects/agent-container/project.json"
+                project_file.unlink()
+                ProjectRecord(
+                    Repository.parse("jj1xgo/agent-container"),
+                    handover_root.resolve(),
+                ).write(project_file)
+                podman_calls = []
+                stderr = StringIO()
+
+                with (
+                    patch(
+                        "agent_container.agentctl.UploadPackBrokerRuntime.create"
+                    ) as create_github,
+                    patch(
+                        "agent_container.agentctl.HandoverBrokerRuntime.create"
+                    ) as create_handover,
+                ):
+                    result = main(
+                        [
+                            "run",
+                            "agent-container",
+                            "--agent",
+                            "claude",
+                            "--github-broker",
+                        ],
+                        environment={"AGENT_CONTAINER_HOME": str(root)},
+                        runner=lambda spec: podman_calls.append(spec)
+                        or successful_podman_result(spec),
+                        git_remote_reader=lambda path: (
+                            "https://github.com/jj1xgo/agent-container.git"
+                        ),
+                        stdout=StringIO(),
+                        stderr=stderr,
+                    )
+
+                self.assertEqual(result, 1)
+                self.assertIn("overlap", stderr.getvalue())
+                self.assertEqual(podman_calls, [])
+                create_github.assert_not_called()
+                create_handover.assert_not_called()
+
+    def test_run_nonzero_cleans_up_handover_and_github_brokers(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            events = []
+            github_context = _TrackingBrokerContext(
+                "github",
+                BrokerRuntimeMount(
+                    root / "github-broker/run/session",
+                    Repository.parse("jj1xgo/agent-container"),
+                ),
+                events,
+            )
+            handover_context = _TrackingBrokerContext(
+                "handover",
+                HandoverRuntimeMount(root / "handover-broker/run/session"),
+                events,
+            )
+
+            def runner(spec):
+                if spec.argv == ("runtime", "claude"):
+                    events.append("runtime-nonzero")
+                    return subprocess.CompletedProcess(spec.argv, 23)
+                return successful_podman_result(spec)
+
+            with (
+                patch(
+                    "agent_container.agentctl.UploadPackBrokerRuntime.create",
+                    return_value=github_context,
+                ),
+                patch(
+                    "agent_container.agentctl.HandoverBrokerRuntime.create",
+                    return_value=handover_context,
+                ),
+            ):
+                result = main(
+                    [
+                        "run",
+                        "agent-container",
+                        "--agent",
+                        "claude",
+                        "--github-broker",
+                    ],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    runtime_spec_builders={
+                        "claude": lambda *args: CommandSpec(("runtime", "claude"), {})
+                    },
+                    stdout=StringIO(),
+                    stderr=StringIO(),
+                )
+
+            self.assertEqual(result, 23)
+            self.assertEqual(
+                events,
+                [
+                    "github-enter",
+                    "handover-enter",
+                    "runtime-nonzero",
+                    "handover-exit",
+                    "github-exit",
+                ],
+            )
 
     def test_run_uses_current_project_image_without_build(self) -> None:
         with TemporaryDirectory() as temp:
@@ -1690,18 +2171,32 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 self.assertEqual(config.stat().st_mode & 0o777, 0o700)
                 return run_claude_spec(*args)
 
-            result = main(
-                ["run", "agent-container", "--agent", "claude"],
-                environment={"AGENT_CONTAINER_HOME": str(root)},
-                runner=lambda spec: calls.append(spec) or successful_podman_result(spec),
-                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
-                runtime_spec_builders={"claude": runtime_spec_builder},
-                stdout=output,
+            broker_events = []
+            broker_context = _TrackingBrokerContext(
+                "handover",
+                HandoverRuntimeMount(root / "handover-broker/run/session"),
+                broker_events,
             )
+            with patch(
+                "agent_container.agentctl.HandoverBrokerRuntime.create",
+                return_value=broker_context,
+            ):
+                result = main(
+                    ["run", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    runtime_spec_builders={"claude": runtime_spec_builder},
+                    stdout=output,
+                )
 
             self.assertEqual(result, 0)
             self.assertEqual(len(builder_calls), 1)
             self.assertEqual(len(calls), 5)
+            self.assertEqual(broker_events, ["handover-enter", "handover-exit"])
             self.assertEqual(calls[-1].argv[-1], "claude")
             self.assertIn(
                 f"src={handover_project},dst=/handovers/agent-container",
@@ -2603,6 +3098,94 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                     ),
                     1,
                 )
+
+    def test_doctor_reports_handover_client_without_probe_output_or_mounts(self) -> None:
+        marker = "DO-NOT-PRINT-HANDOVER-CLIENT-PROBE"
+        for returncode, expected in (
+            (0, "PASS  claude-handover-client: available"),
+            (19, "FAIL  claude-handover-client: unavailable"),
+        ):
+            with self.subTest(returncode=returncode), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                (root / "projects/agent-container/claude-config").mkdir(mode=0o700)
+                calls = []
+                output = StringIO()
+
+                def runner(spec):
+                    calls.append(spec)
+                    if self._is_handover_client_status_spec(spec):
+                        return subprocess.CompletedProcess(
+                            spec.argv,
+                            returncode,
+                            stdout=marker,
+                            stderr=marker,
+                        )
+                    return self._successful_doctor_runner(spec)
+
+                result = main(
+                    ["doctor", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stdout=output,
+                )
+
+                rendered = output.getvalue()
+                self.assertEqual(result, 0 if returncode == 0 else 1)
+                self.assertIn(expected, rendered)
+                self.assertNotIn(marker, rendered)
+                probes = [
+                    spec for spec in calls if self._is_handover_client_status_spec(spec)
+                ]
+                self.assertEqual(len(probes), 1)
+                self.assertNotIn("--mount", probes[0].argv)
+                self.assertNotIn("--env", probes[0].argv)
+
+    def test_claude_doctor_rejects_state_tree_handover_but_codex_is_unchanged(
+        self,
+    ) -> None:
+        for area in ("shared-auth/claude", "github-broker", "handover-broker"):
+            for agent, expected in (
+                ("claude", "FAIL  handover-project: state validation failed"),
+                (
+                    "codex",
+                    "PASS  handover-project: real directory within configured root",
+                ),
+            ):
+                with (
+                    self.subTest(area=area, agent=agent),
+                    TemporaryDirectory() as temp,
+                ):
+                    root, _ = self._runtime_state(temp)
+                    (root / "projects/agent-container/claude-config").mkdir(
+                        mode=0o700
+                    )
+                    handover_root = root / area
+                    handover_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    (handover_root / "agent-container").mkdir(mode=0o700)
+                    project_file = root / "projects/agent-container/project.json"
+                    project_file.unlink()
+                    ProjectRecord(
+                        Repository.parse("jj1xgo/agent-container"),
+                        handover_root.resolve(),
+                    ).write(project_file)
+                    output = StringIO()
+
+                    result = main(
+                        ["doctor", "agent-container", "--agent", agent],
+                        environment={"AGENT_CONTAINER_HOME": str(root)},
+                        runner=self._successful_doctor_runner,
+                        git_remote_reader=lambda path: (
+                            "https://github.com/jj1xgo/agent-container.git"
+                        ),
+                        stdout=output,
+                    )
+
+                    self.assertIn(expected, output.getvalue())
+                    if agent == "claude":
+                        self.assertEqual(result, 1)
+                    else:
+                        self.assertEqual(result, 0)
 
     def test_codex_doctor_does_not_probe_claude_policy(self) -> None:
         with TemporaryDirectory() as temp:

@@ -20,6 +20,8 @@
 
 launcherは対象projectについてだけ`AGENT_PROJECT_ID`と`AGENT_HANDOVER_ROOT`を設定する。Obsidian vault全体をmountしない。handover本文にはcredentialの値を残さない。
 
+Phase 1ではCodexは既存のdirect handover pathを維持します。Claude限定のcreate-only brokerはCodex runtimeに適用せず、Codexの`agent-handover create --title TITLE`は従来のproject別direct writerを使います。
+
 ## 起動hook
 
 `profiles/codex/hooks.json`を専用`CODEX_HOME`へ配布する。初回または定義変更後は`/hooks`でcommandを確認してtrustする。hookは最新handoverのpathだけを通知し、本文は必要なときにCodexが読む。

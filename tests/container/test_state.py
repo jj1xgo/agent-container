@@ -66,6 +66,18 @@ class StateValidationTest(unittest.TestCase):
             layout.github_broker_policy_file,
             Path("/state/projects/agent-container/github-broker.json"),
         )
+        self.assertEqual(
+            layout.handover_broker_root,
+            Path("/state/handover-broker"),
+        )
+        self.assertEqual(
+            layout.handover_broker_run_root,
+            Path("/state/handover-broker/r/1f630d4dd972"),
+        )
+        self.assertEqual(
+            layout.handover_broker_audit_file,
+            Path("/state/handover-broker/audit/events.jsonl"),
+        )
 
     def test_claude_oauth_token_accepts_only_safe_single_line_ascii(self) -> None:
         self.assertEqual(validate_claude_oauth_token("x" * 32), "x" * 32)

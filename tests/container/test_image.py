@@ -20,6 +20,49 @@ def containerignore_includes(path: str, patterns: list[str]) -> bool:
 
 
 class ContainerImageContractTest(unittest.TestCase):
+    def test_image_installs_exact_managed_claude_handover_instructions(self) -> None:
+        instructions_path = ROOT / "profiles/claude/CLAUDE.md"
+        instructions = instructions_path.read_text(encoding="utf-8")
+
+        self.assertEqual(instructions.count("agent-handover create --title"), 1)
+        required_sections = (
+            "## 作業の目的",
+            "## 現在地",
+            "## 決定事項と理由",
+            "## 変更したファイル・commit・PR",
+            "## 検証結果",
+            "## 未解決事項とリスク",
+            "## 次の一手",
+        )
+        self.assertEqual(
+            [
+                line
+                for line in instructions.splitlines()
+                if line.startswith("## ")
+            ],
+            list(required_sections),
+        )
+        for required_text in (
+            "stdin",
+            "Git status",
+            "直近 commit",
+            "実行済み test",
+            "credential",
+            "環境値",
+            "transcript 全文",
+            "sandbox",
+            "mount",
+            "fallback",
+        ):
+            with self.subTest(required_text=required_text):
+                self.assertIn(required_text, instructions)
+
+        body = (ROOT / "Containerfile").read_text(encoding="utf-8")
+        self.assertIn(
+            "COPY --chmod=0644 profiles/claude/CLAUDE.md /etc/claude-code/CLAUDE.md",
+            body,
+        )
+
     def test_image_copies_exact_claude_managed_policy(self) -> None:
         settings_path = ROOT / "profiles/claude/managed-settings.json"
         mcp_path = ROOT / "profiles/claude/managed-mcp.json"
@@ -202,6 +245,7 @@ class ContainerImageContractTest(unittest.TestCase):
                 "!profiles/claude/",
                 "!profiles/claude/managed-settings.json",
                 "!profiles/claude/managed-mcp.json",
+                "!profiles/claude/CLAUDE.md",
                 "!container/",
                 "!container/bin/",
                 "!container/bin/codex",

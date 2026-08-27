@@ -6,12 +6,52 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent_container.claude_policy import main
 from agent_container.claude_policy import validate_managed_policy
 
 
 ROOT = Path(__file__).resolve().parents[2]
+MANAGED_INSTRUCTIONS = """# Managed Claude handover workflow
+
+別 session または別 agent へ作業を引き継ぐ必要がある場合だけ handover を作成する。
+作成前に Git status、直近 commit、実行済み test、未解決事項を確認し、推測した成功を書かない。
+
+handover の作成には次の command だけを使い、完成した以下の 7 section を固定順序で各 1 回だけ stdin へ渡す。
+
+`agent-handover create --title "引き継ぎタイトル"`
+
+## 作業の目的
+
+完了した内容を書く。
+
+## 現在地
+
+完了した内容を書く。
+
+## 決定事項と理由
+
+完了した内容を書く。
+
+## 変更したファイル・commit・PR
+
+完了した内容を書く。
+
+## 検証結果
+
+完了した内容を書く。
+
+## 未解決事項とリスク
+
+完了した内容を書く。
+
+## 次の一手
+
+完了した内容を書く。
+
+credential、token、環境値、transcript 全文を含めない。broker が拒否した場合は停止し、sandbox や mount を弱めず、別 path への直接書き込みや fallback を行わない。
+""".encode("utf-8")
 
 
 class ClaudeManagedPolicyTest(unittest.TestCase):
@@ -22,6 +62,9 @@ class ClaudeManagedPolicyTest(unittest.TestCase):
         mcp_path.write_text(json.dumps(mcp), encoding="utf-8")
         settings_path.chmod(0o600)
         mcp_path.chmod(0o600)
+        instructions_path = root / "CLAUDE.md"
+        instructions_path.write_bytes(MANAGED_INSTRUCTIONS)
+        instructions_path.chmod(0o644)
         return settings_path, mcp_path
 
     def test_accepts_repository_managed_policy(self) -> None:
@@ -31,6 +74,109 @@ class ClaudeManagedPolicyTest(unittest.TestCase):
                 ROOT / "profiles/claude/managed-mcp.json",
             )
         )
+
+    def test_rejects_tampered_missing_and_wrong_mode_managed_instructions(self) -> None:
+        baseline = json.loads(
+            (ROOT / "profiles/claude/managed-settings.json").read_text()
+        )
+        expected = (ROOT / "profiles/claude/CLAUDE.md").read_bytes()
+        for failure in ("tampered", "missing", "mode"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                settings, mcp = self._write_policy(
+                    Path(temporary), baseline, {"mcpServers": {}}
+                )
+                instructions = settings.parent / "CLAUDE.md"
+                instructions.write_bytes(expected)
+                instructions.chmod(0o644)
+                if failure == "tampered":
+                    instructions.write_bytes(expected + b"tampered\n")
+                elif failure == "missing":
+                    instructions.unlink()
+                else:
+                    instructions.chmod(0o600)
+
+                self.assertFalse(
+                    validate_managed_policy(
+                        settings,
+                        mcp,
+                        instructions,
+                        expected_uid=os.getuid(),
+                    )
+                )
+
+    def test_rejects_special_and_symlinked_managed_instructions(self) -> None:
+        baseline = json.loads(
+            (ROOT / "profiles/claude/managed-settings.json").read_text()
+        )
+        expected = (ROOT / "profiles/claude/CLAUDE.md").read_bytes()
+        for failure in ("fifo", "symlink"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                settings, mcp = self._write_policy(
+                    Path(temporary), baseline, {"mcpServers": {}}
+                )
+                instructions = settings.parent / "CLAUDE.md"
+                instructions.unlink()
+                if failure == "fifo":
+                    os.mkfifo(instructions, 0o644)
+                else:
+                    target = settings.parent / "real-CLAUDE.md"
+                    target.write_bytes(expected)
+                    target.chmod(0o644)
+                    instructions.symlink_to(target)
+
+                self.assertFalse(
+                    validate_managed_policy(
+                        settings,
+                        mcp,
+                        instructions,
+                        expected_uid=os.getuid(),
+                    )
+                )
+
+    def test_rejects_wrong_owner_managed_instructions_independently(self) -> None:
+        baseline = json.loads(
+            (ROOT / "profiles/claude/managed-settings.json").read_text()
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            settings, mcp = self._write_policy(
+                Path(temporary), baseline, {"mcpServers": {}}
+            )
+            instructions = settings.parent / "CLAUDE.md"
+            real_fstat = os.fstat
+
+            def wrong_instruction_owner(descriptor: int):
+                metadata = real_fstat(descriptor)
+                try:
+                    opened_path = os.readlink(f"/proc/self/fd/{descriptor}")
+                except OSError:
+                    return metadata
+                if opened_path != str(instructions):
+                    return metadata
+                fields = list(metadata)
+                fields[4] = os.getuid() + 1
+                return os.stat_result(fields)
+
+            self.assertTrue(
+                validate_managed_policy(
+                    settings,
+                    mcp,
+                    instructions,
+                    expected_uid=os.getuid(),
+                )
+            )
+            with patch(
+                "agent_container.claude_policy.os.fstat",
+                side_effect=wrong_instruction_owner,
+            ):
+                self.assertFalse(
+                    validate_managed_policy(
+                        settings,
+                        mcp,
+                        instructions,
+                        expected_uid=os.getuid(),
+                    )
+                )
+
 
     def test_rejects_every_security_critical_mutation_without_output(self) -> None:
         baseline = json.loads(

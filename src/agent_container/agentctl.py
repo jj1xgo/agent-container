@@ -1,4 +1,5 @@
 import argparse
+from contextlib import ExitStack
 from dataclasses import dataclass
 import getpass
 import json
@@ -26,6 +27,8 @@ from agent_container.github_broker_runtime import GitHubBrokerRuntimeError
 from agent_container.github_broker_runtime import UploadPackBrokerRuntime
 from agent_container.github_broker_runtime import load_broker_policy
 from agent_container.github_broker_runtime import write_broker_policy
+from agent_container.handover_broker_runtime import HandoverBrokerRuntime
+from agent_container.handover_broker_runtime import HandoverBrokerRuntimeError
 from agent_container.github_app import GitHubAppMetadata
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.podman import CommandSpec
@@ -38,6 +41,7 @@ from agent_container.podman import codex_login_status_spec
 from agent_container.podman import claude_setup_token_spec
 from agent_container.podman import claude_token_status_spec
 from agent_container.podman import claude_policy_status_spec
+from agent_container.podman import handover_broker_client_status_spec
 from agent_container.podman import claude_superpowers_spec
 from agent_container.podman import claude_superpowers_marketplace_spec
 from agent_container.podman import codex_superpowers_install_spec
@@ -55,6 +59,7 @@ from agent_container.podman import project_node_version_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.podman import run_command
+from agent_container.podman import validate_claude_handover_project
 from agent_container.profile import seed_codex_home
 from agent_container.profile import update_codex_handover_profile
 from agent_container.project_image import ProjectImageConfig
@@ -78,7 +83,7 @@ from agent_container.state import validate_version
 
 
 DEFAULT_IMAGE = "localhost/agent-container:dev"
-RuntimeSpecBuilder = Callable[[StateLayout, Path, str, int, int], CommandSpec]
+RuntimeSpecBuilder = Callable[..., CommandSpec]
 
 
 def read_cachebuster() -> str:
@@ -441,7 +446,7 @@ def _runtime_preflight(
     git_remote_reader: Callable[[Path], str],
     identity_reader: Callable[[], tuple[int, int]],
     github_broker: bool = False,
-) -> tuple[StateLayout, Path, int, int]:
+) -> tuple[StateLayout, ProjectRecord, Path, int, int]:
     layout = StateLayout.from_environment(project_id, environment)
     _ensure_exact_state_root(layout, environment)
     for directory in _common_runtime_state_directories(
@@ -460,8 +465,10 @@ def _runtime_preflight(
     )
     handover_root = _resolve_handover_root(record.handover_root, layout.project_id)
     handover_project = handover_root / layout.project_id
+    if agent == "claude":
+        validate_claude_handover_project(layout, handover_project)
     uid, gid = _validated_process_identity(identity_reader)
-    return layout, handover_project, uid, gid
+    return layout, record, handover_project, uid, gid
 
 
 def read_process_identity() -> tuple[int, int]:
@@ -854,6 +861,26 @@ def _doctor(
             )
         )
 
+        if runtime_image is None:
+            handover_client_ok = False
+            handover_client_detail = "image unavailable"
+        else:
+            handover_client_status = _doctor_run(
+                runner,
+                handover_broker_client_status_spec(runtime_image),
+            )
+            handover_client_ok = handover_client_status.returncode == 0
+            handover_client_detail = (
+                "available" if handover_client_ok else "unavailable"
+            )
+        checks.append(
+            CheckResult(
+                "PASS" if handover_client_ok else "FAIL",
+                "claude-handover-client",
+                handover_client_detail,
+            )
+        )
+
     for selected_agent in agents:
         if runtime_image is not None:
             cli_version = _doctor_run(
@@ -1044,6 +1071,11 @@ def _doctor(
             handover_root = _resolve_handover_root(
                 record.handover_root, layout.project_id
             )
+            if "claude" in agents:
+                validate_claude_handover_project(
+                    layout,
+                    handover_root / layout.project_id,
+                )
             checks.append(
                 CheckResult(
                     "PASS",
@@ -1296,7 +1328,7 @@ def main(
                 print(agent + "\t" + "\t".join(fields), file=stdout)
             return 0
         if arguments.command == "run":
-            layout, handover_project, uid, gid = _runtime_preflight(
+            layout, record, handover_project, uid, gid = _runtime_preflight(
                 arguments.project,
                 arguments.agent,
                 environment,
@@ -1323,31 +1355,46 @@ def main(
             )
             if runtime_spec_builder is not None:
                 builders = {**builders, "codex": runtime_spec_builder}
-            if arguments.github_broker:
-                record = _read_runtime_project(layout.project_file)
-                with UploadPackBrokerRuntime.create(layout, record) as broker:
+            with ExitStack() as stack:
+                github_mount = (
+                    stack.enter_context(
+                        UploadPackBrokerRuntime.create(layout, record)
+                    )
+                    if arguments.github_broker
+                    else None
+                )
+                handover_mount = (
+                    stack.enter_context(
+                        HandoverBrokerRuntime.create(layout, handover_project)
+                    )
+                    if arguments.agent == "claude"
+                    else None
+                )
+                if arguments.agent == "claude":
+                    assert handover_mount is not None
                     spec = builders[arguments.agent](
                         layout,
                         handover_project,
                         resolution.image,
                         uid,
                         gid,
-                        broker,
+                        handover_mount,
+                        *(() if github_mount is None else (github_mount,)),
                     )
-                    print(
-                        f"Starting {arguments.agent.title()} for project: {layout.project_id}",
-                        file=stdout,
+                else:
+                    spec = builders[arguments.agent](
+                        layout,
+                        handover_project,
+                        resolution.image,
+                        uid,
+                        gid,
+                        *(() if github_mount is None else (github_mount,)),
                     )
-                    runner(spec)
-            else:
-                spec = builders[arguments.agent](
-                    layout, handover_project, resolution.image, uid, gid
-                )
                 print(
                     f"Starting {arguments.agent.title()} for project: {layout.project_id}",
                     file=stdout,
                 )
-                runner(spec)
+                _require_success(runner(spec), spec)
             return 0
         if arguments.command == "doctor":
             checks = _doctor(
@@ -1396,6 +1443,9 @@ def main(
         return 1
     except GitHubBrokerRuntimeError:
         print("error: GitHub broker failed", file=stderr)
+        return 1
+    except HandoverBrokerRuntimeError:
+        print("error: handover broker failed", file=stderr)
         return 1
     except (ValueError, PermissionError, FileNotFoundError) as error:
         print(f"error: {error}", file=stderr)
