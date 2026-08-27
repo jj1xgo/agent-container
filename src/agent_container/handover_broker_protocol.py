@@ -27,6 +27,7 @@ _RESPONSE_CODES = frozenset(
         "unavailable",
     }
 )
+_REQUEST_OPERATION = "create"
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,13 @@ def _validate_version(value: Any) -> int:
     return value
 
 
+def _validate_operation(value: Any) -> str:
+    operation = _validate_string(value)
+    if operation != _REQUEST_OPERATION:
+        raise ValueError("handover broker request schema is invalid")
+    return operation
+
+
 def _decode_json(data: bytes, kind: str) -> dict[str, Any]:
     try:
         text = data.decode("utf-8")
@@ -96,7 +104,7 @@ def encode_request_frame(request: HandoverRequest) -> bytes:
         "version": _validate_version(request.version),
         "capability": _validate_string(request.capability),
         "project_id": _validate_string(request.project_id),
-        "operation": _validate_string(request.operation),
+        "operation": _validate_operation(request.operation),
         "title": _validate_string(request.title),
         "body": _validate_string(request.body),
     }
@@ -129,7 +137,7 @@ def decode_request_frame(data: bytes) -> tuple[HandoverRequest, int]:
     version = _validate_version(decoded["version"])
     capability = _validate_string(decoded["capability"])
     project_id = _validate_string(decoded["project_id"])
-    operation = _validate_string(decoded["operation"])
+    operation = _validate_operation(decoded["operation"])
     title = _validate_string(decoded["title"])
     body = _validate_string(decoded["body"])
     return (

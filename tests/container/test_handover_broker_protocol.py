@@ -77,6 +77,19 @@ class HandoverBrokerProtocolTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             decode_request_frame(frame(json.dumps(missing).encode()))
 
+    def test_rejects_non_create_operations(self) -> None:
+        for operation in ("list", "read", "edit", "rename", "overwrite", "delete"):
+            payload = {
+                "version": 1,
+                "capability": "x",
+                "project_id": "p",
+                "operation": operation,
+                "title": "t",
+                "body": "b",
+            }
+            with self.subTest(operation=operation), self.assertRaises(ValueError):
+                decode_request_frame(frame(json.dumps(payload).encode()))
+
     def test_rejects_zero_oversize_truncated_utf8_and_nul_frames(self) -> None:
         invalid = (
             b"\x00\x00\x00\x00",
