@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-27
+
 ### Added
 
 - `agentctl stats PROJECT`向けのproject／agent runtime label、secret-free resource snapshot、cross-agent review用の共通PR templateを追加しました。
@@ -64,4 +66,5 @@
 
 通常のlocal image buildは既定で各agent CLIの`latest`を解決します。このbaselineは`v0.1.0`のCI再現用固定値であり、runtime dependencyを恒久固定するものではありません。
 
+[0.2.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.1.0

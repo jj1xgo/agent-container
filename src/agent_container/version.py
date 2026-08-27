@@ -5,8 +5,10 @@ import re
 import subprocess
 
 
-_FALLBACK_VERSION = "0.2.0-dev.0"
-_RELEASE_TAG = "v0.1.0"
+_FALLBACK_VERSION = "0.3.0-dev.0"
+_RELEASE_TAG = "v0.2.0"
+_RELEASE_VERSION = _RELEASE_TAG.removeprefix("v")
+_DEVELOPMENT_VERSION = "0.3.0-dev"
 _NUMERIC_IDENTIFIER = r"(?:0|[1-9][0-9]*)"
 _PRERELEASE_IDENTIFIER = (
     rf"(?:{_NUMERIC_IDENTIFIER}|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -55,6 +57,20 @@ def resolve_version(
         return _FALLBACK_VERSION
 
     try:
+        exact_tag = _git(
+            repository_root,
+            "describe",
+            "--tags",
+            "--exact-match",
+            "--match",
+            _RELEASE_TAG,
+        )
+    except (OSError, subprocess.SubprocessError):
+        exact_tag = ""
+    if not dirty and exact_tag == _RELEASE_TAG:
+        return _RELEASE_VERSION
+
+    try:
         _git(repository_root, "merge-base", "--is-ancestor", _RELEASE_TAG, "HEAD")
         distance = _git(
             repository_root,
@@ -67,4 +83,4 @@ def resolve_version(
         distance = "0"
 
     suffix = ".dirty" if dirty else ""
-    return f"0.2.0-dev.{distance}+g{commit}{suffix}"
+    return f"{_DEVELOPMENT_VERSION}.{distance}+g{commit}{suffix}"
