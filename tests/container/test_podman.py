@@ -617,6 +617,47 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", spec.environment)
         self.assertNotIn("dangerously-skip-permissions", joined)
 
+    def test_claude_handover_project_rejects_any_writable_mount_overlap(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        overlapping_projects = (
+            ("same-workspace", Path("/state/workspaces/agent-container")),
+            ("ancestor-workspace", Path("/state/workspaces")),
+            (
+                "descendant-workspace",
+                Path("/state/workspaces/agent-container/handovers/agent-container"),
+            ),
+            (
+                "same-claude-config",
+                Path("/state/projects/agent-container/claude-config"),
+            ),
+            (
+                "descendant-claude-config",
+                Path(
+                    "/state/projects/agent-container/claude-config/"
+                    "handovers/agent-container"
+                ),
+            ),
+            ("same-cache", Path("/state/projects/agent-container/cache")),
+            (
+                "descendant-cache",
+                Path(
+                    "/state/projects/agent-container/cache/handovers/agent-container"
+                ),
+            ),
+        )
+
+        for direction, handover_project in overlapping_projects:
+            with self.subTest(direction=direction):
+                with self.assertRaisesRegex(ValueError, "overlap"):
+                    run_claude_spec(
+                        layout,
+                        handover_project,
+                        IMAGE,
+                        os.getuid(),
+                        os.getgid(),
+                        HANDOVER_BROKER,
+                    )
+
     def test_claude_run_layers_private_home_tmpfs_before_nested_mounts(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")
 

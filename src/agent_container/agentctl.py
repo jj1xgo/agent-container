@@ -58,6 +58,7 @@ from agent_container.podman import project_node_version_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.podman import run_command
+from agent_container.podman import validate_claude_handover_project
 from agent_container.profile import seed_codex_home
 from agent_container.profile import update_codex_handover_profile
 from agent_container.project_image import ProjectImageConfig
@@ -463,6 +464,8 @@ def _runtime_preflight(
     )
     handover_root = _resolve_handover_root(record.handover_root, layout.project_id)
     handover_project = handover_root / layout.project_id
+    if agent == "claude":
+        validate_claude_handover_project(layout, handover_project)
     uid, gid = _validated_process_identity(identity_reader)
     return layout, record, handover_project, uid, gid
 

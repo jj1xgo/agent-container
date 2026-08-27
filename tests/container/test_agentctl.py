@@ -1799,6 +1799,74 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 "DO-NOT-PRINT-HANDOVER-RUNTIME-DETAIL", stderr.getvalue()
             )
 
+    def test_run_rejects_handover_overlap_before_any_broker_or_podman(self) -> None:
+        for direction in ("same", "ancestor", "descendant"):
+            with self.subTest(direction=direction), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                workspace = root / "workspaces/agent-container"
+                if direction == "same":
+                    handover_root = workspace.parent
+                elif direction == "ancestor":
+                    handover_root = root / "projects"
+                else:
+                    handover_root = workspace / "handover-root"
+                    (handover_root / "agent-container").mkdir(parents=True)
+                project_file = root / "projects/agent-container/project.json"
+                project_file.unlink()
+                ProjectRecord(
+                    Repository.parse("jj1xgo/agent-container"),
+                    handover_root.resolve(),
+                ).write(project_file)
+                podman_calls = []
+                stderr = StringIO()
+                github_context = _TrackingBrokerContext(
+                    "github",
+                    BrokerRuntimeMount(
+                        root / "github-broker/run/session",
+                        Repository.parse("jj1xgo/agent-container"),
+                    ),
+                    [],
+                )
+                handover_context = _TrackingBrokerContext(
+                    "handover",
+                    HandoverRuntimeMount(root / "handover-broker/run/session"),
+                    [],
+                )
+
+                with (
+                    patch(
+                        "agent_container.agentctl.UploadPackBrokerRuntime.create",
+                        return_value=github_context,
+                    ) as create_github,
+                    patch(
+                        "agent_container.agentctl.HandoverBrokerRuntime.create",
+                        return_value=handover_context,
+                    ) as create_handover,
+                ):
+                    result = main(
+                        [
+                            "run",
+                            "agent-container",
+                            "--agent",
+                            "claude",
+                            "--github-broker",
+                        ],
+                        environment={"AGENT_CONTAINER_HOME": str(root)},
+                        runner=lambda spec: podman_calls.append(spec)
+                        or successful_podman_result(spec),
+                        git_remote_reader=lambda path: (
+                            "https://github.com/jj1xgo/agent-container.git"
+                        ),
+                        stdout=StringIO(),
+                        stderr=stderr,
+                    )
+
+                self.assertEqual(result, 1)
+                self.assertIn("overlap", stderr.getvalue())
+                self.assertEqual(podman_calls, [])
+                create_github.assert_not_called()
+                create_handover.assert_not_called()
+
     def test_run_nonzero_cleans_up_handover_and_github_brokers(self) -> None:
         with TemporaryDirectory() as temp:
             root, _ = self._runtime_state(temp)

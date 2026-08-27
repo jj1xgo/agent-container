@@ -51,6 +51,26 @@ class BrokerRuntimeMount:
     repository: Repository
 
 
+def validate_claude_handover_project(
+    layout: StateLayout, handover_project: Path
+) -> None:
+    resolved_handover = handover_project.resolve()
+    for writable_source in (
+        layout.workspace,
+        layout.claude_config,
+        layout.cache,
+    ):
+        resolved_writable = writable_source.resolve()
+        if (
+            resolved_handover == resolved_writable
+            or resolved_handover.is_relative_to(resolved_writable)
+            or resolved_writable.is_relative_to(resolved_handover)
+        ):
+            raise ValueError(
+                "Claude handover project must not overlap a writable mount"
+            )
+
+
 def _mount(source: Path, target: str, read_only: bool = False) -> str:
     options = f"type=bind,src={source},dst={target}"
     return f"{options},ro=true" if read_only else options
@@ -509,6 +529,7 @@ def run_claude_spec(
 ) -> CommandSpec:
     if uid != os.getuid() or gid != os.getgid():
         raise ValueError("runtime uid and gid must match the current user")
+    validate_claude_handover_project(layout, handover_project)
     gh_config_dir = "/home/agent/gh-config"
     argv = _runtime_prefix(uid, gid)
     argv += _runtime_monitor_args(layout, "claude")
