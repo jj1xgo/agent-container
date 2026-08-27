@@ -186,7 +186,8 @@ class Phase2DocumentationTest(unittest.TestCase):
             "本文、title、capabilityはauditしません",
             "他projectのhandoverはmountにもbrokerにも現れません",
             "chmod 600",
-            "< handover-body.md",
+            "mktemp ./handover-body.XXXXXX",
+            '< "$handover_body"',
             "## 作業の目的",
             "## 現在地",
             "## 決定事項と理由",
@@ -197,6 +198,7 @@ class Phase2DocumentationTest(unittest.TestCase):
             "認証済みClaudeのhandover実host smokeは`not run`",
         ):
             self.assertIn(expected, body)
+        self.assertNotIn(": > handover-body.md", body)
 
     def test_handover_smoke_guide_keeps_authenticated_checks_not_run(self) -> None:
         body = (ROOT / "docs/phase2-smoke-test.md").read_text(encoding="utf-8")

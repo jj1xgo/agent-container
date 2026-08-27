@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -9,6 +10,8 @@ import secrets
 import shutil
 import socket
 import stat
+import threading
+from typing import Iterator
 
 from agent_container.handover_broker_protocol import HandoverRequest
 from agent_container.handover_broker_protocol import PROTOCOL_VERSION
@@ -37,6 +40,7 @@ _AUDIT_STAGES = frozenset(
 )
 _MAX_UNIX_SOCKET_PATH_BYTES = 107
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 
 def _create_private_file(path: Path, body: str) -> None:
@@ -60,22 +64,51 @@ def _create_private_file(path: Path, body: str) -> None:
 
 
 def _open_audit_file(path: Path) -> int:
-    if path.is_symlink():
-        raise ValueError("handover broker audit file must not be a symlink")
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | os.O_APPEND | os.O_CREAT | _NOFOLLOW,
-        0o600,
-    )
-    metadata = os.fstat(descriptor)
-    if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
-        os.close(descriptor)
-        raise PermissionError("handover broker audit file must have mode 0600")
-    if metadata.st_uid != os.getuid():
-        os.close(descriptor)
-        raise PermissionError(
-            "handover broker audit file must be owned by the current user"
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY
+            | os.O_APPEND
+            | os.O_CREAT
+            | _NOFOLLOW
+            | _NONBLOCK,
+            0o600,
         )
+    except OSError:
+        raise ValueError(
+            "handover broker audit file must be a regular non-symlink file"
+        ) from None
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(
+                "handover broker audit file must be a regular non-symlink file"
+            )
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise PermissionError(
+                "handover broker audit file must have mode 0600"
+            )
+        if metadata.st_uid != os.getuid():
+            raise PermissionError(
+                "handover broker audit file must be owned by the current user"
+            )
+        try:
+            current = os.stat(path, follow_symlinks=False)
+        except OSError:
+            raise ValueError(
+                "handover broker audit file must be a regular non-symlink file"
+            ) from None
+        if (
+            current.st_dev != metadata.st_dev
+            or current.st_ino != metadata.st_ino
+        ):
+            raise ValueError("handover broker audit file changed during validation")
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
     return descriptor
 
 
@@ -136,6 +169,11 @@ class HandoverBrokerSession:
     _listener: socket.socket | None = field(default=None, repr=False)
     _closed: bool = field(default=False, repr=False)
     _cleanup_complete: bool = field(default=False, repr=False)
+    _lifecycle_lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+    )
 
     @classmethod
     def create(
@@ -203,19 +241,32 @@ class HandoverBrokerSession:
         request: HandoverRequest,
         peer_uid: int,
     ) -> tuple[str, str]:
-        if self._closed:
-            raise ValueError("handover broker session is closed")
-        if peer_uid != self.owner_uid:
-            raise ValueError("handover broker request is not authorized")
-        if request.version != PROTOCOL_VERSION:
-            raise ValueError("handover broker protocol version is not supported")
-        if not secrets.compare_digest(request.capability, self._capability):
-            raise ValueError("handover broker request is not authorized")
-        if request.project_id != self.project_id:
-            raise ValueError("handover broker request project is not allowed")
-        if request.operation != "create":
-            raise ValueError("handover broker request operation is not allowed")
+        with self._lifecycle_lock:
+            if self._closed:
+                raise ValueError("handover broker session is closed")
+            if peer_uid != self.owner_uid:
+                raise ValueError("handover broker request is not authorized")
+            if request.version != PROTOCOL_VERSION:
+                raise ValueError("handover broker protocol version is not supported")
+            if not secrets.compare_digest(request.capability, self._capability):
+                raise ValueError("handover broker request is not authorized")
+            if request.project_id != self.project_id:
+                raise ValueError("handover broker request project is not allowed")
+            if request.operation != "create":
+                raise ValueError("handover broker request operation is not allowed")
         return validate_handover_content(request.title, request.body)
+
+    @contextmanager
+    def publication_guard(self) -> Iterator[None]:
+        with self._lifecycle_lock:
+            if self._closed:
+                raise OSError("handover publication is unavailable")
+            yield
+
+    def deactivate(self) -> None:
+        with self._lifecycle_lock:
+            self._closed = True
+            self._capability = ""
 
     def open_listener(self, backlog: int = 4) -> socket.socket:
         if self._closed or self._listener is not None:
@@ -269,8 +320,7 @@ class HandoverBrokerSession:
     def close(self) -> None:
         if self._cleanup_complete:
             return
-        self._closed = True
-        self._capability = ""
+        self.deactivate()
         cleanup_failed = False
         if self._listener is not None:
             try:

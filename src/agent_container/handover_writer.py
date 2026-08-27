@@ -1,4 +1,6 @@
 from collections.abc import Callable
+from contextlib import AbstractContextManager
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -144,6 +146,51 @@ def _write_all(fd: int, document: bytes) -> None:
         offset += written
 
 
+def _entry_metadata(directory_fd: int, name: str) -> os.stat_result:
+    try:
+        return os.stat(
+            name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except OSError:
+        raise OSError("handover file identity check failed") from None
+
+
+def _verify_owned_entry(
+    directory_fd: int,
+    name: str,
+    owned: os.stat_result,
+) -> None:
+    if not _same_inode(_entry_metadata(directory_fd, name), owned):
+        raise OSError("handover file identity changed")
+
+
+def _unlink_owned_entry(
+    directory_fd: int,
+    name: str,
+    owned: os.stat_result,
+) -> None:
+    try:
+        current = os.stat(
+            name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise OSError("handover file cleanup failed") from None
+    if not _same_inode(current, owned):
+        raise OSError("handover file cleanup refused a changed entry")
+    try:
+        os.unlink(name, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise OSError("handover file cleanup failed") from None
+
+
 def create_atomic_handover(
     project_dir: Path,
     project_id: str,
@@ -151,6 +198,7 @@ def create_atomic_handover(
     body: str,
     now: datetime | None = None,
     token_hex: Callable[[int], str] = secrets.token_hex,
+    publication_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> Path:
     timestamp = now or datetime.now(timezone.utc)
     document = render_handover(project_id, title, body, timestamp)
@@ -162,6 +210,7 @@ def create_atomic_handover(
             temporary = f".handover-{token_hex(8)}.tmp"
             final = timestamp.strftime("%Y-%m-%d_%H%M%S_") + token_hex(4) + ".md"
             fd: int | None = None
+            owned: os.stat_result | None = None
             temporary_created = False
             published = False
             complete = False
@@ -173,44 +222,66 @@ def create_atomic_handover(
                     dir_fd=directory_fd,
                 )
                 temporary_created = True
+                owned = os.fstat(fd)
                 os.fchmod(fd, 0o600)
                 if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
                     raise PermissionError("handover file must have mode 0600")
                 _write_all(fd, document)
                 os.fsync(fd)
-                os.close(fd)
-                fd = None
                 _revalidate_project_directory(project, directory_fd)
-                try:
-                    os.link(
-                        temporary,
-                        final,
-                        src_dir_fd=directory_fd,
-                        dst_dir_fd=directory_fd,
-                        follow_symlinks=False,
-                    )
-                except FileExistsError:
-                    continue
+                guard = (
+                    nullcontext()
+                    if publication_guard is None
+                    else publication_guard()
+                )
+                with guard:
+                    _verify_owned_entry(directory_fd, temporary, owned)
+                    try:
+                        os.link(
+                            temporary,
+                            final,
+                            src_dir_fd=directory_fd,
+                            dst_dir_fd=directory_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileExistsError:
+                        continue
                 published = True
-                os.unlink(temporary, dir_fd=directory_fd)
+                _verify_owned_entry(directory_fd, final, owned)
+                _unlink_owned_entry(directory_fd, temporary, owned)
                 temporary_created = False
                 os.fsync(directory_fd)
                 _revalidate_project_directory(project, directory_fd)
+                os.close(fd)
+                fd = None
                 complete = True
                 return project / final
             finally:
+                cleanup_failed = False
+                if owned is None and fd is not None:
+                    try:
+                        owned = os.fstat(fd)
+                    except OSError:
+                        cleanup_failed = True
+                if not complete and owned is not None:
+                    entries = (
+                        (final, published),
+                        (temporary, temporary_created),
+                    )
+                    for name, should_remove in entries:
+                        if not should_remove:
+                            continue
+                        try:
+                            _unlink_owned_entry(directory_fd, name, owned)
+                        except OSError:
+                            cleanup_failed = True
                 if fd is not None:
-                    os.close(fd)
-                if temporary_created:
                     try:
-                        os.unlink(temporary, dir_fd=directory_fd)
-                    except FileNotFoundError:
-                        pass
-                if published and not complete:
-                    try:
-                        os.unlink(final, dir_fd=directory_fd)
-                    except FileNotFoundError:
-                        pass
+                        os.close(fd)
+                    except OSError:
+                        cleanup_failed = True
+                if cleanup_failed:
+                    raise OSError("handover rollback failed") from None
         raise FileExistsError("could not allocate unique handover path")
     finally:
         os.close(directory_fd)

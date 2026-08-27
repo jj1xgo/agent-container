@@ -154,11 +154,11 @@ Claude runtimeでは、選択projectに新規handoverを1つ作成する場合�
 
 ```bash
 umask 077
-: > handover-body.md
-chmod 600 handover-body.md
+handover_body="$(mktemp ./handover-body.XXXXXX)"
+chmod 600 -- "$handover_body"
 ```
 
-editorで`handover-body.md`を開き、次の7 sectionをそれぞれ1回、この順番で書きます。H1、Project、Created、Sessionはhost writerが付与するため書きません。credential、環境値、transcript全文も入れません。
+editorで`$handover_body`を開き、次の7 sectionをそれぞれ1回、この順番で書きます。H1、Project、Created、Sessionはhost writerが付与するため書きません。credential、環境値、transcript全文も入れません。
 
 ```markdown
 ## 作業の目的
@@ -179,7 +179,7 @@ editorで`handover-body.md`を開き、次の7 sectionをそれぞれ1回、こ�
 完成後はstdin redirectionで一度だけ送信し、成功時に返るcontainer上のpathだけを確認します。titleにもcredentialや改行を入れません。
 
 ```bash
-agent-handover create --title "引き継ぎタイトル" < handover-body.md
+agent-handover create --title "引き継ぎタイトル" < "$handover_body"
 ```
 
 送信後の一時fileは自動削除せず、利用者自身の通常のsecure cleanup手順でだけ取り除きます。

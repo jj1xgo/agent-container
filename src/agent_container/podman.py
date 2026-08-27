@@ -56,6 +56,7 @@ def validate_claude_handover_project(
 ) -> None:
     resolved_handover = handover_project.resolve()
     for writable_source in (
+        layout.root,
         layout.workspace,
         layout.claude_config,
         layout.cache,
@@ -67,7 +68,7 @@ def validate_claude_handover_project(
             or resolved_writable.is_relative_to(resolved_handover)
         ):
             raise ValueError(
-                "Claude handover project must not overlap a writable mount"
+                "Claude handover project must not overlap agent state or a writable mount"
             )
 
 

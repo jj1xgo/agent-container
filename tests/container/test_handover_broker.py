@@ -48,7 +48,7 @@ class HandoverBrokerSessionTest(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        if not self.session._closed:
+        if not self.session._cleanup_complete:
             self.session.close()
         self.temporary.cleanup()
 
@@ -88,6 +88,16 @@ class HandoverBrokerSessionTest(unittest.TestCase):
 
         self.assertEqual(title, "Safe title")
         self.assertEqual(body, VALID_BODY)
+
+    def test_deactivate_denies_new_authorization_and_publication(self) -> None:
+        request = self.request()
+        self.session.deactivate()
+
+        with self.assertRaisesRegex(ValueError, "closed"):
+            self.session.authorize(request, os.getuid())
+        with self.assertRaisesRegex(OSError, "unavailable"):
+            with self.session.publication_guard():
+                self.fail("a deactivated session granted publication")
 
     def test_rejects_wrong_uid_before_comparing_capability(self) -> None:
         with mock.patch(
@@ -297,6 +307,68 @@ class HandoverBrokerSessionTest(unittest.TestCase):
                 "agent-container",
                 self.project_dir.resolve(),
             )
+
+    def test_create_rejects_preexisting_fifo_audit_without_blocking(self) -> None:
+        self.session.close()
+        self.session.audit_file.unlink()
+        os.mkfifo(self.session.audit_file, 0o600)
+        real_open = os.open
+        observed_flags: list[int] = []
+
+        def require_nonblocking_open(
+            path: object, flags: int, *args: object, **kwargs: object
+        ) -> int:
+            if Path(path) == self.session.audit_file:
+                observed_flags.append(flags)
+                if not flags & os.O_NONBLOCK:
+                    raise AssertionError("audit FIFO open would block")
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch(
+            "agent_container.handover_broker.os.open",
+            side_effect=require_nonblocking_open,
+        ):
+            with self.assertRaisesRegex(ValueError, "regular non-symlink"):
+                HandoverBrokerSession.create(
+                    self.state_root,
+                    "agent-container",
+                    self.project_dir.resolve(),
+                )
+
+        self.assertEqual(len(observed_flags), 1)
+        self.assertTrue(observed_flags[0] & os.O_NONBLOCK)
+
+    def test_create_rejects_preexisting_audit_with_wrong_mode(self) -> None:
+        self.session.close()
+        self.session.audit_file.chmod(0o644)
+
+        with self.assertRaisesRegex(PermissionError, "mode 0600"):
+            HandoverBrokerSession.create(
+                self.state_root,
+                "agent-container",
+                self.project_dir.resolve(),
+            )
+
+    def test_create_rejects_preexisting_audit_with_wrong_owner(self) -> None:
+        self.session.close()
+        real_fstat = os.fstat
+
+        def foreign_owner(descriptor: int) -> os.stat_result:
+            metadata = real_fstat(descriptor)
+            values = list(metadata)
+            values[4] = os.getuid() + 1
+            return os.stat_result(values)
+
+        with mock.patch(
+            "agent_container.handover_broker.os.fstat",
+            side_effect=foreign_owner,
+        ):
+            with self.assertRaisesRegex(PermissionError, "current user"):
+                HandoverBrokerSession.create(
+                    self.state_root,
+                    "agent-container",
+                    self.project_dir.resolve(),
+                )
 
     def test_rejects_unsafe_state_root(self) -> None:
         self.session.close()

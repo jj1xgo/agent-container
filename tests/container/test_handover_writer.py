@@ -283,3 +283,69 @@ class AtomicHandoverWriterTest(unittest.TestCase):
                         lambda size: "a" * (size * 2),
                     )
             self.assertEqual(list(self.project.iterdir()), [])
+
+    def test_rollback_never_unlinks_a_replacement_at_the_final_name(self) -> None:
+        final = self.project / "2026-08-27_033456_aaaaaaaa.md"
+        replacement = b"attacker replacement"
+        real_fsync = os.fsync
+
+        def replace_final_before_directory_failure(descriptor: int) -> None:
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                final.unlink()
+                final.write_bytes(replacement)
+                raise OSError("private-directory-fsync-marker")
+            real_fsync(descriptor)
+
+        with mock.patch(
+            "agent_container.handover_writer.os.fsync",
+            side_effect=replace_final_before_directory_failure,
+        ):
+            with self.assertRaises(OSError) as raised:
+                create_atomic_handover(
+                    self.project,
+                    "project",
+                    "title",
+                    valid_body(),
+                    self.now,
+                    lambda size: "a" * (size * 2),
+                )
+
+        self.assertEqual(final.read_bytes(), replacement)
+        self.assertNotIn("private-directory-fsync-marker", str(raised.exception))
+        self.assertEqual(list(self.project.glob(".handover-*.tmp")), [])
+
+    def test_temp_cleanup_failure_still_rolls_back_the_owned_final(self) -> None:
+        temporary = ".handover-aaaaaaaaaaaaaaaa.tmp"
+        final = "2026-08-27_033456_aaaaaaaa.md"
+        real_unlink = os.unlink
+
+        def fail_temporary_cleanup(
+            path: object, *args: object, **kwargs: object
+        ) -> None:
+            if path == temporary:
+                raise OSError("private-temp-cleanup-marker")
+            real_unlink(path, *args, **kwargs)
+
+        try:
+            with mock.patch(
+                "agent_container.handover_writer.os.unlink",
+                side_effect=fail_temporary_cleanup,
+            ):
+                with self.assertRaises(OSError) as raised:
+                    create_atomic_handover(
+                        self.project,
+                        "project",
+                        "title",
+                        valid_body(),
+                        self.now,
+                        lambda size: "a" * (size * 2),
+                    )
+
+            self.assertFalse((self.project / final).exists())
+            self.assertTrue((self.project / temporary).exists())
+            self.assertNotIn("private-temp-cleanup-marker", str(raised.exception))
+        finally:
+            try:
+                real_unlink(self.project / temporary)
+            except FileNotFoundError:
+                pass

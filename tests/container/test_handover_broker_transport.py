@@ -147,6 +147,7 @@ class HandoverBrokerTransportTest(unittest.TestCase):
             "Safe title",
             VALID_BODY,
             now=self.now,
+            publication_guard=self.session.publication_guard,
         )
         self.assertEqual(
             [

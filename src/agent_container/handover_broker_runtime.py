@@ -127,17 +127,25 @@ class HandoverBrokerRuntime(AbstractContextManager[HandoverRuntimeMount]):
         if self._exited:
             return
         self._stop.set()
+        self.session.deactivate()
         cleanup_failed = False
         if self._listener is not None:
             try:
                 self._listener.close()
             except OSError:
                 cleanup_failed = True
+            else:
+                self._listener = None
 
         did_not_stop = False
         if self._thread is not None:
             self._thread.join(timeout=_STOP_TIMEOUT_SECONDS)
             did_not_stop = self._thread.is_alive()
+
+        if did_not_stop:
+            raise HandoverBrokerRuntimeError(
+                "handover broker did not stop"
+            ) from None
 
         try:
             self.session.close()
@@ -146,10 +154,6 @@ class HandoverBrokerRuntime(AbstractContextManager[HandoverRuntimeMount]):
         else:
             self._exited = True
 
-        if did_not_stop:
-            raise HandoverBrokerRuntimeError(
-                "handover broker did not stop"
-            ) from None
         if cleanup_failed:
             raise HandoverBrokerRuntimeError(
                 "handover broker cleanup failed"

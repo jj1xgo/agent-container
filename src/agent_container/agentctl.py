@@ -1071,6 +1071,11 @@ def _doctor(
             handover_root = _resolve_handover_root(
                 record.handover_root, layout.project_id
             )
+            if "claude" in agents:
+                validate_claude_handover_project(
+                    layout,
+                    handover_root / layout.project_id,
+                )
             checks.append(
                 CheckResult(
                     "PASS",

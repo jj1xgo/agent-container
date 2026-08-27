@@ -1,6 +1,8 @@
 import os
+from io import BytesIO
 from pathlib import Path
 import socket
+import stat
 import struct
 import tempfile
 import threading
@@ -9,6 +11,7 @@ from unittest import mock
 
 from agent_container.handover_broker import HandoverBrokerSession
 from agent_container.handover_broker_protocol import HandoverRequest
+from agent_container.handover_broker_protocol import encode_request_frame
 from agent_container.handover_broker_runtime import HandoverBrokerRuntime
 from agent_container.handover_broker_runtime import HandoverBrokerRuntimeError
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
@@ -33,19 +36,30 @@ VALID_BODY = """## 作業の目的
 
 
 class FakeStream:
-    def __init__(self) -> None:
+    def __init__(self, incoming: bytes = b"") -> None:
         self.closed = False
+        self.incoming = BytesIO(incoming)
+        self.outgoing = BytesIO()
+
+    def read(self, size: int) -> bytes:
+        return self.incoming.read(size)
+
+    def write(self, body: bytes) -> int:
+        return self.outgoing.write(body)
+
+    def flush(self) -> None:
+        pass
 
     def close(self) -> None:
         self.closed = True
 
 
 class FakeClient:
-    def __init__(self, peer_uid: int) -> None:
+    def __init__(self, peer_uid: int, stream: FakeStream | None = None) -> None:
         self.peer_uid = peer_uid
         self.timeout: float | None = None
         self.credential_calls: list[tuple[int, int, int]] = []
-        self.stream = FakeStream()
+        self.stream = FakeStream() if stream is None else stream
         self.closed = False
 
     def settimeout(self, timeout: float) -> None:
@@ -94,6 +108,7 @@ class FakeSession:
         self.listener = listener
         self.backlogs: list[int] = []
         self.close_calls = 0
+        self.deactivate_calls = 0
 
     def open_listener(self, backlog: int = 4) -> FakeListener:
         self.backlogs.append(backlog)
@@ -101,6 +116,9 @@ class FakeSession:
 
     def close(self) -> None:
         self.close_calls += 1
+
+    def deactivate(self) -> None:
+        self.deactivate_calls += 1
 
 
 class FailingStartSession(FakeSession):
@@ -345,7 +363,7 @@ class HandoverBrokerRuntimeTest(unittest.TestCase):
         self.assertNotIn("private-shutdown-marker", str(raised.exception))
         self.assertEqual(session.close_calls, 1)
 
-    def test_stop_timeout_still_closes_listener_and_session_once(self) -> None:
+    def test_stop_timeout_defers_cleanup_until_worker_can_be_joined(self) -> None:
         listener = FakeListener()
         session = FakeSession(listener)
 
@@ -354,6 +372,7 @@ class HandoverBrokerRuntimeTest(unittest.TestCase):
 
             def __init__(self, **_: object) -> None:
                 self.join_timeouts: list[float] = []
+                self.alive = True
 
             def start(self) -> None:
                 pass
@@ -362,7 +381,7 @@ class HandoverBrokerRuntimeTest(unittest.TestCase):
                 self.join_timeouts.append(timeout)
 
             def is_alive(self) -> bool:
-                return True
+                return self.alive
 
         thread = StuckThread()
         with mock.patch(
@@ -377,10 +396,96 @@ class HandoverBrokerRuntimeTest(unittest.TestCase):
         self.assertEqual(str(raised.exception), "handover broker did not stop")
         self.assertEqual(thread.join_timeouts, [2])
         self.assertTrue(listener.closed)
+        self.assertEqual(session.deactivate_calls, 1)
+        self.assertEqual(session.close_calls, 0)
+
+        thread.alive = False
+        runtime.__exit__(None, None, None)
+        self.assertEqual(thread.join_timeouts, [2, 2])
+        self.assertEqual(session.deactivate_calls, 2)
         self.assertEqual(session.close_calls, 1)
 
         runtime.__exit__(None, None, None)
         self.assertEqual(session.close_calls, 1)
+
+    def test_authorized_delayed_operation_cannot_publish_after_exit_timeout(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="hb-runtime-") as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            handovers = root / "handovers"
+            handovers.mkdir(mode=0o700)
+            project = handovers / "agent-container"
+            project.mkdir(mode=0o700)
+            session = HandoverBrokerSession.create(
+                state.resolve(),
+                "agent-container",
+                project.resolve(),
+            )
+            request = HandoverRequest(
+                1,
+                session._capability,
+                "agent-container",
+                "create",
+                "Safe title",
+                VALID_BODY,
+            )
+            client = FakeClient(
+                os.getuid(), FakeStream(encode_request_frame(request))
+            )
+            listener = FakeListener((client,))
+            runtime = HandoverBrokerRuntime(session)
+            entered_write = threading.Event()
+            resume_write = threading.Event()
+            real_fsync = os.fsync
+            delayed = False
+
+            def delay_data_fsync(descriptor: int) -> None:
+                nonlocal delayed
+                if not delayed and stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    delayed = True
+                    entered_write.set()
+                    if not resume_write.wait(1):
+                        raise AssertionError("delayed write was not resumed")
+                real_fsync(descriptor)
+
+            try:
+                with mock.patch.object(
+                    session,
+                    "open_listener",
+                    return_value=listener,
+                ), mock.patch(
+                    "agent_container.handover_writer.os.fsync",
+                    side_effect=delay_data_fsync,
+                ):
+                    runtime.__enter__()
+                    self.assertTrue(entered_write.wait(1))
+                    with mock.patch(
+                        "agent_container.handover_broker_runtime._STOP_TIMEOUT_SECONDS",
+                        0,
+                    ):
+                        with self.assertRaises(HandoverBrokerRuntimeError) as raised:
+                            runtime.__exit__(None, None, None)
+                    self.assertEqual(
+                        str(raised.exception), "handover broker did not stop"
+                    )
+                    self.assertTrue(session.run_dir.exists())
+                    with self.assertRaisesRegex(ValueError, "closed"):
+                        session.authorize(request, os.getuid())
+
+                    resume_write.set()
+                    assert runtime._thread is not None
+                    runtime._thread.join(1)
+                    self.assertFalse(runtime._thread.is_alive())
+                    runtime.__exit__(None, None, None)
+            finally:
+                resume_write.set()
+
+            self.assertEqual(list(project.glob("*.md")), [])
+            self.assertEqual(list(project.glob(".handover-*.tmp")), [])
+            self.assertFalse(session.run_dir.exists())
 
     def test_exit_invalidates_capability_and_new_runtime_does_not_reuse_it(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hb-runtime-") as temporary:

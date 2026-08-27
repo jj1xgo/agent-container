@@ -179,6 +179,7 @@ def handle_handover_connection(
                 title,
                 body,
                 now=now,
+                publication_guard=session.publication_guard,
             )
             if not isinstance(created, Path) or created.parent != session.project_dir:
                 raise ValueError("handover writer returned an invalid path")

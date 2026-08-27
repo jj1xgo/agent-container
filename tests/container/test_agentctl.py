@@ -1948,6 +1948,55 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 create_github.assert_not_called()
                 create_handover.assert_not_called()
 
+    def test_run_rejects_state_tree_handover_before_any_broker_or_podman(self) -> None:
+        for area in ("shared-auth/claude", "github-broker", "handover-broker"):
+            with self.subTest(area=area), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                handover_root = root / area
+                handover_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                handover_project = handover_root / "agent-container"
+                handover_project.mkdir(mode=0o700)
+                project_file = root / "projects/agent-container/project.json"
+                project_file.unlink()
+                ProjectRecord(
+                    Repository.parse("jj1xgo/agent-container"),
+                    handover_root.resolve(),
+                ).write(project_file)
+                podman_calls = []
+                stderr = StringIO()
+
+                with (
+                    patch(
+                        "agent_container.agentctl.UploadPackBrokerRuntime.create"
+                    ) as create_github,
+                    patch(
+                        "agent_container.agentctl.HandoverBrokerRuntime.create"
+                    ) as create_handover,
+                ):
+                    result = main(
+                        [
+                            "run",
+                            "agent-container",
+                            "--agent",
+                            "claude",
+                            "--github-broker",
+                        ],
+                        environment={"AGENT_CONTAINER_HOME": str(root)},
+                        runner=lambda spec: podman_calls.append(spec)
+                        or successful_podman_result(spec),
+                        git_remote_reader=lambda path: (
+                            "https://github.com/jj1xgo/agent-container.git"
+                        ),
+                        stdout=StringIO(),
+                        stderr=stderr,
+                    )
+
+                self.assertEqual(result, 1)
+                self.assertIn("overlap", stderr.getvalue())
+                self.assertEqual(podman_calls, [])
+                create_github.assert_not_called()
+                create_handover.assert_not_called()
+
     def test_run_nonzero_cleans_up_handover_and_github_brokers(self) -> None:
         with TemporaryDirectory() as temp:
             root, _ = self._runtime_state(temp)
@@ -3091,6 +3140,52 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 self.assertEqual(len(probes), 1)
                 self.assertNotIn("--mount", probes[0].argv)
                 self.assertNotIn("--env", probes[0].argv)
+
+    def test_claude_doctor_rejects_state_tree_handover_but_codex_is_unchanged(
+        self,
+    ) -> None:
+        for area in ("shared-auth/claude", "github-broker", "handover-broker"):
+            for agent, expected in (
+                ("claude", "FAIL  handover-project: state validation failed"),
+                (
+                    "codex",
+                    "PASS  handover-project: real directory within configured root",
+                ),
+            ):
+                with (
+                    self.subTest(area=area, agent=agent),
+                    TemporaryDirectory() as temp,
+                ):
+                    root, _ = self._runtime_state(temp)
+                    (root / "projects/agent-container/claude-config").mkdir(
+                        mode=0o700
+                    )
+                    handover_root = root / area
+                    handover_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    (handover_root / "agent-container").mkdir(mode=0o700)
+                    project_file = root / "projects/agent-container/project.json"
+                    project_file.unlink()
+                    ProjectRecord(
+                        Repository.parse("jj1xgo/agent-container"),
+                        handover_root.resolve(),
+                    ).write(project_file)
+                    output = StringIO()
+
+                    result = main(
+                        ["doctor", "agent-container", "--agent", agent],
+                        environment={"AGENT_CONTAINER_HOME": str(root)},
+                        runner=self._successful_doctor_runner,
+                        git_remote_reader=lambda path: (
+                            "https://github.com/jj1xgo/agent-container.git"
+                        ),
+                        stdout=output,
+                    )
+
+                    self.assertIn(expected, output.getvalue())
+                    if agent == "claude":
+                        self.assertEqual(result, 1)
+                    else:
+                        self.assertEqual(result, 0)
 
     def test_codex_doctor_does_not_probe_claude_policy(self) -> None:
         with TemporaryDirectory() as temp:

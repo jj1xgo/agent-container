@@ -620,6 +620,8 @@ class PodmanCommandTest(unittest.TestCase):
     def test_claude_handover_project_rejects_any_writable_mount_overlap(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")
         overlapping_projects = (
+            ("same-state-root", Path("/state")),
+            ("ancestor-state-root", Path("/")),
             ("same-workspace", Path("/state/workspaces/agent-container")),
             ("ancestor-workspace", Path("/state/workspaces")),
             (
@@ -643,6 +645,18 @@ class PodmanCommandTest(unittest.TestCase):
                 Path(
                     "/state/projects/agent-container/cache/handovers/agent-container"
                 ),
+            ),
+            (
+                "inside-claude-auth",
+                Path("/state/shared-auth/claude/agent-container"),
+            ),
+            (
+                "inside-github-broker",
+                Path("/state/github-broker/agent-container"),
+            ),
+            (
+                "inside-handover-broker",
+                Path("/state/handover-broker/agent-container"),
             ),
         )
 
