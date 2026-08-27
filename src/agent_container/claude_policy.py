@@ -39,6 +39,45 @@ EXPECTED_SETTINGS = {
     "allowManagedMcpServersOnly": True,
 }
 EXPECTED_MCP = {"mcpServers": {}}
+EXPECTED_CLAUDE_MD = """# Managed Claude handover workflow
+
+別 session または別 agent へ作業を引き継ぐ必要がある場合だけ handover を作成する。
+作成前に Git status、直近 commit、実行済み test、未解決事項を確認し、推測した成功を書かない。
+
+handover の作成には次の command だけを使い、完成した以下の 7 section を固定順序で各 1 回だけ stdin へ渡す。
+
+`agent-handover create --title "引き継ぎタイトル"`
+
+## 作業の目的
+
+完了した内容を書く。
+
+## 現在地
+
+完了した内容を書く。
+
+## 決定事項と理由
+
+完了した内容を書く。
+
+## 変更したファイル・commit・PR
+
+完了した内容を書く。
+
+## 検証結果
+
+完了した内容を書く。
+
+## 未解決事項とリスク
+
+完了した内容を書く。
+
+## 次の一手
+
+完了した内容を書く。
+
+credential、token、環境値、transcript 全文を含めない。broker が拒否した場合は停止し、sandbox や mount を弱めず、別 path への直接書き込みや fallback を行わない。
+""".encode("utf-8")
 _MAX_POLICY_BYTES = 64 * 1024
 
 
@@ -79,7 +118,12 @@ def _open_policy_directory(path: Path, expected_uid: int | None) -> int | None:
         return None
 
 
-def _load_json(path: Path, expected_uid: int | None) -> object:
+def _load_bytes(
+    path: Path,
+    expected_uid: int | None,
+    *,
+    expected_mode: int | None = None,
+) -> bytes | None:
     flags = (
         os.O_RDONLY
         | os.O_NONBLOCK
@@ -101,10 +145,17 @@ def _load_json(path: Path, expected_uid: int | None) -> object:
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_size > _MAX_POLICY_BYTES
             or (
+                expected_mode is not None
+                and stat.S_IMODE(metadata.st_mode) != expected_mode
+            )
+            or (
                 expected_uid is not None
                 and (
                     metadata.st_uid != expected_uid
-                    or metadata.st_mode & 0o022
+                    or (
+                        expected_mode is None
+                        and metadata.st_mode & 0o022
+                    )
                 )
             )
         ):
@@ -120,22 +171,44 @@ def _load_json(path: Path, expected_uid: int | None) -> object:
             payload.extend(chunk)
         if len(payload) > _MAX_POLICY_BYTES:
             return None
-        return json.loads(bytes(payload).decode("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        return bytes(payload)
+    except OSError:
         return None
     finally:
         os.close(descriptor)
 
 
+def _load_json(path: Path, expected_uid: int | None) -> object:
+    payload = _load_bytes(path, expected_uid)
+    if payload is None:
+        return None
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return None
+
+
 def validate_managed_policy(
     settings_path: Path,
     mcp_path: Path,
+    instructions_path: Path | None = None,
     *,
     expected_uid: int | None = None,
 ) -> bool:
+    instructions = (
+        settings_path.parent / "CLAUDE.md"
+        if instructions_path is None
+        else instructions_path
+    )
     return (
         _load_json(settings_path, expected_uid) == EXPECTED_SETTINGS
         and _load_json(mcp_path, expected_uid) == EXPECTED_MCP
+        and _load_bytes(
+            instructions,
+            expected_uid,
+            expected_mode=0o644,
+        )
+        == EXPECTED_CLAUDE_MD
     )
 
 
@@ -143,8 +216,14 @@ def main(
     settings_path: Path = Path("/etc/claude-code/managed-settings.json"),
     mcp_path: Path = Path("/etc/claude-code/managed-mcp.json"),
     stdout: TextIO = sys.stdout,
+    instructions_path: Path = Path("/etc/claude-code/CLAUDE.md"),
 ) -> int:
-    valid = validate_managed_policy(settings_path, mcp_path, expected_uid=0)
+    valid = validate_managed_policy(
+        settings_path,
+        mcp_path,
+        instructions_path,
+        expected_uid=0,
+    )
     stdout.write(f"managed_policy_valid={'true' if valid else 'false'}\n")
     return 0 if valid else 1
 

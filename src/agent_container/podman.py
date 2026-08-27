@@ -360,6 +360,18 @@ def claude_policy_status_spec(image: str) -> CommandSpec:
     )
 
 
+def handover_broker_client_status_spec(image: str) -> CommandSpec:
+    argv = _noninteractive_prefix(os.getuid(), os.getgid())
+    argv += [
+        image,
+        "python3",
+        "-m",
+        "agent_container.handover_broker_client",
+        "--self-check",
+    ]
+    return CommandSpec(tuple(argv), {})
+
+
 def auth_codex_spec(layout: StateLayout, image: str) -> CommandSpec:
     argv = _runtime_prefix(os.getuid(), os.getgid())
     argv += ["--mount", _mount(layout.codex_auth_dir, "/home/agent/.codex")]

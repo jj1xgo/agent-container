@@ -41,6 +41,7 @@ from agent_container.podman import codex_login_status_spec
 from agent_container.podman import claude_setup_token_spec
 from agent_container.podman import claude_token_status_spec
 from agent_container.podman import claude_policy_status_spec
+from agent_container.podman import handover_broker_client_status_spec
 from agent_container.podman import claude_superpowers_spec
 from agent_container.podman import claude_superpowers_marketplace_spec
 from agent_container.podman import codex_superpowers_install_spec
@@ -857,6 +858,26 @@ def _doctor(
                 "PASS" if policy_ok else "FAIL",
                 "claude-managed-policy",
                 policy_detail,
+            )
+        )
+
+        if runtime_image is None:
+            handover_client_ok = False
+            handover_client_detail = "image unavailable"
+        else:
+            handover_client_status = _doctor_run(
+                runner,
+                handover_broker_client_status_spec(runtime_image),
+            )
+            handover_client_ok = handover_client_status.returncode == 0
+            handover_client_detail = (
+                "available" if handover_client_ok else "unavailable"
+            )
+        checks.append(
+            CheckResult(
+                "PASS" if handover_client_ok else "FAIL",
+                "claude-handover-client",
+                handover_client_detail,
             )
         )
 

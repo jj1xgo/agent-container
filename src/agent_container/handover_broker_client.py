@@ -157,10 +157,22 @@ class HandoverBrokerClient:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-handover")
-    commands = parser.add_subparsers(dest="operation", required=True)
+    parser.add_argument("--self-check", action="store_true")
+    commands = parser.add_subparsers(dest="operation")
     create = commands.add_parser("create")
     create.add_argument("--title", required=True)
     return parser
+
+
+def _self_check() -> bool:
+    return (
+        PROTOCOL_VERSION == 1
+        and MAX_REQUEST_BYTES == 65_536
+        and _SOCKET_TIMEOUT_SECONDS == 30
+        and _CAPABILITY.fullmatch("A" * 43) is not None
+        and _CAPABILITY.fullmatch("A" * 42) is None
+        and _CAPABILITY.fullmatch("A" * 44) is None
+    )
 
 
 def run(
@@ -174,6 +186,12 @@ def run(
 ) -> int:
     try:
         options = _parser().parse_args(argv)
+        if options.self_check:
+            if options.operation is not None:
+                return 1
+            return 0 if _self_check() else 1
+        if options.operation != "create":
+            raise ValueError("handover broker operation is required")
         socket_value = environment.get("AGENT_HANDOVER_BROKER_SOCKET", "")
         capability_value = environment.get("AGENT_HANDOVER_BROKER_CAPABILITY", "")
         project_id = environment.get("AGENT_PROJECT_ID", "")

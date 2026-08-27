@@ -8,6 +8,7 @@
 !profiles/claude/
 !profiles/claude/managed-settings.json
 !profiles/claude/managed-mcp.json
+!profiles/claude/CLAUDE.md
 !container/
 !container/bin/
 !container/bin/codex

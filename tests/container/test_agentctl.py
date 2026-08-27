@@ -10,12 +10,14 @@ import unittest
 from unittest.mock import patch
 
 import agent_container.agentctl as agentctl
+import agent_container.handover_broker_client as handover_broker_client
 from agent_container import __version__
 from agent_container.agentctl import main
 from agent_container.agentctl import parser
 from agent_container.handover_broker_runtime import HandoverBrokerRuntimeError
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
 from agent_container.podman import CommandSpec
+from agent_container.podman import handover_broker_client_status_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.podman import BrokerRuntimeMount
@@ -1355,6 +1357,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "agent-node",
         "project-node",
         "claude-managed-policy",
+        "claude-handover-client",
         "claude-version",
         "private-state",
         "claude-auth",
@@ -1376,6 +1379,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "agent-node",
         "project-node",
         "claude-managed-policy",
+        "claude-handover-client",
         "codex-version",
         "claude-version",
         "private-state",
@@ -1472,6 +1476,83 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             "auth",
             "status",
         )
+
+    def _is_handover_client_status_spec(self, spec) -> bool:
+        return spec.argv[-4:] == (
+            "python3",
+            "-m",
+            "agent_container.handover_broker_client",
+            "--self-check",
+        )
+
+    def test_handover_client_self_check_reads_no_external_inputs(self) -> None:
+        class ExplodingEnvironment(dict):
+            def get(self, *_args, **_kwargs):
+                raise AssertionError("environment read")
+
+        class ExplodingInput:
+            def read(self, *_args, **_kwargs):
+                raise AssertionError("stdin read")
+
+        output = StringIO()
+        errors = StringIO()
+        with patch.object(
+            handover_broker_client,
+            "validate_handover_socket",
+            side_effect=AssertionError("socket read"),
+        ), patch.object(
+            handover_broker_client,
+            "read_handover_capability",
+            side_effect=AssertionError("capability read"),
+        ):
+            result = handover_broker_client.run(
+                ["--self-check"],
+                ExplodingEnvironment(),
+                ExplodingInput(),
+                output,
+                errors,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(errors.getvalue(), "")
+
+        with patch.object(handover_broker_client, "PROTOCOL_VERSION", 2):
+            self.assertEqual(
+                handover_broker_client.run(
+                    ["--self-check"],
+                    ExplodingEnvironment(),
+                    ExplodingInput(),
+                    StringIO(),
+                    StringIO(),
+                ),
+                1,
+            )
+
+    def test_handover_client_status_probe_is_hardened_and_mount_free(self) -> None:
+        spec = handover_broker_client_status_spec("example/image:current")
+
+        self.assertEqual(
+            spec.argv,
+            (
+                "podman",
+                "run",
+                "--rm",
+                "--read-only",
+                "--cap-drop=all",
+                "--security-opt=no-new-privileges",
+                "--userns=keep-id:uid=1000,gid=1000",
+                "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
+                "example/image:current",
+                "python3",
+                "-m",
+                "agent_container.handover_broker_client",
+                "--self-check",
+            ),
+        )
+        self.assertNotIn("--mount", spec.argv)
+        self.assertNotIn("--env", spec.argv)
+        self.assertEqual(spec.environment, {})
 
     def _successful_doctor_runner(self, spec):
         if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
@@ -2968,6 +3049,48 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                     ),
                     1,
                 )
+
+    def test_doctor_reports_handover_client_without_probe_output_or_mounts(self) -> None:
+        marker = "DO-NOT-PRINT-HANDOVER-CLIENT-PROBE"
+        for returncode, expected in (
+            (0, "PASS  claude-handover-client: available"),
+            (19, "FAIL  claude-handover-client: unavailable"),
+        ):
+            with self.subTest(returncode=returncode), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                (root / "projects/agent-container/claude-config").mkdir(mode=0o700)
+                calls = []
+                output = StringIO()
+
+                def runner(spec):
+                    calls.append(spec)
+                    if self._is_handover_client_status_spec(spec):
+                        return subprocess.CompletedProcess(
+                            spec.argv,
+                            returncode,
+                            stdout=marker,
+                            stderr=marker,
+                        )
+                    return self._successful_doctor_runner(spec)
+
+                result = main(
+                    ["doctor", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    stdout=output,
+                )
+
+                rendered = output.getvalue()
+                self.assertEqual(result, 0 if returncode == 0 else 1)
+                self.assertIn(expected, rendered)
+                self.assertNotIn(marker, rendered)
+                probes = [
+                    spec for spec in calls if self._is_handover_client_status_spec(spec)
+                ]
+                self.assertEqual(len(probes), 1)
+                self.assertNotIn("--mount", probes[0].argv)
+                self.assertNotIn("--env", probes[0].argv)
 
     def test_codex_doctor_does_not_probe_claude_policy(self) -> None:
         with TemporaryDirectory() as temp:
