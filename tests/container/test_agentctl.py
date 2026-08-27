@@ -9,9 +9,13 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import agent_container.agentctl as agentctl
 from agent_container import __version__
 from agent_container.agentctl import main
 from agent_container.agentctl import parser
+from agent_container.handover_broker_runtime import HandoverBrokerRuntimeError
+from agent_container.handover_broker_runtime import HandoverRuntimeMount
+from agent_container.podman import CommandSpec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.podman import BrokerRuntimeMount
@@ -29,6 +33,29 @@ def successful_podman_result(spec):
     if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
         return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
     return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
+
+
+class _TrackingBrokerContext:
+    def __init__(self, name, mount, events, on_enter=None, enter_error=None):
+        self.name = name
+        self.mount = mount
+        self.events = events
+        self.on_enter = on_enter
+        self.enter_error = enter_error
+        self.active = False
+
+    def __enter__(self):
+        self.events.append(f"{self.name}-enter")
+        if self.on_enter is not None:
+            self.on_enter()
+        if self.enter_error is not None:
+            raise self.enter_error
+        self.active = True
+        return self.mount
+
+    def __exit__(self, *_):
+        self.events.append(f"{self.name}-exit")
+        self.active = False
 
 
 class AgentCtlBuildAuthTest(unittest.TestCase):
@@ -1575,12 +1602,268 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(len(builder_calls), 1)
             self.assertIs(builder_calls[0][-1], broker)
             create.assert_called_once()
-            context.__enter__.assert_called_once_with()
+            context.__enter__.assert_called_once()
             context.__exit__.assert_called_once()
             runtime = " ".join(calls[-1].argv)
             self.assertIn("dst=/run/agent-broker,ro=true", runtime)
             self.assertNotIn("src=" + str(root / "gh"), runtime)
             self.assertNotIn("gh auth git-credential", runtime)
+
+    def test_run_enters_only_selected_brokers_and_passes_independent_mounts(self) -> None:
+        combinations = (
+            ("codex", False),
+            ("codex", True),
+            ("claude", False),
+            ("claude", True),
+        )
+        for agent, github_enabled in combinations:
+            with self.subTest(agent=agent, github_enabled=github_enabled):
+                with TemporaryDirectory() as temp:
+                    root, handover_project = self._runtime_state(temp)
+                    events = []
+                    github_mount = BrokerRuntimeMount(
+                        root / "github-broker/run/session",
+                        Repository.parse("jj1xgo/agent-container"),
+                    )
+                    handover_mount = HandoverRuntimeMount(
+                        root / "handover-broker/run/session"
+                    )
+                    github_context = _TrackingBrokerContext(
+                        "github", github_mount, events
+                    )
+                    handover_context = _TrackingBrokerContext(
+                        "handover",
+                        handover_mount,
+                        events,
+                        on_enter=lambda: self.assertTrue(
+                            (root / "projects/agent-container/claude-config").is_dir()
+                        ),
+                    )
+                    builder_calls = []
+
+                    def runner(spec):
+                        if spec.argv == ("runtime", agent):
+                            events.append("runtime")
+                        elif spec.argv[-3:] == (
+                            "python3",
+                            "-m",
+                            "agent_container.claude_policy",
+                        ):
+                            events.append("policy")
+                        return successful_podman_result(spec)
+
+                    def builder(*args):
+                        events.append("builder")
+                        builder_calls.append(args)
+                        self.assertEqual(github_context.active, github_enabled)
+                        self.assertEqual(handover_context.active, agent == "claude")
+                        return CommandSpec(("runtime", agent), {})
+
+                    original_read = agentctl._read_runtime_project
+
+                    def tracked_read(path):
+                        events.append("metadata")
+                        return original_read(path)
+
+                    argv = ["run", "agent-container", "--agent", agent]
+                    if github_enabled:
+                        argv.append("--github-broker")
+                    with (
+                        patch(
+                            "agent_container.agentctl._read_runtime_project",
+                            side_effect=tracked_read,
+                        ) as read_project,
+                        patch(
+                            "agent_container.agentctl.UploadPackBrokerRuntime.create",
+                            return_value=github_context,
+                        ) as create_github,
+                        patch(
+                            "agent_container.agentctl.HandoverBrokerRuntime.create",
+                            return_value=handover_context,
+                        ) as create_handover,
+                    ):
+                        result = main(
+                            argv,
+                            environment={"AGENT_CONTAINER_HOME": str(root)},
+                            runner=runner,
+                            git_remote_reader=lambda path: (
+                                "https://github.com/jj1xgo/agent-container.git"
+                            ),
+                            runtime_spec_builders={agent: builder},
+                            stdout=StringIO(),
+                        )
+
+                    self.assertEqual(result, 0)
+                    self.assertEqual(read_project.call_count, 1)
+                    self.assertEqual(len(builder_calls), 1)
+                    args = builder_calls[0]
+                    self.assertEqual(args[:5], (
+                        agentctl.StateLayout(root, "agent-container"),
+                        handover_project,
+                        "localhost/agent-container:dev",
+                        os.getuid(),
+                        os.getgid(),
+                    ))
+                    if agent == "claude":
+                        self.assertIs(args[5], handover_mount)
+                        create_handover.assert_called_once()
+                    else:
+                        self.assertEqual(len(args), 6 if github_enabled else 5)
+                        create_handover.assert_not_called()
+                    if github_enabled:
+                        self.assertIs(args[-1], github_mount)
+                        create_github.assert_called_once()
+                    else:
+                        create_github.assert_not_called()
+                    expected = ["metadata"]
+                    if agent == "claude":
+                        expected.append("policy")
+                    if github_enabled:
+                        expected.append("github-enter")
+                    if agent == "claude":
+                        expected.append("handover-enter")
+                    expected.extend(("builder", "runtime"))
+                    if agent == "claude":
+                        expected.append("handover-exit")
+                    if github_enabled:
+                        expected.append("github-exit")
+                    self.assertEqual(events, expected)
+
+    def test_run_handover_broker_enter_failure_never_builds_or_runs_runtime(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            events = []
+            github_mount = BrokerRuntimeMount(
+                root / "github-broker/run/session",
+                Repository.parse("jj1xgo/agent-container"),
+            )
+            github_context = _TrackingBrokerContext(
+                "github", github_mount, events
+            )
+            failed_handover = _TrackingBrokerContext(
+                "handover",
+                HandoverRuntimeMount(root / "handover-broker/run/session"),
+                events,
+                enter_error=HandoverBrokerRuntimeError(
+                    "DO-NOT-PRINT-HANDOVER-RUNTIME-DETAIL"
+                ),
+            )
+            runtime_specs = []
+            builder_calls = []
+            stderr = StringIO()
+
+            def runner(spec):
+                if spec.argv and spec.argv[0] == "runtime":
+                    runtime_specs.append(spec)
+                return successful_podman_result(spec)
+
+            def builder(*args):
+                builder_calls.append(args)
+                return CommandSpec(("runtime", "claude"), {})
+
+            with (
+                patch(
+                    "agent_container.agentctl.UploadPackBrokerRuntime.create",
+                    return_value=github_context,
+                ),
+                patch(
+                    "agent_container.agentctl.HandoverBrokerRuntime.create",
+                    return_value=failed_handover,
+                ),
+            ):
+                result = main(
+                    [
+                        "run",
+                        "agent-container",
+                        "--agent",
+                        "claude",
+                        "--github-broker",
+                    ],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    runtime_spec_builders={"claude": builder},
+                    stdout=StringIO(),
+                    stderr=stderr,
+                )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(builder_calls, [])
+            self.assertEqual(runtime_specs, [])
+            self.assertEqual(
+                events, ["github-enter", "handover-enter", "github-exit"]
+            )
+            self.assertNotIn(
+                "DO-NOT-PRINT-HANDOVER-RUNTIME-DETAIL", stderr.getvalue()
+            )
+
+    def test_run_nonzero_cleans_up_handover_and_github_brokers(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            events = []
+            github_context = _TrackingBrokerContext(
+                "github",
+                BrokerRuntimeMount(
+                    root / "github-broker/run/session",
+                    Repository.parse("jj1xgo/agent-container"),
+                ),
+                events,
+            )
+            handover_context = _TrackingBrokerContext(
+                "handover",
+                HandoverRuntimeMount(root / "handover-broker/run/session"),
+                events,
+            )
+
+            def runner(spec):
+                if spec.argv == ("runtime", "claude"):
+                    events.append("runtime-nonzero")
+                    return subprocess.CompletedProcess(spec.argv, 23)
+                return successful_podman_result(spec)
+
+            with (
+                patch(
+                    "agent_container.agentctl.UploadPackBrokerRuntime.create",
+                    return_value=github_context,
+                ),
+                patch(
+                    "agent_container.agentctl.HandoverBrokerRuntime.create",
+                    return_value=handover_context,
+                ),
+            ):
+                result = main(
+                    [
+                        "run",
+                        "agent-container",
+                        "--agent",
+                        "claude",
+                        "--github-broker",
+                    ],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    runtime_spec_builders={
+                        "claude": lambda *args: CommandSpec(("runtime", "claude"), {})
+                    },
+                    stdout=StringIO(),
+                    stderr=StringIO(),
+                )
+
+            self.assertEqual(result, 23)
+            self.assertEqual(
+                events,
+                [
+                    "github-enter",
+                    "handover-enter",
+                    "runtime-nonzero",
+                    "handover-exit",
+                    "github-exit",
+                ],
+            )
 
     def test_run_uses_current_project_image_without_build(self) -> None:
         with TemporaryDirectory() as temp:
@@ -1690,18 +1973,32 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 self.assertEqual(config.stat().st_mode & 0o777, 0o700)
                 return run_claude_spec(*args)
 
-            result = main(
-                ["run", "agent-container", "--agent", "claude"],
-                environment={"AGENT_CONTAINER_HOME": str(root)},
-                runner=lambda spec: calls.append(spec) or successful_podman_result(spec),
-                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
-                runtime_spec_builders={"claude": runtime_spec_builder},
-                stdout=output,
+            broker_events = []
+            broker_context = _TrackingBrokerContext(
+                "handover",
+                HandoverRuntimeMount(root / "handover-broker/run/session"),
+                broker_events,
             )
+            with patch(
+                "agent_container.agentctl.HandoverBrokerRuntime.create",
+                return_value=broker_context,
+            ):
+                result = main(
+                    ["run", "agent-container", "--agent", "claude"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    runtime_spec_builders={"claude": runtime_spec_builder},
+                    stdout=output,
+                )
 
             self.assertEqual(result, 0)
             self.assertEqual(len(builder_calls), 1)
             self.assertEqual(len(calls), 5)
+            self.assertEqual(broker_events, ["handover-enter", "handover-exit"])
             self.assertEqual(calls[-1].argv[-1], "claude")
             self.assertIn(
                 f"src={handover_project},dst=/handovers/agent-container",

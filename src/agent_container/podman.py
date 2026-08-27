@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import subprocess
 
+from agent_container.handover_broker_runtime import HandoverRuntimeMount
 from agent_container.state import Repository
 from agent_container.state import StateLayout
 from agent_container.state import validate_project_id
@@ -30,6 +31,7 @@ _CLAUDE_RUNTIME_HOME_TMPFS_MOUNT = (
     "tmpfs-mode=0700,U=true,noexec,nosuid,nodev"
 )
 _BROKER_RUNTIME_PATH = "/run/agent-broker"
+_HANDOVER_BROKER_RUNTIME_PATH = "/run/agent-handover"
 _CONTAINER_ID = re.compile(r"^[0-9a-f]{12,64}$")
 _RESOURCE_AGENTS = frozenset({"codex", "claude"})
 _RESOURCE_STATS_FORMAT = (
@@ -130,6 +132,19 @@ def _broker_git_args(
         f"GIT_CONFIG_KEY_0=url.{broker_url}.insteadOf",
         "--env",
         f"GIT_CONFIG_VALUE_0={github_url}",
+    ]
+
+
+def _handover_broker_args(broker: HandoverRuntimeMount) -> list[str]:
+    if not broker.run_dir.is_absolute():
+        raise ValueError("handover broker runtime path must be absolute")
+    return [
+        "--mount",
+        _mount(broker.run_dir, _HANDOVER_BROKER_RUNTIME_PATH, True),
+        "--env",
+        f"AGENT_HANDOVER_BROKER_SOCKET={_HANDOVER_BROKER_RUNTIME_PATH}/broker.sock",
+        "--env",
+        f"AGENT_HANDOVER_BROKER_CAPABILITY={_HANDOVER_BROKER_RUNTIME_PATH}/capability",
     ]
 
 
@@ -489,6 +504,7 @@ def run_claude_spec(
     image: str,
     uid: int,
     gid: int,
+    handover_broker: HandoverRuntimeMount,
     broker: BrokerRuntimeMount | None = None,
 ) -> CommandSpec:
     if uid != os.getuid() or gid != os.getgid():
@@ -502,12 +518,13 @@ def run_claude_spec(
         if broker is None
         else _broker_git_args(layout, broker)
     )
+    argv += _handover_broker_args(handover_broker)
     mounts = [
         (layout.workspace, "/workspace", False),
         (layout.claude_config, "/home/agent/.claude", False),
         (layout.claude_token_file, _CLAUDE_TOKEN_PATH, True),
         (layout.cache, "/home/agent/.cache", False),
-        (handover_project, f"/handovers/{layout.project_id}", False),
+        (handover_project, f"/handovers/{layout.project_id}", True),
     ]
     if broker is None:
         mounts.insert(-1, (layout.gh_dir, gh_config_dir, True))

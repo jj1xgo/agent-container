@@ -23,12 +23,14 @@ from agent_container.podman import podman_running_agent_containers_spec
 from agent_container.podman import podman_stats_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
+from agent_container.handover_broker_runtime import HandoverRuntimeMount
 from agent_container.state import Repository
 from agent_container.state import StateLayout
 
 
 IMAGE = "localhost/agent-container:dev"
 DERIVED = "localhost/agent-container-project:sotlas-frontend-0123456789abcdef"
+HANDOVER_BROKER = HandoverRuntimeMount(Path("/state/handover-broker/one"))
 
 
 class PodmanCommandTest(unittest.TestCase):
@@ -390,7 +392,17 @@ class PodmanCommandTest(unittest.TestCase):
 
         for agent, spec in (
             ("codex", run_codex_spec(layout, handover, IMAGE, os.getuid(), os.getgid())),
-            ("claude", run_claude_spec(layout, handover, IMAGE, os.getuid(), os.getgid())),
+            (
+                "claude",
+                run_claude_spec(
+                    layout,
+                    handover,
+                    IMAGE,
+                    os.getuid(),
+                    os.getgid(),
+                    HANDOVER_BROKER,
+                ),
+            ),
         ):
             with self.subTest(agent=agent):
                 joined = " ".join(spec.argv)
@@ -404,6 +416,7 @@ class PodmanCommandTest(unittest.TestCase):
             IMAGE,
             os.getuid(),
             os.getgid(),
+            HANDOVER_BROKER,
             broker,
         )
         claude_joined = " ".join(claude.argv)
@@ -417,6 +430,15 @@ class PodmanCommandTest(unittest.TestCase):
     def test_broker_mount_rejects_relative_path_and_wrong_repository(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")
         repository = Repository.parse("jj1xgo/agent-container")
+        with self.assertRaisesRegex(ValueError, "absolute"):
+            run_claude_spec(
+                layout,
+                Path("/vault/handovers/agent-container"),
+                IMAGE,
+                os.getuid(),
+                os.getgid(),
+                HandoverRuntimeMount(Path("relative")),
+            )
         with self.assertRaisesRegex(ValueError, "absolute"):
             clone_project_spec(
                 layout,
@@ -472,6 +494,7 @@ class PodmanCommandTest(unittest.TestCase):
             IMAGE,
             os.getuid(),
             os.getgid(),
+            HANDOVER_BROKER,
         )
         codex = run_codex_spec(
             layout,
@@ -523,6 +546,7 @@ class PodmanCommandTest(unittest.TestCase):
             image=IMAGE,
             uid=os.getuid(),
             gid=os.getgid(),
+            handover_broker=HANDOVER_BROKER,
         )
 
         joined = " ".join(spec.argv)
@@ -552,6 +576,29 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertIn("CLAUDE_CONFIG_DIR=/home/agent/.claude", joined)
         self.assertIn("AGENT_PROJECT_ID=agent-container", joined)
         self.assertIn("AGENT_HANDOVER_ROOT=/handovers", joined)
+        self.assertIn(
+            "src=/vault/handovers/agent-container,dst=/handovers/agent-container,ro=true",
+            joined,
+        )
+        self.assertIn(
+            "src=/state/handover-broker/one,dst=/run/agent-handover,ro=true",
+            joined,
+        )
+        self.assertIn(
+            "AGENT_HANDOVER_BROKER_SOCKET=/run/agent-handover/broker.sock",
+            joined,
+        )
+        self.assertIn(
+            "AGENT_HANDOVER_BROKER_CAPABILITY=/run/agent-handover/capability",
+            joined,
+        )
+        self.assertNotIn(
+            "src=/vault/handovers/agent-container,dst=/handovers/agent-container,rw",
+            joined,
+        )
+        self.assertNotIn("src=/vault/handovers,dst=", joined)
+        self.assertNotIn("/vault/handovers/other-project", joined)
+        self.assertNotIn("capability-secret-value", joined)
         self.assertEqual(
             spec.argv[-7:],
             (
@@ -579,6 +626,7 @@ class PodmanCommandTest(unittest.TestCase):
             image=IMAGE,
             uid=os.getuid(),
             gid=os.getgid(),
+            handover_broker=HANDOVER_BROKER,
         )
 
         home_tmpfs = (
@@ -612,6 +660,7 @@ class PodmanCommandTest(unittest.TestCase):
                 IMAGE,
                 os.getuid() + 1,
                 os.getgid(),
+                HANDOVER_BROKER,
             )
         with self.assertRaisesRegex(ValueError, "current user"):
             run_claude_spec(
@@ -620,6 +669,7 @@ class PodmanCommandTest(unittest.TestCase):
                 IMAGE,
                 os.getuid(),
                 os.getgid() + 1,
+                HANDOVER_BROKER,
             )
 
 
