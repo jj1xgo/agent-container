@@ -616,6 +616,18 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN=", joined)
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", spec.environment)
         self.assertNotIn("dangerously-skip-permissions", joined)
+        self.assertEqual(
+            {argument for argument in spec.argv if argument.startswith("type=bind,")},
+            {
+                "type=bind,src=/state/handover-broker/one,dst=/run/agent-handover,ro=true",
+                "type=bind,src=/state/workspaces/agent-container,dst=/workspace",
+                "type=bind,src=/state/projects/agent-container/claude-config,dst=/home/agent/.claude",
+                "type=bind,src=/state/shared-auth/claude/oauth-token,dst=/run/secrets/claude-oauth-token,ro=true",
+                "type=bind,src=/state/projects/agent-container/cache,dst=/home/agent/.cache",
+                "type=bind,src=/state/gh,dst=/home/agent/gh-config,ro=true",
+                "type=bind,src=/vault/handovers/agent-container,dst=/handovers/agent-container,ro=true",
+            },
+        )
 
     def test_claude_handover_project_rejects_any_writable_mount_overlap(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")

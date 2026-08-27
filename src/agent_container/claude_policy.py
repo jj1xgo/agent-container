@@ -12,6 +12,7 @@ EXPECTED_SETTINGS = {
         "enableWeakerNestedSandbox": True,
         "allowUnsandboxedCommands": False,
         "failIfUnavailable": True,
+        "network": {"allowAllUnixSockets": True},
         "credentials": {
             "envVars": [
                 {"name": "CLAUDE_CODE_OAUTH_TOKEN", "mode": "deny"},

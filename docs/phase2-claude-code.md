@@ -210,6 +210,8 @@ containerは`--read-only`、`--cap-drop=all`、`no-new-privileges`、host user�
 
 外側のPodman制約である`--read-only`、`--cap-drop=all`、`no-new-privileges`、keep-id、狭いmount、container PID namespace、bounded tmpfsは変更しません。weaker nested modeではClaude親processが既存`/proc`に見える可能性があるため、実hostでは専用probeの`parent_token_via_proc_readable=false`を必須にします。`parent_token_via_proc_readable=true`、token fileを読める、またはBash環境にtokenが見える場合は運用を停止し、sandboxを無効化して再試行しません。確認時も環境一覧、値、prefix、長さ、hash、process environment、secret fileや`/proc/*/environ`の本文を表示しません。
 
+LinuxのClaude sandboxは既定で`AF_UNIX` syscallを拒否し、path単位のsocket allowlistを利用できません。handover brokerへ接続するため、Enterprise managed settingsは`network.allowAllUnixSockets=true`を固定します。これはsandboxを無効化せずUnix socket syscallだけを許可する設定です。外側のPodmanはhostの`/run`、`/var/run`、Podman socketをmountしませんが、選択projectのworkspace、Claude config、cache、`gh` config、handover directory内に作られたUnix socketと、明示的にmountするruntime限定handover broker、`--github-broker`使用時のproject-scoped GitHub brokerには到達可能です。これらのsourceはproject別のexact bind-mount allowlistで固定します。`allowUnsandboxedCommands=false`とdirect-write fallback禁止は維持します。
+
 ## 障害時
 
 - `doctor`のFAILは、表示されたcheckを起点に修正します。state mode、ownership、symlink、workspace origin、image、rootless設定を確認し、credential本文を読まないでください。
