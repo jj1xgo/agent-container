@@ -47,6 +47,11 @@ def github_broker_project_label(project_id: str) -> str:
     return hashlib.sha256(validated.encode("ascii")).hexdigest()[:12]
 
 
+def handover_broker_project_label(project_id: str) -> str:
+    validated = validate_project_id(project_id)
+    return hashlib.sha256(validated.encode("ascii")).hexdigest()[:12]
+
+
 def validate_claude_oauth_token(value: str) -> str:
     if not 32 <= len(value) <= 4096 or any(
         ord(character) < 33 or ord(character) > 126 for character in value
@@ -174,6 +179,22 @@ class StateLayout:
     @property
     def github_broker_policy_file(self) -> Path:
         return self.project_dir / "github-broker.json"
+
+    @property
+    def handover_broker_root(self) -> Path:
+        return self.root / "handover-broker"
+
+    @property
+    def handover_broker_run_root(self) -> Path:
+        return (
+            self.handover_broker_root
+            / "r"
+            / handover_broker_project_label(self.project_id)
+        )
+
+    @property
+    def handover_broker_audit_file(self) -> Path:
+        return self.handover_broker_root / "audit/events.jsonl"
 
 
 def ensure_private_directory(path: Path, create: bool = False) -> Path:
