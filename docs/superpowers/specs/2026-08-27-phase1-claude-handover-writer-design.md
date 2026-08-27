@@ -78,7 +78,7 @@ host writerはfilesystemへ触れる前に次を検証する。
 - section headingは必須7件と完全一致し、固定順序で各1回だけ現れる。
 - bodyはUTF-8、NULなし、size上限内である。
 - H1またはmetadata偽装用の先頭内容を受理しない。
-- `ghp_`、`github_pat_`、`sk-`、`BEGIN PRIVATE KEY`など既知credential markerを本文とtitleの両方で拒否する。
+- `ghp_`または`github_pat_`に十分な長さのtoken文字列が続く形、境界付き`sk-`に16文字以上のtoken文字列が続く形、PEM private key headerなど、credentialらしい既知patternを本文とtitleの両方で拒否する。prefix単独は通常文のfalse positiveを避けるため拒否条件にしない。
 
 secret marker検査はcredential非混入の完全な保証ではなく、既知の高risk文字列をfail closedで止める補助境界である。Claude向けinstructionsでも、環境一覧、token、credential値、transcript全文を本文へ入れない規則を維持する。
 
