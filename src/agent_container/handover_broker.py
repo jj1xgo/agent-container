@@ -135,6 +135,7 @@ class HandoverBrokerSession:
     _capability: str = field(repr=False)
     _listener: socket.socket | None = field(default=None, repr=False)
     _closed: bool = field(default=False, repr=False)
+    _cleanup_complete: bool = field(default=False, repr=False)
 
     @classmethod
     def create(
@@ -266,26 +267,45 @@ class HandoverBrokerSession:
         _write_audit_record(self.audit_file, record)
 
     def close(self) -> None:
-        if self._closed:
+        if self._cleanup_complete:
             return
         self._closed = True
         self._capability = ""
+        cleanup_failed = False
         if self._listener is not None:
-            self._listener.close()
-            self._listener = None
-        for path in (self.socket_path, self.capability_path):
+            try:
+                self._listener.close()
+            except OSError:
+                cleanup_failed = True
+            else:
+                self._listener = None
+        for path, expected_type in (
+            (self.capability_path, stat.S_ISREG),
+            (self.socket_path, stat.S_ISSOCK),
+        ):
             try:
                 metadata = path.lstat()
             except FileNotFoundError:
                 continue
-            if path == self.socket_path and not stat.S_ISSOCK(metadata.st_mode):
-                raise ValueError("handover broker socket path changed during cleanup")
-            if path == self.capability_path and not stat.S_ISREG(metadata.st_mode):
-                raise ValueError(
-                    "handover broker capability path changed during cleanup"
-                )
-            path.unlink()
-        self.run_dir.rmdir()
+            except OSError:
+                cleanup_failed = True
+                continue
+            if not expected_type(metadata.st_mode):
+                cleanup_failed = True
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                cleanup_failed = True
+        try:
+            self.run_dir.rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            cleanup_failed = True
+        if cleanup_failed:
+            raise ValueError("handover broker cleanup failed")
+        self._cleanup_complete = True
 
     def __enter__(self) -> "HandoverBrokerSession":
         return self

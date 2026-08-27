@@ -168,28 +168,45 @@ class HandoverBrokerSessionTest(unittest.TestCase):
         socket_factory: mock.Mock,
         _: mock.Mock,
     ) -> None:
+        old_request = self.request()
+        run_dir = self.session.run_dir
         listener = self.session.open_listener()
         self.session.socket_path.write_text("replacement", encoding="utf-8")
 
-        with self.assertRaisesRegex(ValueError, "socket path changed"):
+        with self.assertRaisesRegex(ValueError, "cleanup failed"):
             self.session.close()
 
         self.assertIs(listener, socket_factory.return_value)
         listener.close.assert_called_once_with()
         self.assertTrue(self.session.socket_path.is_file())
-        self.assertTrue(self.session.run_dir.exists())
+        self.assertFalse(self.session.capability_path.exists())
+        self.assertTrue(run_dir.exists())
         self.assertEqual(self.session._capability, "")
+        with self.assertRaisesRegex(ValueError, "closed"):
+            self.session.authorize(old_request, os.getuid())
+
+        self.session.socket_path.unlink()
+        self.session.close()
+        self.assertFalse(run_dir.exists())
 
     def test_close_refuses_replaced_capability_path(self) -> None:
+        old_request = self.request()
+        run_dir = self.session.run_dir
         self.session.capability_path.unlink()
         self.session.capability_path.mkdir()
 
-        with self.assertRaisesRegex(ValueError, "capability path changed"):
+        with self.assertRaisesRegex(ValueError, "cleanup failed"):
             self.session.close()
 
         self.assertTrue(self.session.capability_path.is_dir())
-        self.assertTrue(self.session.run_dir.exists())
+        self.assertTrue(run_dir.exists())
         self.assertEqual(self.session._capability, "")
+        with self.assertRaisesRegex(ValueError, "closed"):
+            self.session.authorize(old_request, os.getuid())
+
+        self.session.capability_path.rmdir()
+        self.session.close()
+        self.assertFalse(run_dir.exists())
 
     def test_audit_contains_only_allowlisted_secret_free_metadata(self) -> None:
         capability = self.session._capability
