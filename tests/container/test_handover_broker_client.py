@@ -34,16 +34,29 @@ VALID_BODY = """## 作業の目的
 
 
 class Duplex:
-    def __init__(self, incoming: bytes) -> None:
+    def __init__(
+        self,
+        incoming: bytes,
+        *,
+        max_write: int | None = None,
+        write_progress: int | None = None,
+    ) -> None:
         self.incoming = BytesIO(incoming)
         self.outgoing = BytesIO()
+        self.max_write = max_write
+        self.write_progress = write_progress
+        self.write_calls = 0
         self.closed = False
 
     def read(self, size: int = -1) -> bytes:
         return self.incoming.read(size)
 
-    def write(self, body: bytes) -> int:
-        return self.outgoing.write(body)
+    def write(self, body: bytes) -> int | None:
+        self.write_calls += 1
+        if self.write_progress is not None:
+            return self.write_progress
+        length = min(len(body), self.max_write or len(body))
+        return self.outgoing.write(body[:length])
 
     def flush(self) -> None:
         pass
@@ -131,6 +144,49 @@ class HandoverBrokerRuntimePathTest(unittest.TestCase):
             ):
                 validate_handover_socket(path)
 
+    def test_capability_rejects_path_replaced_after_descriptor_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            capability = Path(directory) / "capability"
+            capability.write_text("c" * 43 + "\n", encoding="ascii")
+            capability.chmod(0o600)
+            real_open = os.open
+
+            def open_then_replace(path: Path, flags: int) -> int:
+                descriptor = real_open(path, flags)
+                capability.unlink()
+                capability.write_text("d" * 43 + "\n", encoding="ascii")
+                capability.chmod(0o600)
+                return descriptor
+
+            with mock.patch(
+                "agent_container.handover_broker_client.os.open",
+                side_effect=open_then_replace,
+            ), self.assertRaises(ValueError):
+                read_handover_capability(capability.resolve())
+
+    def test_capability_opens_fifo_with_nonblocking_nofollow_flags(self) -> None:
+        if not hasattr(os, "O_NONBLOCK") or not hasattr(os, "O_NOFOLLOW"):
+            self.skipTest("platform does not expose safe Unix open flags")
+        with tempfile.TemporaryDirectory() as directory:
+            capability = Path(directory) / "capability"
+            os.mkfifo(capability, mode=0o600)
+            real_open = os.open
+            seen_flags: list[int] = []
+
+            def checked_open(path: Path, flags: int) -> int:
+                seen_flags.append(flags)
+                self.assertTrue(flags & os.O_NONBLOCK)
+                self.assertTrue(flags & os.O_NOFOLLOW)
+                return real_open(path, flags)
+
+            with mock.patch(
+                "agent_container.handover_broker_client.os.open",
+                side_effect=checked_open,
+            ), self.assertRaises(ValueError):
+                read_handover_capability(capability.resolve())
+
+            self.assertEqual(len(seen_flags), 1)
+
 
 class HandoverBrokerClientTest(unittest.TestCase):
     @mock.patch(
@@ -216,6 +272,69 @@ class HandoverBrokerClientTest(unittest.TestCase):
             client.create("private-title-marker", VALID_BODY)
         self.assertNotIn("private-title-marker", str(raised.exception))
         self.assertTrue(unavailable.closed)
+
+    @mock.patch(
+        "agent_container.handover_broker_client.read_handover_capability",
+        return_value="c" * 43,
+    )
+    @mock.patch("agent_container.handover_broker_client.validate_handover_socket")
+    def test_create_retries_until_the_entire_request_frame_is_sent(
+        self,
+        _: mock.Mock,
+        __: mock.Mock,
+    ) -> None:
+        expected = "/handovers/agent-container/2026-08-27_123456_abcdef12.md"
+        stream = Duplex(
+            encode_response_frame(HandoverResponse(1, "ok", expected, "")),
+            max_write=5,
+        )
+        socket_client = FakeSocket(stream)
+        client = HandoverBrokerClient(
+            Path("/run/agent-handover/broker.sock"),
+            Path("/run/agent-handover/capability"),
+            "agent-container",
+            socket_factory=lambda *_: socket_client,
+        )
+
+        self.assertEqual(client.create("Safe title", VALID_BODY), expected)
+
+        request, consumed = decode_request_frame(stream.outgoing.getvalue())
+        self.assertEqual(consumed, len(stream.outgoing.getvalue()))
+        self.assertEqual(request.title, "Safe title")
+        self.assertGreater(stream.write_calls, 1)
+
+    @mock.patch(
+        "agent_container.handover_broker_client.read_handover_capability",
+        return_value="c" * 43,
+    )
+    @mock.patch("agent_container.handover_broker_client.validate_handover_socket")
+    def test_create_rejects_invalid_request_write_progress(
+        self,
+        _: mock.Mock,
+        __: mock.Mock,
+    ) -> None:
+        expected = "/handovers/agent-container/2026-08-27_123456_abcdef12.md"
+        for progress in (None, 0, -1):
+            with self.subTest(progress=progress):
+                stream = Duplex(
+                    encode_response_frame(HandoverResponse(1, "ok", expected, "")),
+                    write_progress=progress,
+                )
+                if progress is None:
+                    stream.write = mock.Mock(return_value=None)
+                socket_client = FakeSocket(stream)
+                client = HandoverBrokerClient(
+                    Path("/run/agent-handover/broker.sock"),
+                    Path("/run/agent-handover/capability"),
+                    "agent-container",
+                    socket_factory=lambda *_: socket_client,
+                )
+
+                with self.assertRaises(ValueError):
+                    client.create("Safe title", VALID_BODY)
+
+                self.assertTrue(stream.closed)
+                self.assertTrue(socket_client.closed)
 
     def test_cli_bounds_stdin_requires_environment_and_prints_fixed_errors(self) -> None:
         class UnexpectedClient:

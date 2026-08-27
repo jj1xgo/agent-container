@@ -36,19 +36,33 @@ VALID_BODY = """## 作業の目的
 
 
 class Duplex:
-    def __init__(self, incoming: bytes, *, fail_write: bool = False) -> None:
+    def __init__(
+        self,
+        incoming: bytes,
+        *,
+        fail_write: bool = False,
+        max_write: int | None = None,
+        write_progress: int | None = None,
+    ) -> None:
         self.incoming = BytesIO(incoming)
         self.outgoing = BytesIO()
         self.fail_write = fail_write
+        self.max_write = max_write
+        self.write_progress = write_progress
+        self.write_calls = 0
         self.closed = False
 
     def read(self, size: int = -1) -> bytes:
         return self.incoming.read(size)
 
-    def write(self, body: bytes) -> int:
+    def write(self, body: bytes) -> int | None:
+        self.write_calls += 1
         if self.fail_write:
             raise BrokenPipeError("response-disconnect-marker")
-        return self.outgoing.write(body)
+        if self.write_progress is not None:
+            return self.write_progress
+        length = min(len(body), self.max_write or len(body))
+        return self.outgoing.write(body[:length])
 
     def flush(self) -> None:
         if self.fail_write:
@@ -304,6 +318,54 @@ class HandoverBrokerTransportTest(unittest.TestCase):
         self.assertEqual(records[0]["stage"], "response")
         audit = self.session.audit_file.read_text(encoding="utf-8")
         self.assertNotIn("response-disconnect-marker", audit)
+
+    def test_response_write_retries_until_the_entire_frame_is_sent(self) -> None:
+        connection = Duplex(
+            encode_request_frame(self.request()),
+            max_write=3,
+        )
+
+        result = handle_handover_connection(
+            self.session,
+            connection,
+            os.getuid(),
+            now=self.now,
+        )
+
+        response = read_response_frame(BytesIO(connection.outgoing.getvalue()))
+        self.assertEqual(result, 0)
+        self.assertEqual(response.status, "ok")
+        self.assertGreater(connection.write_calls, 1)
+        self.assertEqual(self.audit_records()[0]["status"], "ok")
+
+    def test_response_write_rejects_invalid_progress(self) -> None:
+        created = self.project_dir / "2026-08-27_123456_abcdef12.md"
+        for progress in (None, 0, -1):
+            with self.subTest(progress=progress):
+                self.session.audit_file.write_text("", encoding="utf-8")
+                connection = Duplex(
+                    encode_request_frame(self.request()),
+                    write_progress=progress,
+                )
+                if progress is None:
+                    connection.write = mock.Mock(return_value=None)
+                with mock.patch(
+                    "agent_container.handover_broker_transport.create_atomic_handover",
+                    return_value=created,
+                ):
+                    result = handle_handover_connection(
+                        self.session,
+                        connection,
+                        os.getuid(),
+                        now=self.now,
+                    )
+
+                self.assertEqual(result, 1)
+                self.assertTrue(connection.closed)
+                records = self.audit_records()
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0]["status"], "error")
+                self.assertEqual(records[0]["stage"], "response")
 
 
 if __name__ == "__main__":

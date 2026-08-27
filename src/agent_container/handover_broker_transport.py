@@ -71,7 +71,18 @@ def _write_response(
     response: HandoverResponse,
 ) -> bool:
     try:
-        connection.write(encode_response_frame(response))
+        frame = encode_response_frame(response)
+        offset = 0
+        while offset < len(frame):
+            written = connection.write(frame[offset:])
+            if (
+                isinstance(written, bool)
+                or not isinstance(written, int)
+                or written <= 0
+                or written > len(frame) - offset
+            ):
+                raise ValueError("handover broker response write failed")
+            offset += written
         connection.flush()
     except (OSError, TypeError, ValueError):
         return False
