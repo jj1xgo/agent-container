@@ -70,6 +70,9 @@ class ContainerImageContractTest(unittest.TestCase):
 
         self.assertTrue(settings["sandbox"]["enabled"])
         self.assertTrue(settings["sandbox"]["enableWeakerNestedSandbox"])
+        self.assertEqual(
+            settings["sandbox"].get("network"), {"allowAllUnixSockets": True}
+        )
         self.assertFalse(settings["sandbox"]["allowUnsandboxedCommands"])
         self.assertTrue(settings["sandbox"]["failIfUnavailable"])
         self.assertIn(

@@ -186,6 +186,7 @@ class ClaudeManagedPolicyTest(unittest.TestCase):
         mutations = {
             "sandbox disabled": lambda value: value["sandbox"].update(enabled=False),
             "strong nested": lambda value: value["sandbox"].update(enableWeakerNestedSandbox=False),
+            "Unix sockets blocked": lambda value: value["sandbox"].pop("network", None),
             "unsandboxed fallback": lambda value: value["sandbox"].update(allowUnsandboxedCommands=True),
             "no fail closed": lambda value: value["sandbox"].update(failIfUnavailable=False),
             "missing credentials": lambda value: value["sandbox"].pop("credentials"),
