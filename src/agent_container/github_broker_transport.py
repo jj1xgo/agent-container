@@ -598,7 +598,11 @@ def handle_issue_connection(
         )
         return 1
     try:
-        transferred = write_chunk_stream(connection, (body,))
+        chunks = (
+            body[offset : offset + MAX_STREAM_CHUNK_BYTES]
+            for offset in range(0, len(body), MAX_STREAM_CHUNK_BYTES)
+        )
+        transferred = write_chunk_stream(connection, chunks)
     except (ValueError, OSError):
         session.audit(
             operation=operation,

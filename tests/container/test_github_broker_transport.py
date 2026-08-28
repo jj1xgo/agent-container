@@ -17,6 +17,7 @@ from agent_container.github_broker_protocol import decode_request_frame
 from agent_container.github_broker_protocol import encode_request_frame
 from agent_container.github_broker_protocol import encode_response_frame
 from agent_container.github_broker_protocol import iter_chunk_stream
+from agent_container.github_broker_protocol import MAX_STREAM_CHUNK_BYTES
 from agent_container.github_broker_protocol import write_chunk_stream
 from agent_container.github_broker_transport import BrokerUploadPackClient
 from agent_container.github_broker_transport import BrokerReceivePackClient
@@ -217,6 +218,21 @@ class OversizeIssueTransport(FakeIssueTransport):
     def list_open(self) -> dict[str, object]:
         self.calls.append(("list_open", None))
         return {"issues": ["x" * MAX_ISSUE_RESPONSE_BYTES]}
+
+
+class LargeIssueTransport(FakeIssueTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.response = {
+            "issues": [
+                issue_summary(12)
+                | {"author": "a" * MAX_STREAM_CHUNK_BYTES}
+            ]
+        }
+
+    def list_open(self) -> dict[str, object]:
+        self.calls.append(("list_open", None))
+        return self.response
 
 
 def pkt(payload: bytes) -> bytes:
@@ -796,6 +812,44 @@ class BrokerUploadPackServerTest(unittest.TestCase):
             self.session.audit_file.read_text(encoding="utf-8").splitlines()[-1]
         )
         self.assertEqual(record["stage"], "issue-request")
+
+    def test_issue_streams_valid_response_larger_than_one_chunk(self) -> None:
+        transport = LargeIssueTransport()
+        connection = Duplex(
+            self.request(
+                sequence=74,
+                operation="issue-list",
+                payload={},
+            )
+        )
+
+        result = broker_transport.handle_issue_connection(
+            self.session, connection, transport
+        )
+
+        self.assertEqual(result, 0)
+        output = connection.outgoing.getvalue()
+        response_size = int.from_bytes(output[:4], "big") + 4
+        response_chunks = list(
+            iter_chunk_stream(
+                BytesIO(output[response_size:]),
+                maximum_total=MAX_ISSUE_RESPONSE_BYTES,
+            )
+        )
+        self.assertEqual(len(response_chunks), 2)
+        self.assertEqual(len(response_chunks[0]), MAX_STREAM_CHUNK_BYTES)
+        self.assertGreater(len(response_chunks[1]), 0)
+        self.assertLessEqual(
+            len(response_chunks[1]), MAX_STREAM_CHUNK_BYTES
+        )
+        self.assertEqual(
+            json.loads(b"".join(response_chunks)), transport.response
+        )
+        record = json.loads(
+            self.session.audit_file.read_text(encoding="utf-8").splitlines()[-1]
+        )
+        self.assertEqual(record["status"], "ok")
+        self.assertEqual(record["bytes"], sum(map(len, response_chunks)))
 
     def test_issue_audits_response_stream_failure(self) -> None:
         connection = FailingWriteDuplex(
