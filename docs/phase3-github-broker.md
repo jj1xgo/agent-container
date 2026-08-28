@@ -1,6 +1,6 @@
 # Phase 3 GitHub App broker 運用ガイド
 
-Phase 3では、GitHub credentialをcontainerへ渡さず、project限定のclone/fetch、作業branch push、Pull Request作成・閲覧・checks確認をhost側broker経由で提供します。現在は明示的な`--github-broker` opt-inです。brokerに失敗してもlegacy `gh` credentialへfallbackしません。
+Phase 3では、GitHub credentialをcontainerへ渡さず、project限定のclone/fetch、作業branch push、Pull Request作成・閲覧・checks確認、Issue一覧・詳細のreadをhost側broker経由で提供します。現在は明示的な`--github-broker` opt-inです。brokerに失敗してもlegacy `gh` credentialへfallbackしません。
 
 設計上のsecurity boundaryは[Phase 3設計](superpowers/specs/2026-08-25-phase-3-github-broker-design.md)を参照してください。実環境で有効化する前に[Phase 3 smoke test](phase3-github-broker-smoke-test.md)を完了します。
 
@@ -13,8 +13,10 @@ broker modeで許可する操作は次だけです。
 - `agent-github pr create`
 - `agent-github pr view`
 - `agent-github pr checks`
+- `agent-github issue list`
+- `agent-github issue view NUMBER`
 
-repositoryはproject登録時のmetadataからhostが決定します。containerからowner、repository、任意URL、HTTP header、API pathを指定できません。merge、close、release、workflow dispatch、secret、environment、repository administration、generic API proxyは提供しません。
+`issue list`はopen Issueを作成日時の新しい順に最大30件返します。filter、sort、direction、page、limitのoptionはありません。`issue view`は1以上2,147,483,647以下の正の整数だけを受け取ります。repositoryはproject登録時のmetadataからhostが決定します。containerからowner、repository、任意URL、HTTP header、API pathを指定できません。Issue create、edit、comment、close、reopen、lock、unlock、delete、label／assignee変更、search、query、pagination、cross-repository read、merge、release、workflow dispatch、secret、environment、repository administration、generic API proxyは提供しません。
 
 ## GitHub Appの準備
 
@@ -26,8 +28,9 @@ GitHub Appは`Only select repositories`で対象repositoryだけへinstallしま
 | Contents | write |
 | Pull requests | write |
 | Checks | read |
+| Issues | read |
 
-Actions、Administration、Members、Secrets、Environments、Deployments、Workflows permissionは付けません。
+Actions、Administration、Members、Secrets、Environments、Deployments、Workflows permissionは付けません。Issue readを使う前にGitHub App側で`Issues | read`へ更新し、GitHub側で必要なinstallationの再承認を完了します。不足するpermissionでは別credentialやlegacy `gh`へfallbackしません。
 
 GitHub側で全`refs/heads/**`へのforce pushを禁止するrulesetを有効にします。Git wire protocolのupdate commandだけではnew commitがold commitの子孫かbrokerが判定できないため、このrulesetは省略できません。brokerは別途、protected ref、delete、non-head ref、stale lease、未知capabilityを拒否します。
 
@@ -110,7 +113,7 @@ bin/agentctl run PROJECT --agent claude --github-broker
 
 runtimeごとにproject別Unix socketとephemeral capabilityを生成し、read-only mountします。runtime終了時に両方を破棄します。broker modeでは`GH_CONFIG_DIR`、hostの`gh` state、credential helper、token環境変数をcontainerへ渡しません。
 
-## GitとPull Request操作
+## Git、Pull Request、Issueの固定操作
 
 workspaceでは通常のGit commandを使います。HTTPS originはruntimeのGit configでproject固定の`agent-broker://OWNER/REPOSITORY`へ転送されます。
 
@@ -133,7 +136,16 @@ agent-github pr view 123
 agent-github pr checks 123
 ```
 
-outputはbrokerが検証したbounded JSONです。PR body、credential、GitHub error bodyをauditへ記録しません。PR番号、操作、成功/拒否、転送byte数だけをsecret-free auditへ記録します。
+Issue readもcontainer内の固定schema CLIだけを使います。
+
+```bash
+agent-github issue list
+agent-github issue view NUMBER
+```
+
+list outputは`issues`配列だけで、各itemは`number`、`title`、`state`、`author`、`labels`、`created_at`、`updated_at`、`url`だけを含みます。GitHub list endpointが返すPull Request itemは除外します。view outputは同じfieldに`body`を加えます。bodyのGitHub `null`は空文字列へ正規化されます。outputはbrokerとclientが検証したbounded JSONをstdoutへ1行で出力し、credential、token、capability、raw response、response header、GitHub error bodyを含みません。
+
+PR body、Issue title、body、author、label、URL、credential、GitHub error bodyをauditへ記録しません。Issue auditはoperation（`issue-list`または`issue-view`）、status、転送byte数、error時の`issue-request` stageだけを記録し、viewの番号はPR番号と混在させず`issue_number`として記録します。
 
 ## 移行とrollback
 
@@ -144,7 +156,7 @@ rollbackはbroker障害からの自動fallbackではなく、利用者が明示�
 ## Failure対応
 
 - `github-broker` doctorがFAIL: file path、owner、mode、symlink、metadata schema、project policyを修正します。private key本文は表示しません。
-- clone/fetch/push/PRが失敗: App installation、exact repository ID、permission、ruleset、networkをhost側で確認します。tokenやGitHub error bodyを採取しません。
+- clone/fetch/push/PR/Issue readが失敗: App installation、exact repository ID、permission、ruleset、networkをhost側で確認します。tokenやGitHub error bodyを採取しません。
 - 401: brokerはcacheを破棄して一度だけtokenを更新します。繰り返しretryやlegacy fallbackを行いません。
 - protected branch、delete、stale leaseの拒否: policyどおりです。制約を迂回せず、作業branchとPRを使います。
 - broker停止後: Git/PR操作がfail closedになることが期待動作です。
@@ -157,6 +169,7 @@ rollbackはbroker障害からの自動fallbackではなく、利用者が明示�
 - `receive-discovery`
 - `receive-rpc`
 - `pr-request`
+- `issue-request`
 - `response-stream`
 
 1 connectionの既知failureはそのconnectionだけをfail closedにし、brokerは次のconnectionを受け付けます。認可違反は従来どおり`denied`であり、予期しないprogramming／listener／thread failureはruntime全体のfailureです。
@@ -168,7 +181,7 @@ jq -c '{timestamp,operation,status,stage}' \
   "$AGENT_CONTAINER_HOME/github-broker/audit/events.jsonl" | tail -n 5
 ```
 
-exception本文、GitHub response body、token、JWT、private key、capability、Authorization header、PR body、Git advertisement、packfile、commit内容を採取しません。
+exception本文、GitHub response body、token、JWT、private key、capability、Authorization header、PR body、Issue content、Git advertisement、packfile、commit内容を採取しません。
 
 ## 既知の境界
 
