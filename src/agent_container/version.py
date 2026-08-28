@@ -5,10 +5,10 @@ import re
 import subprocess
 
 
-_FALLBACK_VERSION = "0.3.0-dev.0"
-_RELEASE_TAG = "v0.2.0"
+_FALLBACK_VERSION = "0.4.0-dev.0"
+_RELEASE_TAG = "v0.3.0"
 _RELEASE_VERSION = _RELEASE_TAG.removeprefix("v")
-_DEVELOPMENT_VERSION = "0.3.0-dev"
+_DEVELOPMENT_VERSION = "0.4.0-dev"
 _NUMERIC_IDENTIFIER = r"(?:0|[1-9][0-9]*)"
 _PRERELEASE_IDENTIFIER = (
     rf"(?:{_NUMERIC_IDENTIFIER}|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"

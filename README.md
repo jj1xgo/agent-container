@@ -2,10 +2,10 @@
 
 AI coding agentsをホスト環境から分離して動かす、Linux・rootless Podman向けの開発環境です。CodexとClaude Codeを、projectごとに分けたworkspace・設定・cache・handoverとともに実行します。
 
-Current release: `v0.2.0`
+Current release: `v0.3.0`
 
 Development builds derive their version from Git as
-`0.3.0-dev.N+gCOMMIT` (`.dirty` is appended for tracked changes). Run
+`0.4.0-dev.N+gCOMMIT` (`.dirty` is appended for tracked changes). Run
 `bin/agentctl --version` to see the exact version for the current checkout.
 
 現在はPhase 3のGitHub App brokerを明示opt-inで利用できます。`0.x`の間はCLI、state配置、security boundaryが互換性なく変更される可能性があります。
