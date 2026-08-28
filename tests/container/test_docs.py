@@ -345,8 +345,14 @@ class Phase3DocumentationTest(unittest.TestCase):
             "expired capability",
             "Git/PR regression",
             "not run",
+            "allowlist済みのIssue bodyはstdoutに含まれてよい",
+            "excluded raw-response field sentinel",
         ):
             self.assertIn(expected, smoke)
+        self.assertNotIn(
+            "stdout、stderr、auditがtoken、capability、raw response、fixture sentinelを含まない",
+            smoke,
+        )
 
     def test_base_image_does_not_leak_legacy_gh_environment_into_broker_mode(self) -> None:
         containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")

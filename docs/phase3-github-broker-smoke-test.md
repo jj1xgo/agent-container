@@ -123,9 +123,9 @@ agent-github issue view ISSUE_NUMBER
 ```
 
 - listがopen Issueだけを最大30件返し、Pull Requestを除外する。
-- viewが指定Issueの固定fieldとbodyを返す。Issue content、credential、raw responseを表示・記録しない。
+- viewが指定Issueの固定fieldとbodyを返す。allowlist済みのIssue bodyはstdoutに含まれてよい。Issue contentはauditへ記録しない。
 - `agent-github issue create`、edit、comment、close、search、query、pagination、generic API、cross-repository readのinterfaceが存在せず拒否される。
-- stdout、stderr、auditがtoken、capability、raw response、fixture sentinelを含まない。
+- stdoutはallowlist済みのfixed responseだけを返す。stderr、audit、raw endpoint payloadがtoken、capability、raw response、excluded raw-response field sentinelを含まない。
 - runtime終了後のexpired capabilityでIssue clientが拒否される。
 - 既存Git/PR regressionとしてclone、fetch、作業branch push、PR create/view/checksが回帰していないことを確認する。
 
@@ -154,7 +154,7 @@ agent-github issue view ISSUE_NUMBER
 | Issue list/PR exclusion | open Issue only; 最大30件; Pull Requestを除外 | not run | — |
 | Issue view/body | specified Issue fixed fields and body only | not run | — |
 | Issue write/query/cross-repository denial | create/edit/comment/close/search/query/pagination/generic API/cross-repository read denied | not run | — |
-| Issue credential non-exposure | stdout/stderr/audit omit token, capability, raw response, and fixture sentinel | not run | — |
+| Issue credential non-exposure | stdout permits allowlisted body only; stderr/audit/raw endpoint payload omit token, capability, raw response, and excluded raw-response field sentinel | not run | — |
 | Issue expired capability | runtime cleanup rejects stale Issue client | not run | — |
 | Issue Git/PR regression | clone/fetch/push and PR create/view/checks unchanged | not run | — |
 
