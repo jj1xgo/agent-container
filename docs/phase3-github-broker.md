@@ -145,7 +145,7 @@ agent-github issue view NUMBER
 
 list outputは`issues`配列だけで、各itemは`number`、`title`、`state`、`author`、`labels`、`created_at`、`updated_at`、`url`だけを含みます。GitHub list endpointが返すPull Request itemは除外します。view outputは同じfieldに`body`を加えます。bodyのGitHub `null`は空文字列へ正規化されます。outputはbrokerとclientが検証したbounded JSONをstdoutへ1行で出力し、credential、token、capability、raw response、response header、GitHub error bodyを含みません。
 
-PR body、Issue title、body、author、label、URL、credential、GitHub error bodyをauditへ記録しません。Issue auditはoperation（`issue-list`または`issue-view`）、status、転送byte数、error時の`issue-request` stageだけを記録し、viewの番号はPR番号と混在させず`issue_number`として記録します。
+PR body、Issue title、body、author、label、URL、credential、GitHub error bodyをauditへ記録しません。Issue auditはoperation（`issue-list`または`issue-view`）、status、転送byte数、error時には失敗箇所に応じて`token`、`issue-request`、`response-stream`のいずれかの固定stageだけを記録し、viewの番号はPR番号と混在させず`issue_number`として記録します。
 
 ## 移行とrollback
 

@@ -1,5 +1,6 @@
 from base64 import urlsafe_b64decode
 from datetime import datetime, timezone
+import http.client
 import json
 import os
 from pathlib import Path
@@ -13,8 +14,10 @@ from agent_container.github_app import GITHUB_API_VERSION
 from agent_container.github_app import GitHubAppMetadata
 from agent_container.github_app import HttpResponse
 from agent_container.github_app import InstallationTokenProvider
+from agent_container.github_app import MAX_RESPONSE_BYTES
 from agent_container.github_app import OpenSSLSigner
 from agent_container.github_app import create_app_jwt
+from agent_container.github_app import github_transport
 
 
 def decode_segment(value: str) -> dict[str, object]:
@@ -321,3 +324,62 @@ class GitHubAppTest(unittest.TestCase):
         )
         token = provider.get()
         self.assertNotIn(token.token, repr(token))
+
+    def test_token_transport_sanitizes_protocol_errors_from_all_io_phases(
+        self,
+    ) -> None:
+        marker = "secret-malformed-token-status"
+
+        class ProtocolResponse:
+            status = 201
+            headers = {"Content-Type": "application/json"}
+
+            def __init__(self, phase: str) -> None:
+                self.phase = phase
+
+            def read(self, maximum: int) -> bytes:
+                self.assert_maximum(maximum)
+                if self.phase == "read":
+                    raise http.client.BadStatusLine(marker)
+                return b"{}"
+
+            def assert_maximum(self, maximum: int) -> None:
+                if maximum != MAX_RESPONSE_BYTES + 1:
+                    raise AssertionError("unexpected token response read bound")
+
+            def close(self) -> None:
+                if self.phase == "close":
+                    raise http.client.BadStatusLine(marker)
+
+        class ProtocolOpener:
+            def __init__(self, phase: str) -> None:
+                self.phase = phase
+
+            def open(self, request, timeout):  # type: ignore[no-untyped-def]
+                if self.phase == "open":
+                    raise http.client.BadStatusLine(marker)
+                return ProtocolResponse(self.phase)
+
+        url = "https://api.github.com/app/installations/123/access_tokens"
+        for phase in ("open", "read", "close"):
+            with self.subTest(phase=phase):
+                with mock.patch(
+                    "agent_container.github_app.urllib.request.build_opener",
+                    return_value=ProtocolOpener(phase),
+                ):
+                    try:
+                        github_transport(url, {}, b"{}")
+                    except RuntimeError as error:
+                        self.assertEqual(
+                            str(error), "GitHub App token request failed"
+                        )
+                        self.assertNotIn(marker, str(error))
+                        self.assertNotIn(marker, repr(error))
+                        self.assertIsNone(error.__cause__)
+                        self.assertTrue(error.__suppress_context__)
+                    except Exception as error:  # noqa: BLE001
+                        self.fail(
+                            f"{phase} leaked {type(error).__name__}: {error}"
+                        )
+                    else:
+                        self.fail(f"{phase} protocol failure was accepted")

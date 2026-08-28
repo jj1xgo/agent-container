@@ -1,6 +1,7 @@
 from base64 import urlsafe_b64encode
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import http.client
 import json
 import os
 from pathlib import Path
@@ -192,22 +193,28 @@ def github_transport(
     )
     opener = urllib.request.build_opener(_NoRedirect())
     try:
-        response = opener.open(request, timeout=30)
-    except urllib.error.HTTPError as error:
-        response = error
-    except (urllib.error.URLError, TimeoutError, OSError):
+        try:
+            response = opener.open(request, timeout=30)
+        except urllib.error.HTTPError as error:
+            response = error
+        try:
+            response_body = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(response_body) > MAX_RESPONSE_BYTES:
+                raise RuntimeError("GitHub App token response is too large")
+            return HttpResponse(
+                status=response.status,
+                headers=dict(response.headers.items()),
+                body=response_body,
+            )
+        finally:
+            response.close()
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        OSError,
+        http.client.HTTPException,
+    ):
         raise RuntimeError("GitHub App token request failed") from None
-    try:
-        response_body = response.read(MAX_RESPONSE_BYTES + 1)
-        if len(response_body) > MAX_RESPONSE_BYTES:
-            raise RuntimeError("GitHub App token response is too large")
-        return HttpResponse(
-            status=response.status,
-            headers=dict(response.headers.items()),
-            body=response_body,
-        )
-    finally:
-        response.close()
 
 
 @dataclass(frozen=True)
