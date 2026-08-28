@@ -59,6 +59,15 @@ class BrokerSessionTest(unittest.TestCase):
                     "GitHub broker failure stage is invalid",
                 )
 
+    def test_accepts_issue_request_failure_stage(self) -> None:
+        self.session.audit(
+            operation="issue-view",
+            status="error",
+            stage="issue-request",
+        )
+        record = json.loads(self.session.audit_file.read_text(encoding="utf-8"))
+        self.assertEqual(record["stage"], "issue-request")
+
     def test_creates_private_project_scoped_runtime(self) -> None:
         self.assertEqual(stat.S_IMODE(self.session.run_dir.stat().st_mode), 0o700)
         self.assertEqual(
@@ -203,12 +212,19 @@ class BrokerSessionTest(unittest.TestCase):
         self.assertNotIn(self.session.run_id, body)
         self.assertEqual(stat.S_IMODE(self.session.audit_file.stat().st_mode), 0o600)
 
+    def test_audits_issue_number_separately(self) -> None:
+        self.session.audit(operation="issue-view", status="ok", issue_number=12)
+        record = json.loads(self.session.audit_file.read_text(encoding="utf-8"))
+        self.assertEqual(record["issue_number"], 12)
+        self.assertNotIn("pr_number", record)
+
     def test_audit_rejects_unvalidated_metadata_without_writing(self) -> None:
         cases = (
             {"operation": "merge", "status": "ok"},
             {"operation": "pr-view", "status": "secret-marker"},
             {"operation": "git-receive-pack", "status": "ok", "ref": "refs/heads/main"},
             {"operation": "pr-view", "status": "ok", "pr_number": 0},
+            {"operation": "issue-view", "status": "ok", "issue_number": 0},
             {"operation": "pr-view", "status": "ok", "bytes_transferred": -1},
             {"operation": "git-upload-pack", "status": "error"},
             {

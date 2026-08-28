@@ -21,10 +21,11 @@ MAX_RESPONSE_BYTES = 1_048_576
 TOKEN_REFRESH_MARGIN_SECONDS = 300
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9]{8,100}$")
 _TOKEN_PERMISSIONS = {
-    "contents": "write",
-    "pull_requests": "write",
     "checks": "read",
+    "contents": "write",
+    "issues": "read",
     "metadata": "read",
+    "pull_requests": "write",
 }
 
 

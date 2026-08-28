@@ -1,6 +1,7 @@
 import unittest
 
 from agent_container.github_broker_policy import BrokerPolicy
+from agent_container.github_broker_policy import validate_issue_number
 from agent_container.github_broker_policy import validate_pr_body
 from agent_container.github_broker_policy import validate_pr_number
 from agent_container.github_broker_policy import validate_pr_title
@@ -38,6 +39,25 @@ class BrokerPolicyTest(unittest.TestCase):
         for operation in ("merge", "release", "gh-api", "workflow-dispatch", ""):
             with self.subTest(operation=operation):
                 with self.assertRaisesRegex(ValueError, "operation is not allowed"):
+                    self.policy.validate_operation(operation)
+
+    def test_allows_only_fixed_issue_read_operations(self) -> None:
+        for operation in ("issue-list", "issue-view"):
+            with self.subTest(operation=operation):
+                self.assertEqual(self.policy.validate_operation(operation), operation)
+
+        for operation in (
+            "issue-create",
+            "issue-edit",
+            "issue-comment",
+            "issue-close",
+            "issue-lock",
+            "issue-delete",
+            "issue-search",
+            "issue-query",
+        ):
+            with self.subTest(operation=operation):
+                with self.assertRaises(ValueError):
                     self.policy.validate_operation(operation)
 
     def test_request_repository_must_match_exactly(self) -> None:
@@ -145,3 +165,13 @@ class PullRequestInputTest(unittest.TestCase):
             with self.subTest(length=len(body)):
                 with self.assertRaises(ValueError):
                     validate_pr_body(body)
+
+
+class IssueInputTest(unittest.TestCase):
+    def test_validates_issue_number_without_accepting_boolean(self) -> None:
+        self.assertEqual(validate_issue_number(1), 1)
+        self.assertEqual(validate_issue_number(2_147_483_647), 2_147_483_647)
+        for value in (True, 0, -1, 2_147_483_648, "1"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    validate_issue_number(value)  # type: ignore[arg-type]

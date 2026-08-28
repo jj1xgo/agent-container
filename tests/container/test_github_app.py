@@ -71,6 +71,7 @@ class GitHubAppTest(unittest.TestCase):
                         "contents": "write",
                         "pull_requests": "write",
                         "checks": "read",
+                        "issues": "read",
                         "metadata": "read",
                     },
                     "repositories": [{"id": 456, "name": "agent-container"}],
@@ -202,6 +203,7 @@ class GitHubAppTest(unittest.TestCase):
                 "permissions": {
                     "checks": "read",
                     "contents": "write",
+                    "issues": "read",
                     "metadata": "read",
                     "pull_requests": "write",
                 },
@@ -267,6 +269,45 @@ class GitHubAppTest(unittest.TestCase):
                     ).timestamp(),
                 )
                 with self.assertRaises((ValueError, RuntimeError)) as raised:
+                    provider.get()
+                self.assertNotIn(marker, str(raised.exception))
+                self.assertIsNone(provider._cached)
+
+    def test_rejects_missing_extra_or_write_issue_permissions_without_echoing_marker(
+        self,
+    ) -> None:
+        marker = "secret-response-marker"
+        valid = json.loads(self.response().body)
+        valid["marker"] = marker
+        cases = (
+            {
+                **valid,
+                "permissions": {
+                    k: v for k, v in valid["permissions"].items() if k != "issues"
+                },
+            },
+            {
+                **valid,
+                "permissions": valid["permissions"] | {"administration": "read"},
+            },
+            {**valid, "permissions": valid["permissions"] | {"issues": "write"}},
+        )
+        for payload in cases:
+            with self.subTest(permissions=payload["permissions"]):
+                response = HttpResponse(
+                    201,
+                    {"Content-Type": "application/json"},
+                    json.dumps(payload).encode(),
+                )
+                provider = InstallationTokenProvider(
+                    self.metadata,
+                    signer=FakeSigner(),
+                    transport=lambda *_: response,
+                    clock=lambda: datetime(
+                        2026, 8, 25, 13, 0, tzinfo=timezone.utc
+                    ).timestamp(),
+                )
+                with self.assertRaises(ValueError) as raised:
                     provider.get()
                 self.assertNotIn(marker, str(raised.exception))
                 self.assertIsNone(provider._cached)
