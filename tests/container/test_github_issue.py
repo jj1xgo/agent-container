@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import http.client
 import json
 import unittest
 from unittest import mock
@@ -212,6 +213,42 @@ class GitHubIssueTransportTest(unittest.TestCase):
         self.assertIsNone(result["author"])
         self.assertEqual(result["labels"], [label])
         self.assertEqual(result["body"], body)
+
+    def test_requires_user_and_body_keys_even_when_null_is_allowed(self) -> None:
+        for missing_key in ("user", "body"):
+            with self.subTest(missing_key=missing_key):
+                payload = issue_payload(12)
+                del payload[missing_key]
+                transport, _, _ = subject(json_response(payload))
+
+                self.assert_issue_error_safe(transport)
+
+    def test_list_rejects_closed_issue_from_open_only_endpoint(self) -> None:
+        transport, _, _ = subject(
+            json_response([issue_payload(12, state="closed")])
+        )
+
+        with self.assertRaises(BrokerStageError) as raised:
+            transport.list_open()
+
+        self.assertEqual(raised.exception.stage, "issue-request")
+
+    def test_view_rejects_response_for_a_different_issue_number(self) -> None:
+        transport, _, _ = subject(json_response(issue_payload(13)))
+
+        self.assert_issue_error_safe(transport)
+
+    def test_rejects_bounded_deep_json_without_recursion_error_escape(self) -> None:
+        depth = 100_000
+        response = HttpResponse(
+            200,
+            {"Content-Type": "application/json"},
+            b"[" * depth + b"0" + b"]" * depth,
+        )
+        self.assertLess(len(response.body), MAX_ISSUE_RESPONSE_BYTES)
+        transport, _, _ = subject(response)
+
+        self.assert_issue_error_safe(transport)
 
     def test_rejects_invalid_issue_schema_without_partial_output(self) -> None:
         invalid_changes = (
@@ -452,6 +489,61 @@ class GitHubIssueHttpTransportTest(unittest.TestCase):
 
         self.assertEqual(response.maximum, MAX_ISSUE_RESPONSE_BYTES + 1)
         self.assertTrue(response.closed)
+
+    def test_sanitizes_protocol_errors_from_open_read_and_close(self) -> None:
+        marker = "secret-malformed-status"
+
+        class ProtocolResponse:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def __init__(self, phase: str) -> None:
+                self.phase = phase
+
+            def read(self, maximum: int) -> bytes:
+                if self.phase == "read":
+                    raise http.client.BadStatusLine(marker)
+                return b"{}"
+
+            def close(self) -> None:
+                if self.phase == "close":
+                    raise http.client.BadStatusLine(marker)
+
+        class ProtocolOpener:
+            def __init__(self, phase: str) -> None:
+                self.phase = phase
+
+            def open(self, request, timeout):  # type: ignore[no-untyped-def]
+                if self.phase == "open":
+                    raise http.client.BadStatusLine(marker)
+                return ProtocolResponse(self.phase)
+
+        for phase in ("open", "read", "close"):
+            with self.subTest(phase=phase):
+                with mock.patch(
+                    "agent_container.github_issue.urllib.request.build_opener",
+                    return_value=ProtocolOpener(phase),
+                ):
+                    try:
+                        github_issue_transport(
+                            "GET",
+                            "https://api.github.com/repos/"
+                            "jj1xgo/agent-container/issues/12",
+                            {},
+                            None,
+                        )
+                    except RuntimeError as error:
+                        self.assertEqual(str(error), "GitHub Issue request failed")
+                        self.assertNotIn(marker, str(error))
+                        self.assertNotIn(marker, repr(error))
+                        self.assertIsNone(error.__cause__)
+                    except Exception as error:  # noqa: BLE001
+                        self.fail(
+                            "protocol failure escaped as "
+                            f"{type(error).__name__}: {error}"
+                        )
+                    else:
+                        self.fail("RuntimeError not raised")
 
 
 if __name__ == "__main__":

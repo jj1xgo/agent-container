@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
+import http.client
 import json
 import re
 from typing import Callable, Mapping
@@ -49,22 +50,28 @@ def github_issue_transport(
         raise ValueError("GitHub Issue endpoint is not allowed")
     request = urllib.request.Request(url, headers=dict(headers), method="GET")
     try:
-        response = urllib.request.build_opener(_NoRedirect()).open(
-            request, timeout=30
-        )
-    except urllib.error.HTTPError as error:
-        response = error
-    except (urllib.error.URLError, TimeoutError, OSError):
+        try:
+            response = urllib.request.build_opener(_NoRedirect()).open(
+                request, timeout=30
+            )
+        except urllib.error.HTTPError as error:
+            response = error
+        try:
+            response_body = response.read(MAX_ISSUE_RESPONSE_BYTES + 1)
+            if len(response_body) > MAX_ISSUE_RESPONSE_BYTES:
+                raise RuntimeError("GitHub Issue response is too large")
+            return HttpResponse(
+                response.status, dict(response.headers.items()), response_body
+            )
+        finally:
+            response.close()
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        OSError,
+        http.client.HTTPException,
+    ):
         raise RuntimeError("GitHub Issue request failed") from None
-    try:
-        response_body = response.read(MAX_ISSUE_RESPONSE_BYTES + 1)
-        if len(response_body) > MAX_ISSUE_RESPONSE_BYTES:
-            raise RuntimeError("GitHub Issue response is too large")
-        return HttpResponse(
-            response.status, dict(response.headers.items()), response_body
-        )
-    finally:
-        response.close()
 
 
 def _get_installation_token(
@@ -110,7 +117,7 @@ def _json(response: HttpResponse, expected: int) -> object:
                 ValueError("GitHub Issue response is invalid")
             ),
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError):
         raise ValueError("GitHub Issue response is invalid") from None
 
 
@@ -182,6 +189,8 @@ def _labels(value: object) -> list[str]:
 def _summary(
     policy: BrokerPolicy, payload: dict[str, object]
 ) -> dict[str, object]:
+    if "user" not in payload:
+        raise ValueError("GitHub Issue response is invalid")
     number = validate_issue_number(payload.get("number"))  # type: ignore[arg-type]
     title = _text(
         payload.get("title"),
@@ -205,7 +214,7 @@ def _summary(
         "number": number,
         "title": title,
         "state": state,
-        "author": _author(payload.get("user")),
+        "author": _author(payload["user"]),
         "labels": _labels(payload.get("labels")),
         "created_at": created_at,
         "updated_at": updated_at,
@@ -236,7 +245,12 @@ class GitHubIssueTransport:
                     },
                     None,
                 )
-            except (ValueError, RuntimeError, OSError):
+            except (
+                ValueError,
+                RuntimeError,
+                OSError,
+                http.client.HTTPException,
+            ):
                 raise BrokerStageError("issue-request") from None
             if response.status != 401 or attempt == 1:
                 return response
@@ -253,7 +267,10 @@ class GitHubIssueTransport:
                 if not isinstance(item, dict):
                     raise ValueError("GitHub Issue response is invalid")
                 if "pull_request" not in item:
-                    issues.append(_summary(self.policy, item))
+                    summary = _summary(self.policy, item)
+                    if summary["state"] != "open":
+                        raise ValueError("GitHub Issue response is invalid")
+                    issues.append(summary)
             return {"issues": issues}
         except BrokerStageError:
             raise
@@ -267,7 +284,9 @@ class GitHubIssueTransport:
             if not isinstance(payload, dict):
                 raise ValueError("GitHub Issue response is invalid")
             summary = _summary(self.policy, payload)
-            body = payload.get("body")
+            if summary["number"] != number or "body" not in payload:
+                raise ValueError("GitHub Issue response is invalid")
+            body = payload["body"]
             if body is None:
                 body = ""
             body = _text(
