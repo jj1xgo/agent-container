@@ -4,7 +4,7 @@ ARG NODE_VERSION=latest
 ARG CODEX_VERSION=latest
 ARG CLAUDE_VERSION=latest
 ARG AGENT_CLI_CACHEBUST=0
-ARG AGENT_CONTAINER_VERSION=0.3.0-dev.0
+ARG AGENT_CONTAINER_VERSION=0.4.0-dev.0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \

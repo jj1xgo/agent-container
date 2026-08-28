@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-28
+
 ### Added
 
 - Claude Codeが選択projectに新規handoverを作成できる、runtime限定のcreate-only Unix-socket brokerと`agent-handover create --title TITLE`経路を追加しました。
@@ -78,5 +80,6 @@
 
 通常のlocal image buildは既定で各agent CLIの`latest`を解決します。このbaselineは`v0.1.0`のCI再現用固定値であり、runtime dependencyを恒久固定するものではありません。
 
+[0.3.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.3.0
 [0.2.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.1.0

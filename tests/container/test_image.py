@@ -173,7 +173,7 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertIn("ARG CODEX_VERSION=latest", body)
         self.assertIn("ARG CLAUDE_VERSION=latest", body)
         self.assertIn("ARG AGENT_CLI_CACHEBUST=0", body)
-        self.assertIn("ARG AGENT_CONTAINER_VERSION=0.3.0-dev.0", body)
+        self.assertIn("ARG AGENT_CONTAINER_VERSION=0.4.0-dev.0", body)
         self.assertIn("@openai/codex@${CODEX_VERSION}", body)
         self.assertIn("@anthropic-ai/claude-code@${CLAUDE_VERSION}", body)
         self.assertIn(
