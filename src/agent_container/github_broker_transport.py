@@ -24,18 +24,22 @@ from agent_container.github_broker_protocol import iter_chunk_stream
 from agent_container.github_broker_protocol import read_request_frame
 from agent_container.github_broker_protocol import read_response_frame
 from agent_container.github_broker_protocol import write_chunk_stream
+from agent_container.github_broker_policy import validate_issue_number
 from agent_container.github_git_transport import MAX_DISCOVERY_BYTES
 from agent_container.github_git_transport import MAX_UPLOAD_PACK_RESPONSE_BYTES
 from agent_container.github_git_transport import GitHubUploadPackTransport
 from agent_container.github_git_transport import GitHubReceivePackTransport
 from agent_container.github_git_transport import MAX_RECEIVE_PACK_ADVERTISEMENT_BYTES
 from agent_container.github_git_transport import MAX_RECEIVE_PACK_RESPONSE_BYTES
+from agent_container.github_issue import GitHubIssueTransport
+from agent_container.github_issue import MAX_ISSUE_RESPONSE_BYTES
 from agent_container.github_pr import GitHubPullRequestTransport
 from agent_container.github_pr import MAX_PR_RESPONSE_BYTES
 
 
 _CAPABILITY = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _PR_OPERATIONS = frozenset({"pr-create", "pr-view", "pr-checks"})
+_ISSUE_OPERATIONS = frozenset({"issue-list", "issue-view"})
 
 
 def _write_response(connection: BinaryIO, status: str) -> bool:
@@ -511,12 +515,114 @@ def handle_pull_request_connection(
     return 0
 
 
+def _validate_issue_payload(
+    operation: str,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    if operation == "issue-list" and not payload:
+        return {}
+    if operation == "issue-view" and set(payload) == {"number"}:
+        number = validate_issue_number(payload["number"])  # type: ignore[arg-type]
+        return {"number": number}
+    raise ValueError("broker Issue payload is invalid")
+
+
+def handle_issue_connection(
+    session: BrokerSession,
+    connection: BinaryIO,
+    transport: GitHubIssueTransport,
+    initial_request: BrokerRequest | None = None,
+) -> int:
+    operation = "issue-view"
+    issue_number: int | None = None
+    try:
+        request = initial_request or read_request_frame(connection)
+        operation = request.operation
+        authorized = session.authorize(request)
+        operation = authorized["operation"]
+        if operation not in _ISSUE_OPERATIONS:
+            raise ValueError("broker Issue operation is not allowed")
+        payload = _validate_issue_payload(operation, authorized["payload"])
+        if operation == "issue-view":
+            issue_number = payload["number"]  # type: ignore[assignment]
+    except (ValueError, OSError):
+        _write_response(connection, "denied")
+        try:
+            session.audit(operation=operation, status="denied")
+        except ValueError:
+            pass
+        return 1
+
+    try:
+        if operation == "issue-list":
+            result = transport.list_open()
+        else:
+            assert issue_number is not None
+            result = transport.view(issue_number)
+    except BrokerStageError as error:
+        _write_response(connection, "error")
+        session.audit(
+            operation=operation,
+            status="error",
+            stage=error.stage,
+            issue_number=issue_number,
+        )
+        return 1
+
+    try:
+        body = json.dumps(
+            result,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError):
+        body = b""
+    if not body or len(body) > MAX_ISSUE_RESPONSE_BYTES:
+        _write_response(connection, "error")
+        session.audit(
+            operation=operation,
+            status="error",
+            stage="issue-request",
+            issue_number=issue_number,
+        )
+        return 1
+
+    if not _write_response(connection, "ok"):
+        session.audit(
+            operation=operation,
+            status="error",
+            stage="response-stream",
+            issue_number=issue_number,
+        )
+        return 1
+    try:
+        transferred = write_chunk_stream(connection, (body,))
+    except (ValueError, OSError):
+        session.audit(
+            operation=operation,
+            status="error",
+            stage="response-stream",
+            issue_number=issue_number,
+        )
+        return 1
+    session.audit(
+        operation=operation,
+        status="ok",
+        issue_number=issue_number,
+        bytes_transferred=transferred,
+    )
+    return 0
+
+
 def handle_broker_connection(
     session: BrokerSession,
     connection: BinaryIO,
     upload_transport: GitHubUploadPackTransport,
     receive_transport: GitHubReceivePackTransport | None,
     pr_transport: GitHubPullRequestTransport | None = None,
+    issue_transport: GitHubIssueTransport | None = None,
 ) -> int:
     try:
         request = read_request_frame(connection)
@@ -534,6 +640,10 @@ def handle_broker_connection(
     if request.operation in _PR_OPERATIONS and pr_transport is not None:
         return handle_pull_request_connection(
             session, connection, pr_transport, request
+        )
+    if request.operation in _ISSUE_OPERATIONS and issue_transport is not None:
+        return handle_issue_connection(
+            session, connection, issue_transport, request
         )
     _write_response(connection, "denied")
     return 1

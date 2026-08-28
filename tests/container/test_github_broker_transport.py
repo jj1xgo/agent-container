@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import agent_container.github_broker_transport as broker_transport
 from agent_container.github_broker import BrokerSession
 from agent_container.github_broker_error import BrokerStageError
 from agent_container.github_broker_policy import BrokerPolicy
@@ -19,10 +20,12 @@ from agent_container.github_broker_protocol import iter_chunk_stream
 from agent_container.github_broker_protocol import write_chunk_stream
 from agent_container.github_broker_transport import BrokerUploadPackClient
 from agent_container.github_broker_transport import BrokerReceivePackClient
+from agent_container.github_broker_transport import handle_broker_connection
 from agent_container.github_broker_transport import handle_receive_pack_connection
 from agent_container.github_broker_transport import handle_pull_request_connection
 from agent_container.github_broker_transport import handle_upload_pack_connection
 from agent_container.github_broker_transport import read_broker_capability
+from agent_container.github_issue import MAX_ISSUE_RESPONSE_BYTES
 from agent_container.state import Repository
 
 
@@ -169,6 +172,51 @@ class FailingPullRequestTransport(FakePullRequestTransport):
 class BuggyPullRequestTransport(FakePullRequestTransport):
     def view(self, number):  # type: ignore[no-untyped-def]
         raise TypeError("programming-error-marker")
+
+
+def issue_summary(number: int) -> dict[str, object]:
+    return {
+        "number": number,
+        "title": "content-title-marker",
+        "state": "open",
+        "author": "content-author-marker",
+        "labels": ["content-label-marker"],
+        "created_at": "2026-08-28T00:00:00Z",
+        "updated_at": "2026-08-28T01:00:00Z",
+        "url": f"https://github.com/jj1xgo/agent-container/issues/{number}",
+    }
+
+
+class FakeIssueTransport:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object | None]] = []
+
+    def list_open(self) -> dict[str, object]:
+        self.calls.append(("list_open", None))
+        return {"issues": []}
+
+    def view(self, number: int) -> dict[str, object]:
+        self.calls.append(("view", number))
+        return issue_summary(number) | {"body": "content-body-marker"}
+
+
+class FailingIssueTransport(FakeIssueTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    def view(self, number: int) -> dict[str, object]:
+        self.calls.append(("view", number))
+        if not self.failed:
+            self.failed = True
+            raise BrokerStageError("issue-request")
+        return issue_summary(number) | {"body": "content-body-marker"}
+
+
+class OversizeIssueTransport(FakeIssueTransport):
+    def list_open(self) -> dict[str, object]:
+        self.calls.append(("list_open", None))
+        return {"issues": ["x" * MAX_ISSUE_RESPONSE_BYTES]}
 
 
 def pkt(payload: bytes) -> bytes:
@@ -583,6 +631,192 @@ class BrokerUploadPackServerTest(unittest.TestCase):
                 connection,
                 BuggyPullRequestTransport(),
             )
+
+    def test_issue_operations_dispatch_exact_payloads_and_audit_metadata(self) -> None:
+        transport = FakeIssueTransport()
+        accepted = (
+            ("issue-list", {}, {"issues": []}),
+            (
+                "issue-view",
+                {"number": 12},
+                issue_summary(12) | {"body": "content-body-marker"},
+            ),
+        )
+
+        for sequence, (operation, payload, expected) in enumerate(
+            accepted, start=50
+        ):
+            with self.subTest(operation=operation):
+                connection = Duplex(
+                    self.request(
+                        sequence=sequence,
+                        operation=operation,
+                        payload=payload,
+                    )
+                )
+
+                result = handle_broker_connection(
+                    self.session,
+                    connection,
+                    FakeGitHubTransport(),
+                    None,
+                    issue_transport=transport,
+                )
+
+                self.assertEqual(result, 0)
+                output = connection.outgoing.getvalue()
+                response_size = int.from_bytes(output[:4], "big") + 4
+                self.assertEqual(
+                    output[4:response_size], b'{"status":"ok","version":1}'
+                )
+                body = b"".join(
+                    iter_chunk_stream(
+                        BytesIO(output[response_size:]), maximum_total=4096
+                    )
+                )
+                self.assertEqual(json.loads(body), expected)
+
+        self.assertEqual(
+            transport.calls,
+            [("list_open", None), ("view", 12)],
+        )
+        records = [
+            json.loads(line)
+            for line in self.session.audit_file.read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        self.assertNotIn("issue_number", records[-2])
+        self.assertEqual(records[-1]["issue_number"], 12)
+        audit = self.session.audit_file.read_text(encoding="utf-8")
+        for marker in (
+            "content-title-marker",
+            "content-author-marker",
+            "content-label-marker",
+            "content-body-marker",
+        ):
+            self.assertNotIn(marker, audit)
+
+    def test_issue_operations_reject_non_exact_payloads_before_transport(self) -> None:
+        denied = (
+            ("issue-list", {"page": 2}),
+            ("issue-view", {"number": True}),
+            (
+                "issue-view",
+                {"number": 12, "repository": "other/repo"},
+            ),
+            ("issue-comment", {"number": 12, "body": "x"}),
+        )
+        transport = FakeIssueTransport()
+
+        for sequence, (operation, payload) in enumerate(denied, start=60):
+            with self.subTest(operation=operation, payload=payload):
+                connection = Duplex(
+                    self.request(
+                        sequence=sequence,
+                        operation=operation,
+                        payload=payload,
+                    )
+                )
+                result = handle_broker_connection(
+                    self.session,
+                    connection,
+                    FakeGitHubTransport(),
+                    None,
+                    issue_transport=transport,
+                )
+                self.assertEqual(result, 1)
+                self.assertIn(
+                    b'"status":"denied"', connection.outgoing.getvalue()
+                )
+
+        self.assertEqual(transport.calls, [])
+
+    def test_issue_stage_error_is_fixed_and_does_not_break_later_connection(self) -> None:
+        transport = FailingIssueTransport()
+        failed = Duplex(
+            self.request(
+                sequence=70,
+                operation="issue-view",
+                payload={"number": 12},
+            )
+        )
+
+        self.assertEqual(
+            broker_transport.handle_issue_connection(
+                self.session, failed, transport
+            ),
+            1,
+        )
+        self.assertEqual(
+            failed.outgoing.getvalue(),
+            encode_response_frame(BrokerResponse(1, "error")),
+        )
+        record = json.loads(
+            self.session.audit_file.read_text(encoding="utf-8").splitlines()[-1]
+        )
+        self.assertEqual(record["stage"], "issue-request")
+        self.assertEqual(record["issue_number"], 12)
+
+        later = Duplex(
+            self.request(
+                sequence=71,
+                operation="issue-view",
+                payload={"number": 12},
+            )
+        )
+        self.assertEqual(
+            broker_transport.handle_issue_connection(
+                self.session, later, transport
+            ),
+            0,
+        )
+        self.assertIn(b'"status":"ok"', later.outgoing.getvalue())
+
+    def test_issue_rejects_oversize_response_before_ok(self) -> None:
+        connection = Duplex(
+            self.request(
+                sequence=72,
+                operation="issue-list",
+                payload={},
+            )
+        )
+
+        result = broker_transport.handle_issue_connection(
+            self.session, connection, OversizeIssueTransport()
+        )
+
+        self.assertEqual(result, 1)
+        self.assertNotIn(b'"status":"ok"', connection.outgoing.getvalue())
+        self.assertEqual(
+            connection.outgoing.getvalue(),
+            encode_response_frame(BrokerResponse(1, "error")),
+        )
+        record = json.loads(
+            self.session.audit_file.read_text(encoding="utf-8").splitlines()[-1]
+        )
+        self.assertEqual(record["stage"], "issue-request")
+
+    def test_issue_audits_response_stream_failure(self) -> None:
+        connection = FailingWriteDuplex(
+            self.request(
+                sequence=73,
+                operation="issue-list",
+                payload={},
+            ),
+            successful_writes=1,
+        )
+
+        result = broker_transport.handle_issue_connection(
+            self.session, connection, FakeIssueTransport()
+        )
+
+        self.assertEqual(result, 1)
+        record = json.loads(
+            self.session.audit_file.read_text(encoding="utf-8").splitlines()[-1]
+        )
+        self.assertEqual(record["status"], "error")
+        self.assertEqual(record["stage"], "response-stream")
 
 
 class BrokerRuntimePathTest(unittest.TestCase):

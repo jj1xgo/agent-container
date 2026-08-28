@@ -2,10 +2,13 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest import mock
 
+from agent_container.github_broker_runtime import UploadPackBrokerRuntime
 from agent_container.github_broker_runtime import load_broker_policy
 from agent_container.state import ProjectRecord
 from agent_container.state import Repository
+from agent_container.state import StateLayout
 
 
 class BrokerRuntimePolicyTest(unittest.TestCase):
@@ -58,3 +61,43 @@ class BrokerRuntimePolicyTest(unittest.TestCase):
                     path.chmod(0o600)
                     with self.assertRaises(ValueError):
                         load_broker_policy(path, record, "agent-container")
+
+
+class BrokerRuntimeConstructionTest(unittest.TestCase):
+    @mock.patch("agent_container.github_broker_runtime.GitHubIssueTransport")
+    @mock.patch("agent_container.github_broker_runtime.GitHubPullRequestTransport")
+    @mock.patch("agent_container.github_broker_runtime.GitHubReceivePackTransport")
+    @mock.patch("agent_container.github_broker_runtime.GitHubUploadPackTransport")
+    @mock.patch("agent_container.github_broker_runtime.InstallationTokenProvider")
+    @mock.patch("agent_container.github_broker_runtime.BrokerSession.create")
+    @mock.patch("agent_container.github_broker_runtime.GitHubAppMetadata.load")
+    @mock.patch("agent_container.github_broker_runtime.load_broker_policy")
+    def test_create_wires_issue_transport_to_shared_policy_and_token_provider(
+        self,
+        load_policy: mock.Mock,
+        load_metadata: mock.Mock,
+        create_session: mock.Mock,
+        token_provider: mock.Mock,
+        upload_transport: mock.Mock,
+        receive_transport: mock.Mock,
+        pr_transport: mock.Mock,
+        issue_transport: mock.Mock,
+    ) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        record = ProjectRecord(
+            Repository.parse("jj1xgo/agent-container"), Path("/handovers")
+        )
+        policy = object()
+        metadata = object()
+        tokens = object()
+        load_policy.return_value = policy
+        load_metadata.return_value = metadata
+        token_provider.return_value = tokens
+
+        runtime = UploadPackBrokerRuntime.create(layout, record)
+
+        issue_transport.assert_called_once_with(policy, tokens)
+        pr_transport.assert_called_once_with(policy, tokens)
+        upload_transport.assert_called_once_with(record.repository, tokens)
+        receive_transport.assert_called_once_with(record.repository, tokens)
+        self.assertIs(runtime.issue_transport, issue_transport.return_value)

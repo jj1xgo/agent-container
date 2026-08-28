@@ -13,6 +13,7 @@ from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_transport import handle_broker_connection
 from agent_container.github_git_transport import GitHubUploadPackTransport
 from agent_container.github_git_transport import GitHubReceivePackTransport
+from agent_container.github_issue import GitHubIssueTransport
 from agent_container.github_pr import GitHubPullRequestTransport
 from agent_container.podman import BrokerRuntimeMount
 from agent_container.state import ProjectRecord
@@ -100,6 +101,7 @@ class UploadPackBrokerRuntime(AbstractContextManager[BrokerRuntimeMount]):
     transport: GitHubUploadPackTransport
     receive_transport: GitHubReceivePackTransport | None = None
     pr_transport: GitHubPullRequestTransport | None = None
+    issue_transport: GitHubIssueTransport | None = None
     _stop: threading.Event = field(default_factory=threading.Event, init=False)
     _thread: threading.Thread | None = field(default=None, init=False)
     _error: BaseException | None = field(default=None, init=False, repr=False)
@@ -120,6 +122,7 @@ class UploadPackBrokerRuntime(AbstractContextManager[BrokerRuntimeMount]):
             GitHubUploadPackTransport(record.repository, tokens),
             GitHubReceivePackTransport(record.repository, tokens),
             GitHubPullRequestTransport(policy, tokens),
+            GitHubIssueTransport(policy, tokens),
         )
 
     def __enter__(self) -> BrokerRuntimeMount:
@@ -154,6 +157,7 @@ class UploadPackBrokerRuntime(AbstractContextManager[BrokerRuntimeMount]):
                             self.transport,
                             self.receive_transport,
                             self.pr_transport,
+                            self.issue_transport,
                         )
                     finally:
                         stream.close()
