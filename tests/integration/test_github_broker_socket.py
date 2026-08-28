@@ -12,7 +12,7 @@ from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_runtime import UploadPackBrokerRuntime
 from agent_container.github_broker_transport import BrokerUploadPackClient
 from agent_container.github_broker_transport import BrokerReceivePackClient
-from agent_container.github_client import request_pull_request
+from agent_container.github_client import request_github_operation
 
 
 RUN_SOCKET_INTEGRATION = (
@@ -79,6 +79,27 @@ class FakePullRequestTransport:
             "title": "Feature",
             "url": "https://github.com/jj1xgo/agent-container/pull/12",
         }
+
+
+def issue_summary(number: int = 12) -> dict[str, object]:
+    return {
+        "number": number,
+        "title": "content-title-marker",
+        "state": "open",
+        "author": "content-author-marker",
+        "labels": ["content-label-marker"],
+        "created_at": "2026-08-28T00:00:00Z",
+        "updated_at": "2026-08-28T01:00:00Z",
+        "url": f"https://github.com/jj1xgo/agent-container/issues/{number}",
+    }
+
+
+class FakeIssueTransport:
+    def list_open(self) -> dict[str, object]:
+        return {"issues": [issue_summary()]}
+
+    def view(self, number: int) -> dict[str, object]:
+        return issue_summary(number) | {"body": "content-body-marker"}
 
 
 @unittest.skipUnless(
@@ -153,7 +174,11 @@ class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
             upload = FakeUploadPackTransport()
             receive = FakeReceivePackTransport()
             runtime = UploadPackBrokerRuntime(  # type: ignore[arg-type]
-                session, upload, receive, FakePullRequestTransport()
+                session,
+                upload,
+                receive,
+                FakePullRequestTransport(),
+                FakeIssueTransport(),
             )
             first = b"0009done\n0000"
             second = b"000cls-refs\n0000"
@@ -210,19 +235,32 @@ class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
                     )
                 finally:
                     push_client.close()
-                pr_result = request_pull_request(
+                environment = {
+                    "AGENT_BROKER_SOCKET": str(session.socket_path),
+                    "AGENT_BROKER_CAPABILITY": str(session.capability_path),
+                    "AGENT_PROJECT_ID": "agent-container",
+                }
+                capability = session.capability_path.read_text(encoding="ascii").strip()
+                pr_result = request_github_operation(
                     "pr-view",
                     {"number": 12},
-                    {
-                        "AGENT_BROKER_SOCKET": str(session.socket_path),
-                        "AGENT_BROKER_CAPABILITY": str(session.capability_path),
-                        "AGENT_PROJECT_ID": "agent-container",
-                    },
+                    environment,
+                )
+                issue_list = request_github_operation(
+                    "issue-list", {}, environment
+                )
+                issue_view = request_github_operation(
+                    "issue-view", {"number": 12}, environment
                 )
 
             self.assertEqual(result, 0)
             self.assertEqual(push_result, 0)
             self.assertEqual(pr_result["number"], 12)
+            self.assertEqual(issue_list, {"issues": [issue_summary()]})
+            self.assertEqual(
+                issue_view,
+                issue_summary() | {"body": "content-body-marker"},
+            )
             self.assertEqual(upload.requests, [first, second])
             self.assertEqual(receive.requests, [push])
             self.assertEqual(
@@ -240,18 +278,35 @@ class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
                 + b"000eunpack ok\n0000",
             )
             self.assertFalse(run_dir.exists())
+            self.assertFalse(session.socket_path.exists())
+            self.assertFalse(session.capability_path.exists())
+            with self.assertRaises(ValueError):
+                request_github_operation("issue-list", {}, environment)
             records = [
                 json.loads(line)
                 for line in session.audit_file.read_text(encoding="utf-8").splitlines()
             ]
-            self.assertEqual(len(records), 3)
+            self.assertEqual(len(records), 5)
             self.assertEqual(records[0]["status"], "ok")
             self.assertEqual(records[0]["operation"], "git-upload-pack")
             self.assertEqual(records[1]["operation"], "git-receive-pack")
             self.assertEqual(records[1]["ref"], "refs/heads/feat/work")
             self.assertEqual(records[2]["operation"], "pr-view")
             self.assertEqual(records[2]["pr_number"], 12)
+            self.assertEqual(records[3]["operation"], "issue-list")
+            self.assertNotIn("issue_number", records[3])
+            self.assertEqual(records[4]["operation"], "issue-view")
+            self.assertEqual(records[4]["issue_number"], 12)
             self.assertTrue(all("capability" not in record for record in records))
+            audit = session.audit_file.read_text(encoding="utf-8")
+            self.assertNotIn(capability, audit)
+            for sentinel in (
+                "content-title-marker",
+                "content-author-marker",
+                "content-label-marker",
+                "content-body-marker",
+            ):
+                self.assertNotIn(sentinel, audit)
 
 
 if __name__ == "__main__":
