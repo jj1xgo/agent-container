@@ -23,7 +23,7 @@ Codexを主対象としつつ、Claude Codeも早期から基本的な開発作�
 - Codexの対話実行、編集、テスト、commit、作業ブランチへのpush、PR作成
 - Claude Codeの基本的な対話実行と同等のGit作業
 - 自分の開発リポジトリへの読み書き
-- familyリポジトリのコード読み取り、Issue作成・閲覧・コメント
+- 選択中repositoryのIssue list/viewによるread-only access
 - エージェント専用の認証・設定・履歴の永続化
 - Codexのhandover運用、コンテキストと利用量の可視化
 
@@ -101,10 +101,10 @@ Codex用のstatusline、handover Skill、hooksの雛形は、初期段階では`
 
 ### familyリポジトリ
 
-- 用途: コードread、Issue read/create/comment
-- 禁止: コードwrite、push、merge、release、管理設定変更
-- 方式: ホスト側または外部のGitHub MCP/broker
-- family用PATはbrokerだけが保持し、生値をコンテナやモデルcontextへ渡さない
+- 2026-08-29のscope変更前の初期案では、用途をコードread、Issue read/create/commentとしていた。この権限分離の歴史的な狙いは、family用credentialを開発repositoryのcredentialと混同しないことにある。
+- 現行のshipped interfaceは、選択中repositoryのIssue list/viewだけを提供するread-only brokerである。family Issue create/commentは提供しない。
+- コードwrite、push、merge、release、管理設定変更は提供しない。
+- credentialはhost側brokerだけが保持し、生値をcontainerやmodel contextへ渡さない。
 
 用途の違うPATを同じ環境変数名で切り替える設計にはしない。ツール境界そのものを分け、取り違えを防ぐ。
 
@@ -223,6 +223,10 @@ CPU、メモリ、ディスク容量、コンテナ稼働時間はCodexの会話
 - CIとcross-agent reviewの標準化
 - container resource監視
 - 必要性が確認できた場合のみ英語文書や追加platformを拡張
+
+#### 2026-08-29 scope変更
+
+初期案に含めたfamily Issue create/commentは、開発repository brokerと権限を共有せず、将来Phaseのfamily専用設計へ延期する。現行interfaceは選択中repositoryのIssue list/viewだけを提供する。domain allowlist／egress controlもPhase 4には含めず、既知WARNを維持して独立した将来設計とする。
 
 開発GitHub認証brokerの具体的なtrust boundary、Git transport、GitHub App permission、migrationと受け入れ条件は[Phase 3開発GitHub認証broker設計](2026-08-25-phase-3-github-broker-design.md)で定義する。
 

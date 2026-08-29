@@ -190,7 +190,7 @@ bin/agentctl superpowers update --all-projects
 
 ## GitHub App brokerを使う
 
-Phase 3のbroker modeでは、GitHub App private keyとinstallation tokenをhost側だけに置き、containerへはproject別Unix socketと一時的なcapabilityだけを渡します。exact repositoryのclone/fetch、作業branch push、`agent-github pr create/view/checks`、選択中repositoryの`agent-github issue list/view`だけを提供し、merge、release、generic API、Issueの作成・編集・comment・closeは提供しません。Issue readは固定schemaのbounded JSONだけを返し、credentialやGitHub raw responseを返しません。
+Phase 3のbroker modeでは、GitHub App private keyとinstallation tokenをhost側だけに置き、containerへはproject別Unix socketと一時的なcapabilityだけを渡します。exact repositoryのclone/fetch、作業branch push、`agent-github pr create/view/checks`、選択中repositoryの`agent-github issue list/view`だけを提供し、merge、release、generic API、Issueの作成・編集・comment・closeは提供しません。Issue readは固定schemaのbounded JSONだけを返し、credentialやGitHub raw responseを返しません。family Issue create/commentはこのshipped interfaceに含めず、開発repository brokerと権限を共有しない将来Phaseのfamily専用設計へ延期します。
 
 このbrokerは`agent-container`自身のrepositoryだけでなく、`agent-container`が管理する他のprojectでも同じ仕組みを再実装せずに利用できます。broker用の設定やcredentialは対象repositoryにcommitせず、GitHub側のApp installationとhost側の`agent-container`管理領域に置きます。新しいrepositoryで利用するときは、そのrepositoryへのGitHub App installationとbrokerを有効にしたproject登録を個別に行います。
 
@@ -207,7 +207,7 @@ bin/agentctl doctor REPOSITORY --github-broker
 bin/agentctl run REPOSITORY --github-broker
 ```
 
-broker failureから専用`gh` credentialへ自動fallbackしません。設定と実host検証の全手順は[Phase 3 GitHub App broker運用ガイド](docs/phase3-github-broker.md)を参照してください。
+fixture準備などのhost `gh` administrationはcontainer broker operationsとは別の承認・記録対象です。broker failureはhost `gh`、専用`gh` credential、environment token、SSH agent、host credential helperへのfallbackを決して起動しません。設定と実host検証の全手順は[Phase 3 GitHub App broker運用ガイド](docs/phase3-github-broker.md)を参照してください。
 
 ## Imageの更新
 

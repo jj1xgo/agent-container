@@ -2,6 +2,8 @@
 
 Phase 3では、GitHub credentialをcontainerへ渡さず、project限定のclone/fetch、作業branch push、Pull Request作成・閲覧・checks確認、Issue一覧・詳細のreadをhost側broker経由で提供します。現在は明示的な`--github-broker` opt-inです。brokerに失敗してもlegacy `gh` credentialへfallbackしません。
 
+2026-08-29のscope整合として、shipped interfaceは選択中repositoryのIssue list/viewだけである。family Issue create/commentは開発repository brokerと権限を共有せず、将来Phaseのfamily専用設計へ延期する。fixture準備などで行うhost `gh` administrationはcontainer broker operationsから分離し、broker failureがhost `gh`、legacy credential、environment token、SSH agent、host credential helperへのfallbackを起動することはない。外向きnetworkのdomain allowlistは既知WARNとして維持し、独立した将来Phaseで設計する。
+
 設計上のsecurity boundaryは[Phase 3設計](superpowers/specs/2026-08-25-phase-3-github-broker-design.md)を参照してください。実環境で有効化する前に[Phase 3 smoke test](phase3-github-broker-smoke-test.md)を完了します。
 
 ## 提供する操作と提供しない操作
