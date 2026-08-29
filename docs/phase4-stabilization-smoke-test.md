@@ -32,6 +32,9 @@ credential本文を表示しない。記録するのは固定schemaの結果、b
 
 ```bash
 export AGENT_HANDOVER_ROOT="$HOME/handovers"
+test ! -e "$AGENT_CONTAINER_HOME/projects/agent-container-smoke/project.json" || exit 1
+test ! -e "$AGENT_CONTAINER_HOME/projects/agent-container-smoke/github-broker.json" || exit 1
+test ! -e "$AGENT_CONTAINER_HOME/workspaces/agent-container-smoke" || exit 1
 test ! -e "$AGENT_HANDOVER_ROOT/agent-container-smoke" || exit 1
 install -d -m 0700 "$AGENT_HANDOVER_ROOT/agent-container-smoke"
 
