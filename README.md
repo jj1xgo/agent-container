@@ -209,6 +209,18 @@ bin/agentctl run REPOSITORY --github-broker
 
 fixture準備などのhost `gh` administrationはcontainer broker operationsとは別の承認・記録対象です。broker failureはhost `gh`、専用`gh` credential、environment token、SSH agent、host credential helperへのfallbackを決して起動しません。設定と実host検証の全手順は[Phase 3 GitHub App broker運用ガイド](docs/phase3-github-broker.md)を参照してください。
 
+## 開発時のlint
+
+Codex、Claude Code、local developer、CIは同じlint commandを使います。最初にpinned toolをinstallしてから実行してください。
+
+```bash
+python3 -m pip install --disable-pip-version-check --no-deps \
+  -r requirements-lint.txt
+bin/lint
+```
+
+`bin/lint`は`src`と`tests`をcheckするだけで、formatやauto-fixは行いません。command自身はnetwork accessもしません。
+
 ## Imageの更新
 
 次のcommandはagent用Node.js、Codex、Claude Codeの現在のlatestを解決してimageを再buildします。

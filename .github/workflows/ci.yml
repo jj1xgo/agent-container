@@ -26,6 +26,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Install lint dependency
+        run: |
+          python3 -m pip install --disable-pip-version-check --no-deps \
+            -r requirements-lint.txt
+
+      - name: Run Ruff lint
+        run: bin/lint
+
       - name: Run Codex tests
         run: python3 -m unittest discover -s tests/codex -v
         env:
