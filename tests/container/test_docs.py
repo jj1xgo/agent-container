@@ -1,20 +1,43 @@
 from pathlib import Path
+import re
 import stat
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+RUFF_REQUIREMENTS = "ruff==0.16.4\n"
+RUFF_CONFIG = '''target-version = "py311"
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+'''
+LINT_ENTRYPOINT = '''#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
+
+exec python3 -m ruff check \\
+  --config "$REPO_ROOT/ruff.toml" \\
+  "$REPO_ROOT/src" \\
+  "$REPO_ROOT/tests"
+'''
+LINT_INSTALL_STEP = '''      - name: Install lint dependency
+        run: |
+          python3 -m pip install --disable-pip-version-check --no-deps \\
+            -r requirements-lint.txt
+'''
+LINT_RUN_STEP = '''      - name: Run Ruff lint
+        run: bin/lint
+'''
 
 
 class RuffLintToolingTest(unittest.TestCase):
     def test_ruff_version_and_rules_are_exact(self) -> None:
         requirement = (ROOT / "requirements-lint.txt").read_text(encoding="utf-8")
         config = (ROOT / "ruff.toml").read_text(encoding="utf-8")
-        self.assertEqual(requirement, "ruff==0.16.4\n")
-        self.assertIn('target-version = "py311"', config)
-        self.assertIn('select = ["E4", "E7", "E9", "F"]', config)
-        for forbidden in ("preview", "[format]", "ignore", "per-file-ignores"):
-            self.assertNotIn(forbidden, config)
+        self.assertEqual(requirement, RUFF_REQUIREMENTS)
+        self.assertEqual(config, RUFF_CONFIG)
 
     def test_common_lint_entrypoint_is_executable_and_network_free(self) -> None:
         lint = ROOT / "bin/lint"
@@ -23,28 +46,53 @@ class RuffLintToolingTest(unittest.TestCase):
         self.assertTrue(stat.S_ISREG(metadata.st_mode))
         self.assertFalse(lint.is_symlink())
         self.assertTrue(metadata.st_mode & stat.S_IXUSR)
-        self.assertIn("python3 -m ruff check", body)
-        self.assertIn('"$REPO_ROOT/ruff.toml"', body)
-        self.assertIn('"$REPO_ROOT/src"', body)
-        self.assertIn('"$REPO_ROOT/tests"', body)
-        for forbidden in ("pip install", "pipx", "uvx", "curl", "wget", "--fix"):
-            self.assertNotIn(forbidden, body)
+        self.assertEqual(body, LINT_ENTRYPOINT)
 
     def test_ci_installs_and_runs_lint_before_python_tests(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        install = "python3 -m pip install --disable-pip-version-check --no-deps"
-        requirement = "-r requirements-lint.txt"
-        lint = "bin/lint"
-        first_test = "python3 -m unittest"
-        for required in (install, requirement, lint, first_test):
-            self.assertIn(required, workflow)
-        self.assertLess(workflow.index(install), workflow.index(lint))
-        self.assertLess(workflow.index(lint), workflow.index(first_test))
+        unit_tests = workflow.split("\n  unit-tests:\n", 1)[1].split(
+            "\n  podman-integration:\n", 1
+        )[0]
+        self.assertEqual(unit_tests.count(LINT_INSTALL_STEP), 1)
+        self.assertEqual(unit_tests.count(LINT_RUN_STEP), 1)
+        install_index = unit_tests.index(LINT_INSTALL_STEP)
+        lint_index = unit_tests.index(LINT_RUN_STEP)
+        self.assertLess(install_index, lint_index)
+        test_indexes = [
+            match.start()
+            for match in re.finditer(r"python3 -m unittest\b", unit_tests)
+        ]
+        self.assertTrue(test_indexes)
+        for test_index in test_indexes:
+            self.assertLess(lint_index, test_index)
 
     def test_production_image_does_not_include_ruff_tooling(self) -> None:
         containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
         self.assertNotIn("requirements-lint.txt", containerfile)
         self.assertNotIn("ruff", containerfile.lower())
+        self.assertNotRegex(
+            containerfile,
+            r"(?im)^\\s*(?:COPY|ADD)(?:\\s+--[^\\s]+)*\\s+\\.(?:\\s|$)",
+        )
+
+    def test_readme_documents_the_shared_lint_contract(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for phrase in (
+            "Codex",
+            "Claude Code",
+            "local developer",
+            "CI",
+            "bin/lint",
+            "format",
+            "auto-fix",
+            "network access",
+        ):
+            self.assertIn(phrase, readme)
+
+    def test_exact_config_contract_rejects_an_extra_rule_in_memory(self) -> None:
+        mutated = RUFF_CONFIG.replace('"F"]', '"F", "W"]')
+        with self.assertRaises(AssertionError):
+            self.assertEqual(mutated, RUFF_CONFIG)
 
 
 class Phase1DocumentationTest(unittest.TestCase):
