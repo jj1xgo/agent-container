@@ -369,3 +369,45 @@ class Phase3DocumentationTest(unittest.TestCase):
     def test_base_image_does_not_leak_legacy_gh_environment_into_broker_mode(self) -> None:
         containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
         self.assertNotIn("GH_CONFIG_DIR=", containerfile)
+
+
+class Phase4DocumentationTest(unittest.TestCase):
+    def test_phase4_scope_and_release_contract(self) -> None:
+        initial = (
+            ROOT / "docs/superpowers/specs/2026-08-22-agent-container-design.md"
+        ).read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        operator = (ROOT / "docs/phase3-github-broker.md").read_text(
+            encoding="utf-8"
+        )
+        smoke = (ROOT / "docs/phase4-stabilization-smoke-test.md").read_text(
+            encoding="utf-8"
+        )
+        for body in (initial, readme, operator):
+            self.assertIn("family Issue create/comment", body)
+            self.assertIn("将来Phase", body)
+            self.assertIn("domain allowlist", body)
+        for required in (
+            "jj1xgo/agent-container-smoke",
+            "private repository",
+            "stale client",
+            "Pull Request除外",
+            "non-fast-forward",
+            "v0.4.0",
+            "最終承認",
+        ):
+            self.assertIn(required, smoke)
+
+    def test_phase4_smoke_starts_without_claiming_results(self) -> None:
+        smoke = (ROOT / "docs/phase4-stabilization-smoke-test.md").read_text(
+            encoding="utf-8"
+        )
+        for check in (
+            "Scope reconciliation",
+            "Fixture repository",
+            "Git/PR gate",
+            "Issue data gate",
+            "Cleanup/stale client",
+            "Release gate",
+        ):
+            self.assertRegex(smoke, rf"\| {check} \| [^\n]+ \| not run \|")
