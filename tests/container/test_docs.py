@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 from tempfile import TemporaryDirectory
@@ -127,6 +128,51 @@ def _replace_with_symlink(path: Path, target: Path) -> None:
     elif path.exists():
         path.unlink()
     path.symlink_to(target)
+
+
+def _without_filesystem_invariant(
+    block: str, target_name: str, mutation: str
+) -> str:
+    targets = {
+        "project": "$AGENT_CONTAINER_HOME/projects/agent-container-smoke",
+        "policy": "$AGENT_CONTAINER_HOME/projects/agent-container-smoke/github-broker.json",
+        "manifest": "$AGENT_CONTAINER_HOME/projects/agent-container-smoke/smoke-fixtures.json",
+        "handover": "$AGENT_HANDOVER_ROOT/agent-container-smoke",
+        "project_json": "$AGENT_CONTAINER_HOME/projects/agent-container-smoke/project.json",
+        "workspace": "$AGENT_CONTAINER_HOME/workspaces/agent-container-smoke",
+    }
+    target = f'"{targets[target_name]}"'
+    candidates = []
+    for line in block.splitlines():
+        if target not in line:
+            continue
+        if mutation in {"missing", "directory"} and re.match(
+            r"test -[df] ", line
+        ):
+            candidates.append(line)
+        elif mutation in {
+            "symlink-file",
+            "symlink-directory",
+            "dangling-symlink",
+        } and line.startswith("test ! -L "):
+            candidates.append(line)
+        elif mutation in {"file", "present-directory"} and line.startswith(
+            "test ! -e "
+        ):
+            candidates.append(line)
+        elif mutation == "mode" and "stat -c" in line and (
+            "%a:%u" in line or "'%a'" in line
+        ):
+            candidates.append(line)
+        elif mutation == "owner" and "stat -c" in line and (
+            "%a:%u" in line or "'%u'" in line
+        ):
+            candidates.append(line)
+    if len(candidates) != 1:
+        raise AssertionError(
+            f"expected one {target_name}/{mutation} check, got {candidates!r}"
+        )
+    return block.replace(f"{candidates[0]}\n", "", 1)
 README_LINT_BEHAVIOR_CONTRACT = (
     "`bin/lint`は`src`と`tests`のcheck-onlyで、formatやauto-fixを行わず、"
     "実行中にnetwork accessを必要としません。"
@@ -928,7 +974,7 @@ class Phase4DocumentationTest(unittest.TestCase):
             ("handover owner", "handover", "owner"),
             ("project metadata exists", "project_json", "file"),
             ("project metadata symlink", "project_json", "dangling-symlink"),
-            ("workspace exists", "workspace", "directory"),
+            ("workspace exists", "workspace", "present-directory"),
             ("workspace symlink", "workspace", "dangling-symlink"),
         )
         for path in documents:
@@ -940,6 +986,8 @@ class Phase4DocumentationTest(unittest.TestCase):
                         paths = _create_partial_state(temp_root)
                         target = paths[target_name]
                         fake_bin = temp_root / "fake-bin"
+                        real_stat = shutil.which("stat", path=os.environ["PATH"])
+                        self.assertIsNotNone(real_stat)
                         _write_executable(
                             fake_bin / "stat",
                             "#!/bin/sh\n"
@@ -947,13 +995,14 @@ class Phase4DocumentationTest(unittest.TestCase):
                             "for argument do last=$argument; done\n"
                             "if [ \"$last\" = \"${FAKE_STAT_TARGET:-}\" ]; then\n"
                             "  case \"${FAKE_STAT_FAILURE:-}:$*\" in\n"
+                            f"    follow:*) exec {shlex.quote(real_stat)} -L \"$@\" ;;\n"
                             "    mode:*%a:%u*) printf '%s:%s\\n' \"$FAKE_BAD_MODE\" \"$REAL_UID\"; exit 0 ;;\n"
                             "    owner:*%a:%u*) printf '%s:%s\\n' \"$FAKE_GOOD_MODE\" \"$FAKE_BAD_UID\"; exit 0 ;;\n"
                             "    mode:*%a*) printf '%s\\n' \"$FAKE_BAD_MODE\"; exit 0 ;;\n"
                             "    owner:*%u*) printf '%s\\n' \"$FAKE_BAD_UID\"; exit 0 ;;\n"
                             "  esac\n"
                             "fi\n"
-                            "exec /usr/bin/stat \"$@\"\n",
+                            f"exec {shlex.quote(real_stat)} \"$@\"\n",
                         )
                         environment = {
                             **os.environ,
@@ -982,35 +1031,63 @@ class Phase4DocumentationTest(unittest.TestCase):
                                 }
                             )
                         elif mutation == "missing":
-                            if target_name == "project":
-                                target.rename(temp_root / "parked-project")
-                            else:
-                                target.rmdir()
+                            environment["FAKE_MISSING_TARGET"] = str(target)
                         elif mutation == "directory":
                             if target.exists():
                                 target.unlink()
                             target.parent.mkdir(parents=True, exist_ok=True)
                             target.mkdir()
+                            target.chmod(0o600)
                         elif mutation == "file":
                             target.parent.mkdir(parents=True, exist_ok=True)
                             target.write_text("present", encoding="utf-8")
                         elif mutation == "symlink-file":
                             linked = temp_root / f"linked-{target.name}"
                             linked.write_text("{}", encoding="utf-8")
+                            linked.chmod(0o600)
                             _replace_with_symlink(target, linked)
+                            environment.update(
+                                {
+                                    "FAKE_STAT_TARGET": str(target),
+                                    "FAKE_STAT_FAILURE": "follow",
+                                }
+                            )
                         elif mutation == "symlink-directory":
-                            linked = temp_root / f"linked-{target.name}"
-                            linked.mkdir()
                             if target_name == "project":
-                                target.rename(temp_root / "parked-project")
-                                target.symlink_to(linked)
+                                parked = temp_root / "parked-project"
+                                target.rename(parked)
+                                target.symlink_to(parked)
                             else:
+                                linked = temp_root / f"linked-{target.name}"
+                                linked.mkdir(mode=0o700)
+                                linked.chmod(0o700)
                                 _replace_with_symlink(target, linked)
+                            environment.update(
+                                {
+                                    "FAKE_STAT_TARGET": str(target),
+                                    "FAKE_STAT_FAILURE": "follow",
+                                }
+                            )
+                        elif mutation == "present-directory":
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            target.mkdir()
                         elif mutation == "dangling-symlink":
                             target.parent.mkdir(parents=True, exist_ok=True)
                             target.symlink_to(temp_root / "absent-target")
+                        executed_block = block
+                        if mutation == "missing":
+                            executed_block = (
+                                "test() {\n"
+                                "  if [ \"$#\" -eq 2 ] && [ \"$1\" = -d ] "
+                                "&& [ \"$2\" = \"$FAKE_MISSING_TARGET\" ]; then\n"
+                                "    return 1\n"
+                                "  fi\n"
+                                "  command test \"$@\"\n"
+                                "}\n"
+                                f"{block}"
+                            )
                         result = subprocess.run(
-                            ["/bin/sh", "-c", block],
+                            ["/bin/sh", "-c", executed_block],
                             cwd=ROOT,
                             env=environment,
                             capture_output=True,
@@ -1021,6 +1098,25 @@ class Phase4DocumentationTest(unittest.TestCase):
                         self.assertNotIn(
                             "partial_state_filesystem_valid=true",
                             result.stdout,
+                        )
+                        result = subprocess.run(
+                            [
+                                "/bin/sh",
+                                "-c",
+                                _without_filesystem_invariant(
+                                    executed_block, target_name, mutation
+                                ),
+                            ],
+                            cwd=ROOT,
+                            env=environment,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(
+                            result.stdout,
+                            "partial_state_filesystem_valid=true\n",
                         )
 
             with self.subTest(path=path.name, invalidation="none"):
