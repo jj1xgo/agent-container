@@ -190,7 +190,7 @@ bin/agentctl superpowers update --all-projects
 
 ## GitHub App brokerを使う
 
-Phase 3のbroker modeでは、GitHub App private keyとinstallation tokenをhost側だけに置き、containerへはproject別Unix socketと一時的なcapabilityだけを渡します。exact repositoryのclone/fetch、作業branch push、`agent-github pr create/view/checks`だけを提供し、merge、release、generic APIは提供しません。
+Phase 3のbroker modeでは、GitHub App private keyとinstallation tokenをhost側だけに置き、containerへはproject別Unix socketと一時的なcapabilityだけを渡します。exact repositoryのclone/fetch、作業branch push、`agent-github pr create/view/checks`、選択中repositoryの`agent-github issue list/view`だけを提供し、merge、release、generic API、Issueの作成・編集・comment・closeは提供しません。Issue readは固定schemaのbounded JSONだけを返し、credentialやGitHub raw responseを返しません。
 
 このbrokerは`agent-container`自身のrepositoryだけでなく、`agent-container`が管理する他のprojectでも同じ仕組みを再実装せずに利用できます。broker用の設定やcredentialは対象repositoryにcommitせず、GitHub側のApp installationとhost側の`agent-container`管理領域に置きます。新しいrepositoryで利用するときは、そのrepositoryへのGitHub App installationとbrokerを有効にしたproject登録を個別に行います。
 

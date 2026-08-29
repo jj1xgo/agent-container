@@ -13,9 +13,12 @@ ALLOWED_OPERATIONS = frozenset(
         "pr-create",
         "pr-view",
         "pr-checks",
+        "issue-list",
+        "issue-view",
     }
 )
 MAX_PR_NUMBER = 2_147_483_647
+MAX_ISSUE_NUMBER = 2_147_483_647
 MAX_PR_TITLE_BYTES = 256
 MAX_PR_BODY_BYTES = 65_536
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
@@ -65,6 +68,14 @@ def validate_pr_number(value: int) -> int:
         raise ValueError("pull request number is invalid")
     if not 1 <= value <= MAX_PR_NUMBER:
         raise ValueError("pull request number is invalid")
+    return value
+
+
+def validate_issue_number(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("issue number is invalid")
+    if not 1 <= value <= MAX_ISSUE_NUMBER:
+        raise ValueError("issue number is invalid")
     return value
 
 

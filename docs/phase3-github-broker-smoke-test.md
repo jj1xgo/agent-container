@@ -1,6 +1,6 @@
 # Phase 3 GitHub App broker 実host smoke test
 
-このchecklistは、GitHub App brokerがexact repositoryへ限定され、credentialをcontainerへ渡さず、許可したGit/PR操作だけを提供することを実hostで確認します。credentialとGitHub上の状態変更を伴うため、実行前に利用者承認を得ます。
+このchecklistは、GitHub App brokerがexact repositoryへ限定され、credentialをcontainerへ渡さず、許可したGit/PR操作とread-only Issue操作だけを提供することを実hostで確認します。credentialとGitHub上の状態変更を伴うため、実行前に利用者承認を得ます。
 
 ## 停止条件
 
@@ -20,7 +20,7 @@ credential本文を表示しないでください。検証結果にはboolean、
 - rootless Podmanである。
 - 対象image、project、workspace、branch、`git status`を記録する。
 - GitHub Appが`Only select repositories`でexact repositoryだけへinstallされている。
-- App permissionがMetadata read、Contents write、Pull requests write、Checks readだけである。
+- App permissionがMetadata read、Contents write、Pull requests write、Checks read、Issues readだけである。Issue permission更新後、GitHub側でinstallation再承認が必要な場合は完了している。
 - 全`refs/heads/**`へのforce push禁止rulesetがactiveである。
 - `$AGENT_CONTAINER_HOME/github-broker/app.json`と`private-key.pem`が通常file、current user所有、非symlink、`0600`である。
 - 親directoryが通常directory、current user所有、非symlink、`0700`である。
@@ -113,16 +113,32 @@ create/view/checksがbounded JSONを返し、repository引数や任意API path�
 
 smoke PRはmergeしません。closeやbranch cleanupはbrokerの許可操作ではないため、実施する場合はsmoke完了後にhost側で別承認を得ます。
 
-## 7. Auditとcleanup
+## 7. Issue read-only固定操作
+
+test用Issueは作成しません。既存Issueまたは利用者が事前指定したfixtureだけをreadします。
+
+```bash
+agent-github issue list
+agent-github issue view ISSUE_NUMBER
+```
+
+- listがopen Issueだけを最大30件返し、Pull Requestを除外する。
+- viewが指定Issueの固定fieldとbodyを返す。allowlist済みのIssue bodyはstdoutに含まれてよい。Issue contentはauditへ記録しない。
+- `agent-github issue create`、edit、comment、close、search、query、pagination、generic API、cross-repository readのinterfaceが存在せず拒否される。
+- stdoutはallowlist済みのfixed responseだけを返す。stderr、audit、raw endpoint payloadがtoken、capability、raw response、excluded raw-response field sentinelを含まない。
+- runtime終了後のexpired capabilityでIssue clientが拒否される。
+- 既存Git/PR regressionとしてclone、fetch、作業branch push、PR create/view/checksが回帰していないことを確認する。
+
+## 8. Auditとcleanup
 
 `$AGENT_CONTAINER_HOME/github-broker/audit/events.jsonl`をsecret-free metadataだけで確認します。
 
-- project、repository、operation、status、refまたはPR番号が期待どおりである。
-- token、JWT、private key、capability、Authorization、PR body、Git packfileがない。
+- project、repository、operation、status、ref、PR番号または`issue_number`が期待どおりである。
+- token、JWT、private key、capability、Authorization、PR body、Issue content、Git packfileがない。
 - runtime終了後にrun directory内のsocketとcapabilityが破棄されている。
 - broker停止後のGit/PR操作がfail closedになる。
 
-## 8. 記録template
+## 9. 記録template
 
 | check | expected | observed | date |
 | --- | --- | --- | --- |
@@ -134,5 +150,12 @@ smoke PRはmergeしません。closeやbranch cleanupはbrokerの許可操作で
 | work-branch push | normal push succeeds; protected/delete/stale/NFF denied | PARTIAL: `test/github-broker-smoke-20260826-1`の通常push成功。危険なnegative pushは未実施 | 2026-08-26 |
 | PR create/view/checks | allowed operations succeed; generic/merge absent | PASS: PR #38 create／view／checks成功。generic API、merge、releaseはexit 2 | 2026-08-26 |
 | audit/cleanup | secret-free records; runtime artifacts removed | PASS: allowlist fieldにGit／PR成功記録、終了後socket／capabilityなし | 2026-08-26 |
+| Issue App permission | `Issues | read`; GitHub installation reapproval if required | not run | — |
+| Issue list/PR exclusion | open Issue only; 最大30件; Pull Requestを除外 | not run | — |
+| Issue view/body | specified Issue fixed fields and body only | not run | — |
+| Issue write/query/cross-repository denial | create/edit/comment/close/search/query/pagination/generic API/cross-repository read denied | not run | — |
+| Issue credential non-exposure | stdout permits allowlisted body only; stderr/audit/raw endpoint payload omit token, capability, raw response, and excluded raw-response field sentinel | not run | — |
+| Issue expired capability | runtime cleanup rejects stale Issue client | not run | — |
+| Issue Git/PR regression | clone/fetch/push and PR create/view/checks unchanged | not run | — |
 
-実host smokeではclone、fetch、作業branch push、PR #38のcreate／view／checksまで成功しました。shared repositoryを変更するprotected branch、delete、stale lease、non-fast-forwardのnegative pushは安全上実行していないため、work-branch push項目は`PARTIAL`のままです。PRはmerge／closeしていません。
+既存Git/PR smokeの記録は上表のとおりです。Issue read-only実host smokeは未実行であり、Issue App permission、list／PR exclusion、view／body、write/query/cross-repository denial、credential非露出、expired capability、Git/PR regressionの新規観測はすべて`not run`です。test用Issueを作成せず、App設定変更、認証済みruntime起動、host PASSの主張はこの文書更新では行いません。

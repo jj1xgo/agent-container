@@ -6,6 +6,7 @@ BROKER_FAILURE_STAGES = frozenset(
         "receive-discovery",
         "receive-rpc",
         "pr-request",
+        "issue-request",
         "response-stream",
     }
 )

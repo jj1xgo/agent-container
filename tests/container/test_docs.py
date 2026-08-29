@@ -321,6 +321,39 @@ class Phase3DocumentationTest(unittest.TestCase):
         ):
             self.assertIn(expected, body)
 
+    def test_issue_read_only_operator_and_host_smoke_contracts(self) -> None:
+        guide = (ROOT / "docs/phase3-github-broker.md").read_text(encoding="utf-8")
+        for expected in (
+            "agent-github issue list",
+            "agent-github issue view NUMBER",
+            "Issues | read",
+            "最大30件",
+            "comment",
+            "issue-request",
+            "issue_number",
+        ):
+            self.assertIn(expected, guide)
+
+        smoke = (ROOT / "docs/phase3-github-broker-smoke-test.md").read_text(
+            encoding="utf-8"
+        )
+        for expected in (
+            "agent-github issue list",
+            "agent-github issue view ISSUE_NUMBER",
+            "Pull Requestを除外",
+            "credential非露出",
+            "expired capability",
+            "Git/PR regression",
+            "not run",
+            "allowlist済みのIssue bodyはstdoutに含まれてよい",
+            "excluded raw-response field sentinel",
+        ):
+            self.assertIn(expected, smoke)
+        self.assertNotIn(
+            "stdout、stderr、auditがtoken、capability、raw response、fixture sentinelを含まない",
+            smoke,
+        )
+
     def test_base_image_does_not_leak_legacy_gh_environment_into_broker_mode(self) -> None:
         containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
         self.assertNotIn("GH_CONFIG_DIR=", containerfile)

@@ -13,6 +13,7 @@ from typing import Any, TextIO
 
 from agent_container.github_broker_error import BROKER_FAILURE_STAGES
 from agent_container.github_broker_policy import BrokerPolicy
+from agent_container.github_broker_policy import validate_issue_number
 from agent_container.github_broker_policy import validate_pr_number
 from agent_container.github_broker_protocol import BrokerRequest
 from agent_container.github_broker_protocol import PROTOCOL_VERSION
@@ -165,6 +166,7 @@ class BrokerSession:
         status: str,
         ref: str | None = None,
         pr_number: int | None = None,
+        issue_number: int | None = None,
         bytes_transferred: int = 0,
         stage: str | None = None,
     ) -> None:
@@ -182,6 +184,8 @@ class BrokerSession:
             self.policy.validate_push_ref(ref)
         if pr_number is not None:
             validate_pr_number(pr_number)
+        if issue_number is not None:
+            validate_issue_number(issue_number)
         if (
             isinstance(bytes_transferred, bool)
             or not isinstance(bytes_transferred, int)
@@ -202,6 +206,8 @@ class BrokerSession:
             record["ref"] = ref
         if pr_number is not None:
             record["pr_number"] = pr_number
+        if issue_number is not None:
+            record["issue_number"] = issue_number
         if stage is not None:
             record["stage"] = stage
         with _open_audit_file(self.audit_file) as stream:
