@@ -309,7 +309,7 @@ class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
             second = b"000cls-refs\n0000"
             stdin = BytesIO(
                 b"capabilities\n"
-                b"stateless-connect git-upload-pack\n"
+                b"connect git-upload-pack\n"
                 + first
                 + second
             )

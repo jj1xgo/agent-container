@@ -104,6 +104,30 @@ class RemoteHelperTest(unittest.TestCase):
             + b"0002",
         )
 
+    def test_runs_connect_upload_pack_exchange_for_git_2_53(self) -> None:
+        transport = FakeTransport()
+        request = pkt(b"command=ls-refs\n") + b"0000"
+        stdin = BytesIO(b"capabilities\nconnect git-upload-pack\n" + request)
+        stdout = BytesIO()
+
+        result = run_remote_helper(
+            ["origin", "agent-broker://jj1xgo/agent-container"],
+            {"AGENT_BROKER_REPOSITORY": "jj1xgo/agent-container"},
+            transport,
+            stdin,
+            stdout,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(transport.requests, [request])
+        self.assertEqual(
+            stdout.getvalue(),
+            b"connect\nstateless-connect\n\n\n"
+            + transport.discover()
+            + pkt(b"response\n")
+            + b"0002",
+        )
+
     def test_runs_one_receive_pack_exchange(self) -> None:
         transport = FakeReceiveTransport()
         push = b"commands-and-pack"
@@ -127,11 +151,10 @@ class RemoteHelperTest(unittest.TestCase):
             b"connect\nstateless-connect\n\n\nadvertisementpush-result",
         )
 
-    def test_rejects_push_and_unknown_commands(self) -> None:
+    def test_stateless_helper_rejects_non_packet_commands(self) -> None:
         repository = Repository.parse("jj1xgo/agent-container")
         for body in (
             b"list\n",
-            b"capabilities\nconnect git-upload-pack\n",
             b"capabilities\nstateless-connect git-receive-pack\n",
         ):
             with self.subTest(body=body):
@@ -140,6 +163,20 @@ class RemoteHelperTest(unittest.TestCase):
                 )
                 with self.assertRaises(ValueError):
                     helper.run()
+
+    def test_run_remote_helper_rejects_unknown_service(self) -> None:
+        transport = FakeTransport()
+
+        with self.assertRaisesRegex(ValueError, "service is not allowed"):
+            run_remote_helper(
+                ["origin", "agent-broker://jj1xgo/agent-container"],
+                {"AGENT_BROKER_REPOSITORY": "jj1xgo/agent-container"},
+                transport,
+                BytesIO(b"capabilities\nconnect git-archive\n"),
+                BytesIO(),
+            )
+
+        self.assertEqual(transport.requests, [])
 
     def test_does_not_write_transport_error_or_credential(self) -> None:
         class Failing(FakeTransport):

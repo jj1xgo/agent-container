@@ -158,7 +158,10 @@ def run_remote_helper(
     stdout.write(b"connect\nstateless-connect\n\n")
     stdout.flush()
     connect = stdin.readline(4097)
-    if connect == b"stateless-connect git-upload-pack\n":
+    if connect in {
+        b"connect git-upload-pack\n",
+        b"stateless-connect git-upload-pack\n",
+    }:
         selected = (
             transport.for_service("git-upload-pack")  # type: ignore[union-attr]
             if hasattr(transport, "for_service")
