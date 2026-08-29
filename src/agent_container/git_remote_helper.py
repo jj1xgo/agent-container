@@ -113,9 +113,7 @@ def _is_delete_only_receive_pack(commands: bytes) -> bool:
         if updates == 0:
             if line.count(b"\0") != 1:
                 return False
-            line, capabilities = line.split(b"\0", 1)
-            if not capabilities:
-                return False
+            line, _capabilities = line.split(b"\0", 1)
         elif b"\0" in line:
             return False
         parts = line.split(b" ")

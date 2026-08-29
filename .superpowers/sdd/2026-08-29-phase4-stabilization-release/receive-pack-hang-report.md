@@ -84,3 +84,22 @@ Review-remediation verification before commit:
 - Local Unix-socket integration suite: 4 passed.
 - Ruff 0.16.4: `All checks passed!`.
 - `git diff --check`: clean.
+
+## Review round 2 remediation
+
+The round 1 classifier incorrectly required non-empty bytes after the mandatory first
+NUL. The authoritative receive-pack gate accepts an empty capability list, so valid
+delete-only SHA-1 and SHA-256 requests could still fall through to the EOF-waiting path.
+
+Strict TDD regressions use `OpenDeleteRequestStream` with both OID formats and a present
+NUL followed by `b""`. Before the fix, both failed with
+`BlockingIOError: read would wait for client EOF`. The minimal fix removes only the
+non-empty capability check. Exactly one first-command NUL remains mandatory, later NULs
+remain rejected, and all OID/ref/flush strictness from round 1 is unchanged.
+
+Round 2 pre-commit verification:
+
+- Focused remote-helper/protocol/broker suite: 53 passed.
+- Local Unix-socket integration suite: 4 passed.
+- Ruff 0.16.4: `All checks passed!`.
+- `git diff --check`: clean.

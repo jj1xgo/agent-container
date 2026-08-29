@@ -318,6 +318,30 @@ class RemoteHelperTest(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(transport.requests, [delete])
 
+    def test_empty_capability_delete_does_not_wait_for_client_eof(self) -> None:
+        for name, old in (("sha1", b"1" * 40), ("sha256", b"a" * 64)):
+            with self.subTest(name=name):
+                transport = FakeReceiveTransport()
+                delete = delete_command(
+                    old,
+                    b"refs/heads/feat/work",
+                    capabilities=b"",
+                ) + b"0000"
+                stdin = OpenDeleteRequestStream(
+                    b"capabilities\nconnect git-receive-pack\n" + delete
+                )
+
+                result = run_remote_helper(
+                    ["origin", "agent-broker://jj1xgo/agent-container"],
+                    {"AGENT_BROKER_REPOSITORY": "jj1xgo/agent-container"},
+                    transport,
+                    stdin,
+                    BytesIO(),
+                )
+
+                self.assertEqual(result, 0)
+                self.assertEqual(transport.requests, [delete])
+
     def test_stateless_helper_rejects_non_packet_commands(self) -> None:
         repository = Repository.parse("jj1xgo/agent-container")
         for body in (
