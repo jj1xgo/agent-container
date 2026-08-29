@@ -114,7 +114,10 @@ class RemoteHelperTest(unittest.TestCase):
         first = pkt(b"command=ls-refs\n") + b"0000"
         second = pkt(b"command=fetch\n") + b"0000"
         stdin = BytesIO(
-            b"capabilities\nconnect git-upload-pack\n" + first + second
+            b"capabilities\nconnect git-upload-pack\n"
+            + first
+            + second
+            + b"0000"
         )
         stdout = BytesIO()
 

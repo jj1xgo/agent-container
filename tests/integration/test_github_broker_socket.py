@@ -312,6 +312,7 @@ class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
                 b"connect git-upload-pack\n"
                 + first
                 + second
+                + b"0000"
             )
             stdout = BytesIO()
             push = (
