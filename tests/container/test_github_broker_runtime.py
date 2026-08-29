@@ -312,12 +312,26 @@ class BrokerPolicyUpgradeTest(unittest.TestCase):
             path = Path(temp) / "github-broker.json"
             self._write_policy(path, existing)
             original = path.read_bytes()
+            real_fstat = os.fstat
 
-            with mock.patch(
-                "agent_container.github_broker_runtime.os.getuid",
-                return_value=os.getuid() + 1,
+            def wrong_directory_owner(descriptor):
+                result = real_fstat(descriptor)
+                if not stat.S_ISDIR(result.st_mode):
+                    return result
+                values = list(result)
+                values[4] = os.getuid() + 1
+                return os.stat_result(values)
+
+            self.assertEqual(path.stat().st_uid, os.getuid())
+            with mock.patch.object(
+                github_broker_runtime.os,
+                "fstat",
+                side_effect=wrong_directory_owner,
             ):
-                with self.assertRaises(PermissionError):
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "GitHub broker policy parent is not private",
+                ):
                     upgrade_legacy_broker_policy(path, existing, requested)
 
             self.assertEqual(path.read_bytes(), original)

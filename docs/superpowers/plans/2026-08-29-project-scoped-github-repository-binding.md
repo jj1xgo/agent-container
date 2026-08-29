@@ -527,6 +527,7 @@ most five focused fix rounds, rerunning affected tests after every round.
 From the host checkout containing the reviewed commits:
 
 ```bash
+set -eu
 bin/agentctl build >/dev/null
 podman run --rm localhost/agent-container:dev agentctl --version >/dev/null
 podman run --rm localhost/agent-container:dev agent-github --help >/dev/null
@@ -545,6 +546,7 @@ legacy `repository_id is None`. Validate the manifest exact keys and fixture
 numbers without printing its body.
 
 ```bash
+set -eu
 test -d "$AGENT_CONTAINER_HOME/projects/agent-container-smoke"
 test ! -L "$AGENT_CONTAINER_HOME/projects/agent-container-smoke"
 test "$(stat -c '%a:%u' "$AGENT_CONTAINER_HOME/projects/agent-container-smoke")" = "700:$(id -u)"
@@ -625,11 +627,12 @@ if not isinstance(payload, dict) or set(payload) != expected_keys:
     raise ValueError("fixture schema mismatch")
 if any(payload[key] != value for key, value in expected_static.items()):
     raise ValueError("fixture identity mismatch")
-numbers = tuple(payload[key] for key in ("open_issue", "closed_issue", "pull_request"))
-if any(
-    isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 2_147_483_647
-    for value in numbers
-) or len(set(numbers)) != 3:
+expected_numbers = {
+    "open_issue": 1,
+    "closed_issue": 2,
+    "pull_request": 3,
+}
+if any(payload[key] != value for key, value in expected_numbers.items()):
     raise ValueError("fixture number mismatch")
 print("fixture_manifest_valid=true")
 PY
@@ -639,6 +642,7 @@ PY
 
 ```bash
 set +x
+set -eu
 smoke_repository_id=$(
   GH_CONFIG_DIR="$AGENT_CONTAINER_HOME/gh" \
     gh repo view jj1xgo/agent-container-smoke \
@@ -647,7 +651,7 @@ smoke_repository_id=$(
 case "$smoke_repository_id" in
   ''|*[!0-9]*) exit 1 ;;
 esac
-test "$smoke_repository_id" -gt 0
+test "$smoke_repository_id" -gt 0 || exit 1
 printf '%s\n' 'smoke_repository_id_valid=true'
 # STOP: fresh approval required before registration.
 ```

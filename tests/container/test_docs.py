@@ -1,8 +1,11 @@
 from pathlib import Path
 import json
+import os
 import re
 import shlex
 import stat
+import subprocess
+from tempfile import TemporaryDirectory
 import unittest
 
 
@@ -79,6 +82,21 @@ def _has_broad_container_context_copy(body: str) -> bool:
         if any(source in {".", "./"} for source in sources):
             return True
     return False
+
+
+def _shell_block(path: Path, needle: str) -> str:
+    body = path.read_text(encoding="utf-8")
+    return next(
+        block
+        for block in re.findall(r"```(?:bash|sh)\n(.*?)```", body, re.DOTALL)
+        if needle in block
+    )
+
+
+def _write_executable(path: Path, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
 README_LINT_BEHAVIOR_CONTRACT = (
     "`bin/lint`は`src`と`tests`のcheck-onlyで、formatやauto-fixを行わず、"
     "実行中にnetwork accessを必要としません。"
@@ -674,6 +692,69 @@ class Phase4DocumentationTest(unittest.TestCase):
                 self.assertNotEqual(lookup_block, registration_block)
                 self.assertNotIn("gh repo view", registration_block)
 
+    def test_repository_id_lookup_fails_closed_before_success_marker(self) -> None:
+        documents = (
+            ROOT / "docs/superpowers/plans/2026-08-29-project-scoped-github-repository-binding.md",
+            ROOT / "README.md",
+            ROOT / "docs/phase3-github-broker.md",
+            ROOT / "docs/phase4-stabilization-smoke-test.md",
+        )
+        with TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            fake_bin = temp_root / "bin"
+            _write_executable(
+                fake_bin / "gh",
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"${FAKE_REPOSITORY_ID:-123}\"\n"
+                "[ \"${FAKE_GH_FAIL:-0}\" = 0 ]\n",
+            )
+            base_environment = {
+                **os.environ,
+                "AGENT_CONTAINER_HOME": str(temp_root / "agent-container"),
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            }
+            for path in documents:
+                block = _shell_block(path, "gh repo view")
+                with self.subTest(path=path.name, repository_id="0"):
+                    result = subprocess.run(
+                        ["/bin/sh", "-c", block],
+                        cwd=ROOT,
+                        env={**base_environment, "FAKE_REPOSITORY_ID": "0"},
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn(
+                        "smoke_repository_id_valid=true", result.stdout
+                    )
+                with self.subTest(path=path.name, repository_id="gh failure"):
+                    result = subprocess.run(
+                        ["/bin/sh", "-c", block],
+                        cwd=ROOT,
+                        env={**base_environment, "FAKE_GH_FAIL": "1"},
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn(
+                        "smoke_repository_id_valid=true", result.stdout
+                    )
+                with self.subTest(path=path.name, repository_id="123"):
+                    result = subprocess.run(
+                        ["/bin/sh", "-c", block],
+                        cwd=ROOT,
+                        env=base_environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        result.stdout, "smoke_repository_id_valid=true\n"
+                    )
+
     def test_recovery_inventory_uses_reviewed_code_before_approval(self) -> None:
         documents = (
             ROOT / "docs/superpowers/plans/2026-08-29-project-scoped-github-repository-binding.md",
@@ -738,6 +819,205 @@ class Phase4DocumentationTest(unittest.TestCase):
                     re.findall(r'print\("([a-z_]+=true)"\)', validation_block),
                     ["legacy_policy_valid=true", "fixture_manifest_valid=true"],
                 )
+
+    def test_reviewed_candidate_block_fails_closed_before_success_marker(self) -> None:
+        documents = (
+            ROOT / "docs/superpowers/plans/2026-08-29-project-scoped-github-repository-binding.md",
+            ROOT / "docs/phase4-stabilization-smoke-test.md",
+        )
+        with TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            fake_bin = temp_root / "fake-bin"
+            _write_executable(
+                temp_root / "bin/agentctl",
+                "#!/bin/sh\n[ \"${FAKE_FAIL:-}\" != build ]\n",
+            )
+            _write_executable(
+                fake_bin / "podman",
+                "#!/bin/sh\n"
+                "case \"$*:${FAKE_FAIL:-}\" in\n"
+                "  *'agentctl --version:version'*) exit 23 ;;\n"
+                "  *'agent-github --help:help'*) exit 24 ;;\n"
+                "esac\n",
+            )
+            base_environment = {
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            }
+            for path in documents:
+                block = _shell_block(path, "reviewed_candidate_valid=true")
+                for failure in ("build", "version", "help"):
+                    with self.subTest(path=path.name, failure=failure):
+                        result = subprocess.run(
+                            ["/bin/sh", "-c", block],
+                            cwd=temp_root,
+                            env={**base_environment, "FAKE_FAIL": failure},
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertNotIn(
+                            "reviewed_candidate_valid=true", result.stdout
+                        )
+                with self.subTest(path=path.name, failure="none"):
+                    result = subprocess.run(
+                        ["/bin/sh", "-c", block],
+                        cwd=temp_root,
+                        env=base_environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        result.stdout, "reviewed_candidate_valid=true\n"
+                    )
+
+    def test_partial_state_filesystem_block_fails_closed_before_marker(self) -> None:
+        documents = (
+            ROOT / "docs/superpowers/plans/2026-08-29-project-scoped-github-repository-binding.md",
+            ROOT / "docs/phase4-stabilization-smoke-test.md",
+        )
+        for path in documents:
+            with self.subTest(path=path.name):
+                with TemporaryDirectory() as temp:
+                    temp_root = Path(temp)
+                    environment = {
+                        **os.environ,
+                        "HOME": str(temp_root),
+                        "AGENT_CONTAINER_HOME": str(temp_root / "agent-container"),
+                        "AGENT_HANDOVER_ROOT": str(temp_root / "handovers"),
+                    }
+                    block = _shell_block(
+                        path, "partial_state_filesystem_valid=true"
+                    )
+                    result = subprocess.run(
+                        ["/bin/sh", "-c", block],
+                        cwd=ROOT,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn(
+                        "partial_state_filesystem_valid=true", result.stdout
+                    )
+
+                    project = (
+                        temp_root
+                        / "agent-container/projects/agent-container-smoke"
+                    )
+                    project.mkdir(parents=True, mode=0o700)
+                    project.chmod(0o700)
+                    for name in ("github-broker.json", "smoke-fixtures.json"):
+                        item = project / name
+                        item.write_text("{}", encoding="utf-8")
+                        item.chmod(0o600)
+                    handover = temp_root / "handovers/agent-container-smoke"
+                    handover.mkdir(parents=True, mode=0o700)
+                    handover.chmod(0o700)
+                    result = subprocess.run(
+                        ["/bin/sh", "-c", block],
+                        cwd=ROOT,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        result.stdout,
+                        "partial_state_filesystem_valid=true\n",
+                    )
+
+    def test_fixture_validation_requires_observed_issue_and_pr_numbers(self) -> None:
+        documents = (
+            ROOT / "docs/superpowers/plans/2026-08-29-project-scoped-github-repository-binding.md",
+            ROOT / "docs/phase4-stabilization-smoke-test.md",
+        )
+        fixture = {
+            "repository": "jj1xgo/agent-container-smoke",
+            "default_branch": "main",
+            "open_issue": 1,
+            "closed_issue": 2,
+            "pull_request": 3,
+            "open_body_sentinel": "phase4-open-body-sentinel",
+            "closed_body_sentinel": "phase4-closed-body-sentinel",
+            "excluded_field_sentinel": "phase4-excluded-field-sentinel",
+            "pull_request_sentinel": "phase4-pr-exclusion-sentinel",
+        }
+        legacy_policy = {
+            "repository": "jj1xgo/agent-container-smoke",
+            "default_branch": "main",
+            "protected_branches": ["main"],
+            "ruleset_confirmed": True,
+        }
+        for path in documents:
+            with self.subTest(path=path.name):
+                with TemporaryDirectory() as temp:
+                    temp_root = Path(temp)
+                    project = (
+                        temp_root / "projects/agent-container-smoke"
+                    )
+                    project.mkdir(parents=True, mode=0o700)
+                    project.chmod(0o700)
+                    policy_path = project / "github-broker.json"
+                    policy_path.write_text(
+                        json.dumps(legacy_policy), encoding="utf-8"
+                    )
+                    policy_path.chmod(0o600)
+                    manifest_path = project / "smoke-fixtures.json"
+                    block = _shell_block(path, "load_broker_policy")
+                    environment = {
+                        **os.environ,
+                        "AGENT_CONTAINER_HOME": str(temp_root),
+                    }
+
+                    manifest_path.write_text(
+                        json.dumps(
+                            {
+                                **fixture,
+                                "open_issue": 4,
+                                "closed_issue": 5,
+                                "pull_request": 6,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    manifest_path.chmod(0o600)
+                    result = subprocess.run(
+                        ["/bin/sh", "-c", block],
+                        cwd=ROOT,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn(
+                        "fixture_manifest_valid=true", result.stdout
+                    )
+
+                    manifest_path.write_text(
+                        json.dumps(fixture), encoding="utf-8"
+                    )
+                    manifest_path.chmod(0o600)
+                    result = subprocess.run(
+                        ["/bin/sh", "-c", block],
+                        cwd=ROOT,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        result.stdout,
+                        "legacy_policy_valid=true\n"
+                        "fixture_manifest_valid=true\n",
+                    )
 
     def test_shared_app_selection_and_production_doctor_are_required(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

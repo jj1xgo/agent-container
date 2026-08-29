@@ -29,6 +29,7 @@ repository bindingはproject-scopedで、新規登録には`--github-repository-
 partial stateを読む前に、review済みcommitを含むhost checkoutでcandidateを再buildし、image内のversionと固定CLI entrypointを確認する。どれか一つでも失敗したら自動retryしない。
 
 ```bash
+set -eu
 bin/agentctl build >/dev/null
 podman run --rm localhost/agent-container:dev agentctl --version >/dev/null
 podman run --rm localhost/agent-container:dev agent-github --help >/dev/null
@@ -136,11 +137,12 @@ if not isinstance(payload, dict) or set(payload) != expected_keys:
     raise ValueError("fixture schema mismatch")
 if any(payload[key] != value for key, value in expected_static.items()):
     raise ValueError("fixture identity mismatch")
-numbers = tuple(payload[key] for key in ("open_issue", "closed_issue", "pull_request"))
-if any(
-    isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 2_147_483_647
-    for value in numbers
-) or len(set(numbers)) != 3:
+expected_numbers = {
+    "open_issue": 1,
+    "closed_issue": 2,
+    "pull_request": 3,
+}
+if any(payload[key] != value for key, value in expected_numbers.items()):
     raise ValueError("fixture number mismatch")
 print("fixture_manifest_valid=true")
 PY
@@ -150,6 +152,7 @@ repository ID lookupもread-onlyだが、値がtranscriptへ出ないようtraci
 
 ```bash
 set +x
+set -eu
 smoke_repository_id=$(
   GH_CONFIG_DIR="$AGENT_CONTAINER_HOME/gh" \
     gh repo view jj1xgo/agent-container-smoke \
@@ -158,7 +161,7 @@ smoke_repository_id=$(
 case "$smoke_repository_id" in
   ''|*[!0-9]*) exit 1 ;;
 esac
-test "$smoke_repository_id" -gt 0
+test "$smoke_repository_id" -gt 0 || exit 1
 printf '%s\n' 'smoke_repository_id_valid=true'
 # STOP: fresh approval required before registration.
 ```
