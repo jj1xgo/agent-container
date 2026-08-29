@@ -1,8 +1,50 @@
 from pathlib import Path
+import stat
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+class RuffLintToolingTest(unittest.TestCase):
+    def test_ruff_version_and_rules_are_exact(self) -> None:
+        requirement = (ROOT / "requirements-lint.txt").read_text(encoding="utf-8")
+        config = (ROOT / "ruff.toml").read_text(encoding="utf-8")
+        self.assertEqual(requirement, "ruff==0.16.4\n")
+        self.assertIn('target-version = "py311"', config)
+        self.assertIn('select = ["E4", "E7", "E9", "F"]', config)
+        for forbidden in ("preview", "[format]", "ignore", "per-file-ignores"):
+            self.assertNotIn(forbidden, config)
+
+    def test_common_lint_entrypoint_is_executable_and_network_free(self) -> None:
+        lint = ROOT / "bin/lint"
+        metadata = lint.lstat()
+        body = lint.read_text(encoding="utf-8")
+        self.assertTrue(stat.S_ISREG(metadata.st_mode))
+        self.assertFalse(lint.is_symlink())
+        self.assertTrue(metadata.st_mode & stat.S_IXUSR)
+        self.assertIn("python3 -m ruff check", body)
+        self.assertIn('"$REPO_ROOT/ruff.toml"', body)
+        self.assertIn('"$REPO_ROOT/src"', body)
+        self.assertIn('"$REPO_ROOT/tests"', body)
+        for forbidden in ("pip install", "pipx", "uvx", "curl", "wget", "--fix"):
+            self.assertNotIn(forbidden, body)
+
+    def test_ci_installs_and_runs_lint_before_python_tests(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        install = "python3 -m pip install --disable-pip-version-check --no-deps"
+        requirement = "-r requirements-lint.txt"
+        lint = "bin/lint"
+        first_test = "python3 -m unittest"
+        for required in (install, requirement, lint, first_test):
+            self.assertIn(required, workflow)
+        self.assertLess(workflow.index(install), workflow.index(lint))
+        self.assertLess(workflow.index(lint), workflow.index(first_test))
+
+    def test_production_image_does_not_include_ruff_tooling(self) -> None:
+        containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
+        self.assertNotIn("requirements-lint.txt", containerfile)
+        self.assertNotIn("ruff", containerfile.lower())
 
 
 class Phase1DocumentationTest(unittest.TestCase):
