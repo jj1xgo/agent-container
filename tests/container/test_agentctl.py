@@ -997,6 +997,35 @@ class AgentCtlProjectTest(unittest.TestCase):
         app.chmod(0o600)
         key.chmod(0o600)
 
+    def _interrupted_broker_state(
+        self,
+        root: Path,
+        *,
+        repository_id: int | None = None,
+        default_branch: str = "main",
+        protected_branches: tuple[str, ...] = ("main",),
+    ) -> tuple[Path, Path]:
+        self._broker_app_state(root)
+        project_dir = root / "projects/agent-container"
+        project_dir.mkdir(parents=True, mode=0o700)
+        project_dir.chmod(0o700)
+        (root / "projects").chmod(0o700)
+        policy_path = project_dir / "github-broker.json"
+        payload = {
+            "repository": "jj1xgo/agent-container",
+            "default_branch": default_branch,
+            "protected_branches": list(protected_branches),
+            "ruleset_confirmed": True,
+        }
+        if repository_id is not None:
+            payload["repository_id"] = repository_id
+        policy_path.write_text(json.dumps(payload), encoding="utf-8")
+        policy_path.chmod(0o600)
+        sibling = project_dir / "smoke-fixtures.json"
+        sibling.write_bytes(b'{"repository":"credential-free"}\n')
+        sibling.chmod(0o600)
+        return policy_path, sibling
+
     def test_project_add_clones_through_broker_without_gh_state(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp) / "state"
@@ -1197,6 +1226,123 @@ class AgentCtlProjectTest(unittest.TestCase):
 
             self.assertEqual(result, 0)
             self.assertEqual(policy_path.read_bytes(), before)
+
+    def test_project_add_resumes_exact_interrupted_legacy_broker_registration(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            handovers = Path(temp) / "handovers"
+            (handovers / "agent-container").mkdir(parents=True)
+            policy_path, sibling = self._interrupted_broker_state(root)
+            original_sibling = sibling.read_bytes()
+            calls = []
+            broker = BrokerRuntimeMount(
+                root / "github-broker/run/agent-container/session",
+                Repository.parse("jj1xgo/agent-container"),
+            )
+
+            def runner(spec):
+                calls.append(spec)
+                if "clone" in spec.argv:
+                    (root / "workspaces/agent-container/.git").mkdir(parents=True)
+                return successful_podman_result(spec)
+
+            with patch(
+                "agent_container.agentctl.UploadPackBrokerRuntime.create"
+            ) as create:
+                create.return_value.__enter__.return_value = broker
+                result = main(
+                    [
+                        "project", "add", "jj1xgo/agent-container",
+                        "--handover-root", str(handovers),
+                        "--github-broker", "--github-repository-id", "123",
+                        "--confirm-force-push-ruleset",
+                    ],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    stderr=StringIO(),
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(json.loads(policy_path.read_text())["repository_id"], 123)
+            self.assertEqual(sibling.read_bytes(), original_sibling)
+            self.assertEqual(
+                sum("clone" in call.argv for call in calls),
+                1,
+            )
+            record = ProjectRecord.read(
+                root / "projects/agent-container/project.json"
+            )
+            self.assertEqual(record.repository.slug, "jj1xgo/agent-container")
+            create.assert_called_once()
+
+    def test_project_add_rejects_interrupted_legacy_upgrade_shape_mismatches(
+        self,
+    ) -> None:
+        cases = (
+            "project-file",
+            "workspace",
+            "workspace-symlink",
+            "policy",
+            "bound-id",
+        )
+        for case in cases:
+            with self.subTest(case=case), TemporaryDirectory() as temp:
+                root = Path(temp) / "state"
+                handovers = Path(temp) / "handovers"
+                (handovers / "agent-container").mkdir(parents=True)
+                existing_id = 456 if case == "bound-id" else None
+                policy_path, _ = self._interrupted_broker_state(
+                    root,
+                    repository_id=existing_id,
+                )
+                original_policy = policy_path.read_bytes()
+                project_dir = root / "projects/agent-container"
+                workspace = root / "workspaces/agent-container"
+                if case == "project-file":
+                    ProjectRecord(
+                        Repository.parse("jj1xgo/agent-container"),
+                        handovers.resolve(),
+                    ).write(project_dir / "project.json")
+                elif case == "workspace":
+                    (workspace / ".git").mkdir(parents=True)
+                    workspace.parent.chmod(0o700)
+                elif case == "workspace-symlink":
+                    target = Path(temp) / "workspace-target"
+                    target.mkdir()
+                    workspace.parent.mkdir(parents=True, mode=0o700)
+                    workspace.parent.chmod(0o700)
+                    workspace.symlink_to(target, target_is_directory=True)
+                arguments = [
+                    "project", "add", "jj1xgo/agent-container",
+                    "--handover-root", str(handovers),
+                    "--github-broker", "--github-repository-id", "123",
+                    "--confirm-force-push-ruleset",
+                ]
+                if case == "policy":
+                    arguments.extend(
+                        ["--default-branch", "master", "--protected-branch", "master"]
+                    )
+                calls = []
+
+                result = main(
+                    arguments,
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    stderr=StringIO(),
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertEqual(policy_path.read_bytes(), original_policy)
 
     def test_project_add_records_repository_after_clone(self) -> None:
         with TemporaryDirectory() as temp:

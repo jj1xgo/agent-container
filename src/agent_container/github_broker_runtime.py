@@ -3,7 +3,9 @@ from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
+import secrets
 import socket
+import stat
 import threading
 
 from agent_container.github_app import GitHubAppMetadata
@@ -18,6 +20,7 @@ from agent_container.github_pr import GitHubPullRequestTransport
 from agent_container.podman import BrokerRuntimeMount
 from agent_container.state import ProjectRecord
 from agent_container.state import StateLayout
+from agent_container.state import ensure_private_directory
 from agent_container.state import ensure_private_file
 
 
@@ -45,11 +48,12 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def load_broker_policy(path: Path, record: ProjectRecord, project_id: str) -> BrokerPolicy:
-    ensure_private_file(path)
+def _decode_broker_policy(
+    body: bytes, record: ProjectRecord, project_id: str
+) -> BrokerPolicy:
     try:
         payload = json.loads(
-            path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object
+            body.decode("utf-8"), object_pairs_hook=_unique_object
         )
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise ValueError("GitHub broker policy is invalid") from None
@@ -83,7 +87,12 @@ def load_broker_policy(path: Path, record: ProjectRecord, project_id: str) -> Br
     )
 
 
-def write_broker_policy(path: Path, policy: BrokerPolicy) -> None:
+def load_broker_policy(path: Path, record: ProjectRecord, project_id: str) -> BrokerPolicy:
+    ensure_private_file(path)
+    return _decode_broker_policy(path.read_bytes(), record, project_id)
+
+
+def _encode_broker_policy(policy: BrokerPolicy) -> bytes:
     if policy.repository_id is None:
         raise ValueError("GitHub repository ID is invalid")
     body = json.dumps(
@@ -97,20 +106,135 @@ def write_broker_policy(path: Path, policy: BrokerPolicy) -> None:
         ensure_ascii=True,
         indent=2,
     ) + "\n"
+    return body.encode("ascii")
+
+
+def _write_all(descriptor: int, body: bytes) -> None:
+    remaining = memoryview(body)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise OSError("GitHub broker policy write failed")
+        remaining = remaining[written:]
+
+
+def write_broker_policy(path: Path, policy: BrokerPolicy) -> None:
+    body = _encode_broker_policy(policy)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(path, flags, 0o600)
     try:
-        remaining = memoryview(body.encode("ascii"))
-        while remaining:
-            written = os.write(descriptor, remaining)
-            if written <= 0:
-                raise OSError("GitHub broker policy write failed")
-            remaining = remaining[written:]
+        _write_all(descriptor, body)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _legacy_policy_snapshot(
+    path: Path, expected: BrokerPolicy
+) -> tuple[bytes, tuple[int, int, int, int, int, int]]:
+    ensure_private_file(path)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        file_stat = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(file_stat.st_mode)
+            or stat.S_IMODE(file_stat.st_mode) != 0o600
+            or file_stat.st_uid != os.getuid()
+        ):
+            raise PermissionError("GitHub broker policy is not a private file")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 65_536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        body = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    path_stat = os.lstat(path)
+    if (
+        not stat.S_ISREG(path_stat.st_mode)
+        or path_stat.st_dev != file_stat.st_dev
+        or path_stat.st_ino != file_stat.st_ino
+    ):
+        raise ValueError("GitHub broker policy changed during upgrade")
+    record = ProjectRecord(expected.repository, Path("/"))
+    if _decode_broker_policy(body, record, expected.project_id) != expected:
+        raise ValueError("GitHub broker policy does not match observed policy")
+    identity = (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+        file_stat.st_ctime_ns,
+        file_stat.st_mode,
+    )
+    return body, identity
+
+
+def _open_policy_temporary(path: Path) -> tuple[Path, int]:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    for _ in range(128):
+        temporary = path.parent / f".{path.name}.{secrets.token_hex(16)}"
+        try:
+            return temporary, os.open(temporary, flags, 0o600)
+        except FileExistsError:
+            continue
+    raise FileExistsError("could not create GitHub broker policy temporary file")
+
+
+def upgrade_legacy_broker_policy(
+    path: Path, existing: BrokerPolicy, requested: BrokerPolicy
+) -> None:
+    if (
+        existing.repository_id is not None
+        or requested.repository_id is None
+        or replace(requested, repository_id=None) != existing
+    ):
+        raise ValueError("GitHub broker policy is not an exact legacy match")
+    ensure_private_directory(path.parent)
+    original = _legacy_policy_snapshot(path, existing)
+    body = _encode_broker_policy(requested)
+    temporary: Path | None = None
+    descriptor: int | None = None
+    replaced = False
+    try:
+        temporary, descriptor = _open_policy_temporary(path)
+        os.fchmod(descriptor, 0o600)
+        _write_all(descriptor, body)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        if _legacy_policy_snapshot(path, existing) != original:
+            raise ValueError("GitHub broker policy changed during upgrade")
+        ensure_private_directory(path.parent)
+        os.replace(temporary, path)
+        replaced = True
+        directory_flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            directory_flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            directory_flags |= os.O_NOFOLLOW
+        parent_descriptor = os.open(path.parent, directory_flags)
+        try:
+            os.fsync(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None and not replaced:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 @dataclass

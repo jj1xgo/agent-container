@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import stat
 from tempfile import TemporaryDirectory
 import unittest
 from unittest import mock
@@ -8,6 +9,7 @@ from agent_container.github_app import GitHubAppMetadata
 from agent_container.github_broker_runtime import UploadPackBrokerRuntime
 from agent_container.github_broker_runtime import broker_token_metadata
 from agent_container.github_broker_runtime import load_broker_policy
+from agent_container.github_broker_runtime import upgrade_legacy_broker_policy
 from agent_container.github_broker_runtime import write_broker_policy
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.state import ProjectRecord
@@ -154,6 +156,152 @@ class BrokerRuntimePolicyTest(unittest.TestCase):
                     path.chmod(0o600)
                     with self.assertRaises(ValueError):
                         load_broker_policy(path, record, "agent-container")
+
+
+class BrokerPolicyUpgradeTest(unittest.TestCase):
+    def _policy(
+        self,
+        *,
+        repository: str = "jj1xgo/agent-container-smoke",
+        repository_id: int | None = None,
+        default_branch: str = "main",
+        protected_branches: tuple[str, ...] = ("main",),
+    ) -> BrokerPolicy:
+        return BrokerPolicy.create(
+            project_id="agent-container-smoke",
+            repository=repository,
+            repository_id=repository_id,
+            default_branch=default_branch,
+            protected_branches=protected_branches,
+            require_repository_id=repository_id is not None,
+        )
+
+    def _write_policy(self, path: Path, policy: BrokerPolicy) -> None:
+        payload = {
+            "repository": policy.repository.slug,
+            "default_branch": policy.default_branch,
+            "protected_branches": sorted(policy.protected_branches),
+            "ruleset_confirmed": True,
+        }
+        if policy.repository_id is not None:
+            payload["repository_id"] = policy.repository_id
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        path.chmod(0o600)
+
+    def test_upgrades_only_policy_and_preserves_private_mode(self) -> None:
+        existing = self._policy()
+        requested = self._policy(repository_id=123)
+        record = ProjectRecord(existing.repository, Path("/handovers"))
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "github-broker.json"
+            sibling = path.parent / "smoke-fixtures.json"
+            self._write_policy(path, existing)
+            sibling.write_bytes(b'{"fixture":"credential-free"}\n')
+            original_sibling = sibling.read_bytes()
+
+            upgrade_legacy_broker_policy(path, existing, requested)
+
+            upgraded = load_broker_policy(
+                path, record, "agent-container-smoke"
+            )
+            self.assertEqual(upgraded.repository_id, 123)
+            self.assertEqual(sibling.read_bytes(), original_sibling)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(list(path.parent.glob(".github-broker.json.*")), [])
+
+    def test_rejects_non_id_policy_mismatches_without_changing_bytes(self) -> None:
+        cases = (
+            self._policy(
+                repository="jj1xgo/other",
+                repository_id=123,
+            ),
+            self._policy(
+                repository_id=123,
+                default_branch="master",
+                protected_branches=("master",),
+            ),
+            self._policy(
+                repository_id=123,
+                protected_branches=("main", "master"),
+            ),
+        )
+        for requested in cases:
+            with self.subTest(requested=requested), TemporaryDirectory() as temp:
+                path = Path(temp) / "github-broker.json"
+                existing = self._policy()
+                self._write_policy(path, existing)
+                original = path.read_bytes()
+
+                with self.assertRaises(ValueError):
+                    upgrade_legacy_broker_policy(path, existing, requested)
+
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(list(path.parent.glob(".github-broker.json.*")), [])
+
+    def test_rejects_already_bound_policy_without_changing_bytes(self) -> None:
+        for requested_id in (123, 456):
+            with self.subTest(requested_id=requested_id), TemporaryDirectory() as temp:
+                path = Path(temp) / "github-broker.json"
+                existing = self._policy(repository_id=123)
+                requested = self._policy(repository_id=requested_id)
+                self._write_policy(path, existing)
+                original = path.read_bytes()
+
+                with self.assertRaises(ValueError):
+                    upgrade_legacy_broker_policy(path, existing, requested)
+
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(list(path.parent.glob(".github-broker.json.*")), [])
+
+    def test_rejects_symlink_target_without_changing_target_bytes(self) -> None:
+        existing = self._policy()
+        requested = self._policy(repository_id=123)
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target.json"
+            path = root / "github-broker.json"
+            self._write_policy(target, existing)
+            original = target.read_bytes()
+            path.symlink_to(target)
+
+            with self.assertRaises(ValueError):
+                upgrade_legacy_broker_policy(path, existing, requested)
+
+            self.assertTrue(path.is_symlink())
+            self.assertEqual(target.read_bytes(), original)
+            self.assertEqual(list(path.parent.glob(".github-broker.json.*")), [])
+
+    def test_rejects_wrong_mode_without_changing_bytes(self) -> None:
+        existing = self._policy()
+        requested = self._policy(repository_id=123)
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "github-broker.json"
+            self._write_policy(path, existing)
+            path.chmod(0o644)
+            original = path.read_bytes()
+
+            with self.assertRaises(PermissionError):
+                upgrade_legacy_broker_policy(path, existing, requested)
+
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
+            self.assertEqual(list(path.parent.glob(".github-broker.json.*")), [])
+
+    def test_rejects_non_private_parent_without_changing_bytes(self) -> None:
+        existing = self._policy()
+        requested = self._policy(repository_id=123)
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "github-broker.json"
+            self._write_policy(path, existing)
+            path.parent.chmod(0o755)
+            original = path.read_bytes()
+
+            with self.assertRaises(PermissionError):
+                upgrade_legacy_broker_policy(path, existing, requested)
+
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o755)
+            self.assertEqual(list(path.parent.glob(".github-broker.json.*")), [])
 
 
 class BrokerRuntimeConstructionTest(unittest.TestCase):

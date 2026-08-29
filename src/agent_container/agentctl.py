@@ -26,6 +26,7 @@ from agent_container.migration import render_migration_plan
 from agent_container.github_broker_runtime import GitHubBrokerRuntimeError
 from agent_container.github_broker_runtime import UploadPackBrokerRuntime
 from agent_container.github_broker_runtime import load_broker_policy
+from agent_container.github_broker_runtime import upgrade_legacy_broker_policy
 from agent_container.github_broker_runtime import write_broker_policy
 from agent_container.handover_broker_runtime import HandoverBrokerRuntime
 from agent_container.handover_broker_runtime import HandoverBrokerRuntimeError
@@ -408,6 +409,9 @@ def _add_project(
             layout.workspace, repository, git_remote_reader(layout.workspace)
         )
     policy: BrokerPolicy | None = None
+    existing_policy: BrokerPolicy | None = None
+    policy_was_present = False
+    upgrade_interrupted_legacy = False
     completed_legacy_project = False
     record = ProjectRecord(repository, resolved_handover_root)
     if github_broker:
@@ -450,15 +454,63 @@ def _add_project(
                 protected_branches=protected,
                 require_repository_id=True,
             )
+            policy_was_present = (
+                layout.github_broker_policy_file.exists()
+                or layout.github_broker_policy_file.is_symlink()
+            )
+            if policy_was_present:
+                existing_policy = load_broker_policy(
+                    layout.github_broker_policy_file, record, layout.project_id
+                )
+                expected_legacy = BrokerPolicy.create(
+                    project_id=layout.project_id,
+                    repository=repository.slug,
+                    default_branch=default_branch,
+                    protected_branches=protected,
+                )
+                if existing_policy == policy:
+                    pass
+                elif existing_policy == expected_legacy:
+                    if (
+                        layout.project_file.exists()
+                        or layout.project_file.is_symlink()
+                        or workspace_exists
+                    ):
+                        raise ValueError(
+                            "interrupted GitHub broker registration state does not match"
+                        )
+                    upgrade_interrupted_legacy = True
+                else:
+                    raise ValueError("GitHub broker policy does not match project")
         GitHubAppMetadata.load(
             layout.github_broker_root / "app.json",
             layout.github_broker_root / "private-key.pem",
         )
+        if upgrade_interrupted_legacy:
+            assert existing_policy is not None
+            if (
+                layout.project_file.exists()
+                or layout.project_file.is_symlink()
+                or layout.workspace.exists()
+                or layout.workspace.is_symlink()
+            ):
+                raise ValueError(
+                    "interrupted GitHub broker registration state does not match"
+                )
+            upgrade_legacy_broker_policy(
+                layout.github_broker_policy_file, existing_policy, policy
+            )
     _podman_preflight(runner, image_required=image)
     _prepare_project_directories(layout, include_gh=not github_broker)
     if github_broker:
         assert policy is not None
-        if layout.github_broker_policy_file.exists() or layout.github_broker_policy_file.is_symlink():
+        if upgrade_interrupted_legacy:
+            existing = load_broker_policy(
+                layout.github_broker_policy_file, record, layout.project_id
+            )
+            if existing != policy:
+                raise ValueError("GitHub broker policy does not match project")
+        elif policy_was_present or completed_legacy_project:
             existing = load_broker_policy(
                 layout.github_broker_policy_file, record, layout.project_id
             )
