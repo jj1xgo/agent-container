@@ -31,7 +31,7 @@ partial stateを読む前に、review済みcommitを含むhost checkoutでcandid
 ```bash
 set -eu
 bin/agentctl build >/dev/null
-podman run --rm localhost/agent-container:dev agentctl --version >/dev/null
+podman run --rm localhost/agent-container:dev python3 -m agent_container.agentctl --version >/dev/null
 podman run --rm localhost/agent-container:dev agent-github --help >/dev/null
 printf '%s\n' 'reviewed_candidate_valid=true'
 ```

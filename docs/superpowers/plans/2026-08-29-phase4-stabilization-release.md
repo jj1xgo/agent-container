@@ -355,7 +355,7 @@ Run the normal latest build without fixed CLI version flags:
 ```bash
 bin/agentctl build
 podman image inspect --format '{{.Id}}' localhost/agent-container:dev
-podman run --rm localhost/agent-container:dev agentctl --version
+podman run --rm localhost/agent-container:dev python3 -m agent_container.agentctl --version
 podman run --rm localhost/agent-container:dev agent-github --help >/dev/null
 podman run --rm localhost/agent-container:dev \
   stat -c '%a %U:%G %n' \

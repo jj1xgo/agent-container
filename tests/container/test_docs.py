@@ -627,6 +627,44 @@ class Phase3DocumentationTest(unittest.TestCase):
 
 
 class Phase4DocumentationTest(unittest.TestCase):
+    def test_release_candidate_probe_matches_container_image_layout(self) -> None:
+        containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
+        installed_wrappers = set(
+            re.findall(
+                r"(?m)^COPY --chmod=0755 \S+ /usr/local/bin/(\S+)$",
+                containerfile,
+            )
+        )
+        self.assertNotIn("agentctl", installed_wrappers)
+        self.assertRegex(
+            containerfile,
+            r"apt-get install[^\n]*(?:\\\n[^\n]*)*\bpython3\b",
+        )
+        self.assertIn("COPY src /opt/agent-container/src", containerfile)
+        self.assertIn("PYTHONPATH=/opt/agent-container/src", containerfile)
+        self.assertTrue((ROOT / "src/agent_container/agentctl.py").is_file())
+
+        documents = (
+            ROOT / "docs/superpowers/plans/2026-08-29-project-scoped-github-repository-binding.md",
+            ROOT / "docs/superpowers/plans/2026-08-29-phase4-stabilization-release.md",
+            ROOT / "docs/phase4-stabilization-smoke-test.md",
+        )
+        expected = ("python3", "-m", "agent_container.agentctl", "--version")
+        for path in documents:
+            body = path.read_text(encoding="utf-8")
+            probe = next(
+                line.strip().removesuffix(" >/dev/null")
+                for line in body.splitlines()
+                if line.startswith(
+                    "podman run --rm localhost/agent-container:dev "
+                )
+                and "agentctl" in line
+                and "--version" in line
+            )
+            command = tuple(shlex.split(probe)[4:])
+            with self.subTest(path=path.name):
+                self.assertEqual(command, expected)
+
     def test_phase4_scope_and_release_contract(self) -> None:
         initial = (
             ROOT / "docs/superpowers/specs/2026-08-22-agent-container-design.md"
@@ -841,7 +879,7 @@ class Phase4DocumentationTest(unittest.TestCase):
             with self.subTest(path=path.name):
                 for required in (
                     "bin/agentctl build >/dev/null",
-                    "agentctl --version >/dev/null",
+                    "python3 -m agent_container.agentctl --version >/dev/null",
                     "agent-github --help >/dev/null",
                     "reviewed_candidate_valid=true",
                     "partial_state_filesystem_valid=true",
@@ -912,7 +950,7 @@ class Phase4DocumentationTest(unittest.TestCase):
                 fake_bin / "podman",
                 "#!/bin/sh\n"
                 "case \"$*:${FAKE_FAIL:-}\" in\n"
-                "  *'agentctl --version:version'*) exit 23 ;;\n"
+                "  *'python3 -m agent_container.agentctl --version:version'*) exit 23 ;;\n"
                 "  *'agent-github --help:help'*) exit 24 ;;\n"
                 "esac\n",
             )
