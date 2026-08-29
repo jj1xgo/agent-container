@@ -250,7 +250,9 @@ def receive_advertisement() -> bytes:
     )
 
 
-def receive_request(ref: str = "refs/heads/feat/work", old: str = OLD) -> bytes:
+def receive_request(
+    ref: str = "refs/heads/feat/new-work", old: str = "0" * 40
+) -> bytes:
     return (
         pkt(
             f"{old} {NEW} {ref}".encode()

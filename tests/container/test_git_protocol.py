@@ -155,18 +155,41 @@ class ReceivePackGateTest(unittest.TestCase):
             )
         )
 
-    def test_allows_existing_lease_and_new_work_branch(self) -> None:
+    def test_allows_only_new_work_branches(self) -> None:
         data = commands(
-            (OLD, NEW, "refs/heads/existing"),
-            (ZERO_OID_SHA1, OTHER, "refs/heads/feat/new"),
+            (ZERO_OID_SHA1, NEW, "refs/heads/feat/new"),
+            (ZERO_OID_SHA1, OTHER, "refs/heads/feat/other"),
         )
 
         gated = gate_receive_pack_commands(data, self.advertisement, self.policy)
 
-        self.assertEqual(len(gated.updates), 2)
-        self.assertEqual(gated.updates[0].ref, "refs/heads/existing")
-        self.assertEqual(gated.updates[1].old_oid, ZERO_OID_SHA1)
+        self.assertEqual(
+            tuple(update.ref for update in gated.updates),
+            ("refs/heads/feat/new", "refs/heads/feat/other"),
+        )
+        self.assertTrue(
+            all(update.old_oid == ZERO_OID_SHA1 for update in gated.updates)
+        )
         self.assertEqual(data[gated.consumed:], b"PACKpayload")
+
+    def test_rejects_every_update_to_an_advertised_work_branch(self) -> None:
+        for new_oid in (NEW, OTHER):
+            with self.subTest(new_oid=new_oid):
+                with self.assertRaisesRegex(ValueError, "already exists"):
+                    gate_receive_pack_commands(
+                        commands((OLD, new_oid, "refs/heads/existing")),
+                        self.advertisement,
+                        self.policy,
+                    )
+
+    def test_rejects_mixed_create_and_existing_update_as_one_request(self) -> None:
+        data = commands(
+            (ZERO_OID_SHA1, NEW, "refs/heads/feat/new"),
+            (OLD, OTHER, "refs/heads/existing"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            gate_receive_pack_commands(data, self.advertisement, self.policy)
 
     def test_rejects_delete_protected_non_head_duplicate_and_bad_lease(self) -> None:
         cases = (
@@ -196,7 +219,7 @@ class ReceivePackGateTest(unittest.TestCase):
         ):
             with self.subTest(capability=capability):
                 data = commands(
-                    (OLD, NEW, "refs/heads/existing"),
+                    (ZERO_OID_SHA1, NEW, "refs/heads/feat/capability-risk"),
                     capabilities=f"report-status {capability}",
                 )
                 with self.assertRaisesRegex(ValueError, "capability"):
@@ -207,7 +230,7 @@ class ReceivePackGateTest(unittest.TestCase):
             advertisement(capabilities="report-status object-format=sha1")
         )
         data = commands(
-            (OLD, NEW, "refs/heads/existing"),
+            (ZERO_OID_SHA1, NEW, "refs/heads/feat/capability-unadvertised"),
             capabilities="report-status atomic object-format=sha1",
         )
         with self.assertRaisesRegex(ValueError, "capability"):
@@ -215,7 +238,7 @@ class ReceivePackGateTest(unittest.TestCase):
 
     def test_rejects_duplicate_capability_names(self) -> None:
         data = commands(
-            (OLD, NEW, "refs/heads/existing"),
+            (ZERO_OID_SHA1, NEW, "refs/heads/feat/capability-duplicate"),
             capabilities="report-status agent=git/2.50 agent=git/2.51",
         )
         with self.assertRaisesRegex(ValueError, "capabilities"):
@@ -223,7 +246,7 @@ class ReceivePackGateTest(unittest.TestCase):
 
     def test_accepts_bounded_known_capabilities(self) -> None:
         data = commands(
-            (OLD, NEW, "refs/heads/existing"),
+            (ZERO_OID_SHA1, NEW, "refs/heads/feat/capability-known"),
             capabilities=(
                 "report-status report-status-v2 side-band-64k quiet atomic "
                 "ofs-delta agent=git/2.51.0 object-format=sha1"
