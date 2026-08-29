@@ -353,6 +353,18 @@ class Phase3DocumentationTest(unittest.TestCase):
             "stdout、stderr、auditがtoken、capability、raw response、fixture sentinelを含まない",
             smoke,
         )
+        for check, status in (
+            ("Issue App permission", "PARTIAL:"),
+            ("Issue list/PR exclusion", "PARTIAL:"),
+            ("Issue view/body", "not run"),
+            ("Issue write/query/cross-repository denial", "PASS:"),
+            ("Issue credential non-exposure", "PARTIAL:"),
+            ("Issue expired capability", "PARTIAL:"),
+            ("Issue Git/PR regression", "PARTIAL:"),
+        ):
+            self.assertRegex(smoke, rf"\| {check} \| [^\n]+ \| {status}")
+        self.assertIn("PR #53–#55", smoke)
+        self.assertIn("2026-08-29", smoke)
 
     def test_base_image_does_not_leak_legacy_gh_environment_into_broker_mode(self) -> None:
         containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
