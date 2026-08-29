@@ -222,7 +222,7 @@ agent-github pr view PR_NUMBER
 agent-github pr checks PR_NUMBER
 ```
 
-clone/fetchと、advertisementに存在しない一意なbranchの最初の作成pushが成功することを確認する。その後、同じbranchへのfast-forward／non-fast-forward update、protected branch、delete、non-head ref、cross-repository操作がGitHub POST前に拒否されることを確認する。追加作業には別の新しいbranchと必要に応じた新しいPRを使う。stale leaseは決定論的に同期できる方法が先に成立した場合だけ実hostで確認し、race依存の並行pushは使わない。merge、release、generic API interfaceは存在しない。smoke PRはmergeしない。
+clone/fetchと、advertisementに存在しない一意なbranchの最初の作成pushが成功することを確認する。その後、同じbranchへのfast-forward／non-fast-forward update、protected branch、delete、non-head ref、cross-repository操作がGitHub POST前に拒否されることを確認する。追加作業には別の新しいbranchと必要に応じた新しいPRを使う。retained stale-lease ruleはadvertisementに存在しないref + nonzero old OIDの拒否であり、`tests/container/test_git_protocol.py`で自動確認する。advertised refをadvanceしてもcreate-onlyの存在gateで先に拒否されるため、追加のhost mutationは行わず、real-hostでは個別にdiagnosticではない`PARTIAL`として扱う。merge、release、generic API interfaceは存在しない。smoke PRはmergeしない。
 
 gate完了後、smoke PRをcloseし、対応する一意な`test/github-broker-smoke-UNIQUE` branchだけを削除する場合は、broker操作と混同しないhost `gh` administrationとして、PR番号、repository、branchを示した別の実行直前host承認を得る。固定fixture Issue、Pull Request、`main`、他branchは変更・削除しない。
 
@@ -262,7 +262,7 @@ scope整合の文書変更と必要なtest変更がmainへmerge済みであり�
 
 ## 記録
 
-実行後、該当する`not run`だけを日時、対象repository、期待結果、観測結果、`PASS`または`PARTIAL`へ証拠どおり置換する。途中の失敗を後続成功で隠さず、root causeと最終再実行を区別する。
+実行後、該当する`not run`だけを日時、対象repository、期待結果、観測結果、`PASS`、`PARTIAL`、`FAIL`、`not run`のいずれかへ証拠どおり置換する。途中の失敗を後続成功で隠さず、root causeと最終再実行を区別する。
 
 2026-08-29、review済みcandidateのbuildと固定CLI probe、部分filesystem state、旧schema policy、Issue #1／#2・Pull Request #3を含むexact fixture manifest、および非記録のpositive repository IDをhostで確認した。その後、fresh approvalを得た一度だけの承認済み登録が成功し、broker経由のclone、project metadata、project-scoped bindingが作成された。登録前後でfixture manifestのdigestは不変だった。
 

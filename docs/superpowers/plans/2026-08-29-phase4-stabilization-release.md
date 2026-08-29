@@ -29,7 +29,7 @@ new disposable branch or an explicitly approved restoration is authorized.
 - Never print or record credential, token, private key, JWT, capability value, length, prefix, suffix, or hash.
 - Record only bounded operation output and allowlisted audit fields. Do not capture GitHub error bodies, raw headers, packfiles, Issue content in audit, or environment listings.
 - A failed external operation is not retried automatically. Stop at the failed gate and diagnose from fixed error and allowlisted audit metadata.
-- Do not mark an unobserved check `PASS`. Use `PARTIAL` or `not run` with the reason.
+- Do not mark an unobserved check `PASS`. Use `FAIL` for an observed failed gate, `PARTIAL` for incomplete or nondiagnostic evidence, or `not run` with the reason.
 - Do not move, overwrite, or reuse a published tag. A post-release correction uses a new version.
 - Keep the existing `WARN network-policy` until a separately approved egress design is implemented.
 
@@ -478,11 +478,17 @@ the remote smoke branch remains unchanged and audit records
 with Step 6, this separately verifies both update shapes. Do not print object
 contents or pack data.
 
-- [ ] **Step 8: Spike deterministic stale-lease synchronization**
+- [ ] **Step 8: Record stale-lease automated coverage without host mutation**
 
-The feasibility question is: can the existing helper be paused after receive-pack advertisement and before its RPC while a host-admin update advances only the disposable smoke branch, without copying or displaying capability data? Inspect the current helper and broker protocol, and propose one synchronization point that requires no production backdoor. Obtain separate approval before the host-admin ref update.
+The retained stale-lease rule is rejection of an advertisementに存在しないref
+with a nonzero old OID. Cite the focused cases in
+`tests/container/test_git_protocol.py` as the mandatory automated evidence.
 
-If a deterministic method exists, execute it once and require the broker's advertised-old-OID gate to deny the stale request. If no deterministic method exists without a production test hook or timing race, do not simulate success: retain the automated stale-lease tests as mandatory evidence and record the real-host row `PARTIAL` with that reason.
+Do not pause the helper or advance a remote branch: under create-only, an
+advertised ref is rejected by the existence gate before the stale-lease rule,
+so that procedure is real-hostでは個別にdiagnosticではない and cannot prove
+this case. Perform no additional host-admin mutation; record the real-host row
+as `PARTIAL`/not separately diagnostic and do not claim host proof.
 
 - [ ] **Step 9: Create and inspect the smoke PR**
 
@@ -634,7 +640,7 @@ Expected: FAIL because the smoke rows and release notes still contain pre-execut
 
 - [ ] **Step 3: Record only observed results**
 
-Update each row with `PASS`, `PARTIAL`, or `not run`, exact date, bounded identifiers, and a reason for every non-PASS. Separate intermediate failures from the final rerun. Do not include credential-derived data, raw audit lines, Issue body beyond named test sentinels, or environment output.
+Update each row with `PASS`, `PARTIAL`, `FAIL`, or `not run`, exact date, bounded identifiers, and a reason for every non-PASS. Separate intermediate failures from the final rerun. Do not include credential-derived data, raw audit lines, Issue body beyond named test sentinels, or environment output.
 
 - [ ] **Step 4: Prepare release notes**
 

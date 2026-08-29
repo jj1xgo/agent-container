@@ -43,7 +43,7 @@ Phase 4では新しい権限やplatformを追加しない。設計と現行inter
 - family Issue create／commentを将来Phaseへ明示的に延期する。
 - domain allowlist／egress proxyを独立した将来Phaseへ延期し、現行WARNを残す。
 - 専用のprivate test repositoryを準備し、残存するGit／PR／Issue broker gateを実行する。
-- smoke結果を`PASS`、`PARTIAL`、`not run`で証拠どおり記録する。
+- smoke結果を`PASS`、`PARTIAL`、`FAIL`、`not run`で証拠どおり記録する。
 - 全自動test、実Podman integration、独立agent reviewを実施する。
 - `CHANGELOG.md`とrelease文書を整え、最終承認後に`v0.4.0` tagとGitHub Releaseを作成する。
 
@@ -99,7 +99,7 @@ broker失敗時にlegacy `gh` credential、environment token、SSH agent、host 
 - cloneとfetchが成功する。
 - advertisementに存在しない一意なwork branchへの作成pushが成功する。
 - 同じbranchへのfast-forward／non-fast-forward update、protected branch、delete、non-head ref、cross-repository操作がbrokerからGitHubへ送信する前に拒否される。
-- stale leaseは自動testを必須証拠とする。advertisement後・RPC前のremote更新をcredential非露出のまま決定論的に同期できる方法を先にspikeし、成立した場合だけ実hostで実行する。race依存の並行pushは使わず、決定論的な方法が成立しなければ`PARTIAL`として理由と受容判断を記録する。
+- retained stale-lease ruleはadvertisementに存在しないrefへnonzero old OIDを指定したcommandの拒否であり、`tests/container/test_git_protocol.py`の自動testを必須証拠とする。create-onlyではadvertised refは存在だけで先に拒否されるため、remote branchをadvanceする実host操作はこのruleを個別にdiagnoseしない。追加のhost mutationは行わず、real-host結果は`PARTIAL`かつnot separately diagnosticとして記録する。
 - negative操作はbrokerが送信前に拒否できるcaseを優先する。GitHubへ到達させる必要があるcaseもtest repository内だけで実行する。
 - PR create／view／checksが成功し、merge、release、generic API interfaceが存在しない。
 
@@ -123,7 +123,7 @@ broker失敗時にlegacy `gh` credential、environment token、SSH agent、host 
 
 - stdoutは固定schemaの結果だけ、stderrは固定errorだけを記録する。
 - auditはallowlist field名とstatus／stageだけを検査し、raw行を無制限に転載しない。
-- 各checkへ日時、対象repository、期待結果、観測結果、`PASS`／`PARTIAL`／`not run`を記録する。
+- 各checkへ日時、対象repository、期待結果、観測結果、`PASS`／`PARTIAL`／`FAIL`／`not run`を記録する。
 - 途中の失敗を後続成功で隠さず、root causeと最終再実行を区別する。
 
 ## 7. 自動検証とreview

@@ -45,7 +45,7 @@
 2. SHA-1とSHA-256 object formatをadvertisementから確定し、OID長を固定する。
 3. receive-packの`old OID SP new OID SP ref`と最初のcapability列をparseする。
 4. delete、protected ref、`refs/heads/`外、duplicate ref、ref数超過、未知capabilityを拒否する。
-5. advertisementのexact old OIDとのlease一致を検査する。
+5. retained stale-lease ruleとして、advertisementに存在しないrefへnonzero old OIDを指定したcommandを拒否する。advertised refはcreate-onlyの存在gateで拒否されるため、このcaseは`tests/container/test_git_protocol.py`で自動検証する。
 6. packfile本文はparseせず、command検査成功後だけbounded streamへ移行するstate machineをtestする。
 
 ## 4. Slice C: broker sessionとUnix socket

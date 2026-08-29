@@ -720,6 +720,64 @@ class Phase4DocumentationTest(unittest.TestCase):
         self.assertIn("ordinary descendant fast-forward denial", gate)
         self.assertIn("unrelated-history non-fast-forward update", gate)
 
+    def test_create_only_docs_keep_stale_lease_automated_and_nondiagnostic(
+        self,
+    ) -> None:
+        documents = (
+            ROOT / "docs/superpowers/specs/2026-08-29-phase4-stabilization-release-design.md",
+            ROOT / "docs/phase4-stabilization-smoke-test.md",
+            ROOT / "docs/superpowers/plans/2026-08-29-phase4-stabilization-release.md",
+            ROOT / "docs/superpowers/plans/2026-08-25-phase-3-github-broker.md",
+        )
+        forbidden = (
+            "advertisement後・RPC前のremote更新",
+            "paused after receive-pack advertisement",
+            "host-admin update advances",
+            "Spike deterministic stale-lease synchronization",
+        )
+        for path in documents:
+            body = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertIn("advertisementに存在しないref", body)
+                self.assertIn("nonzero old OID", body)
+                self.assertIn("tests/container/test_git_protocol.py", body)
+                for stale_procedure in forbidden:
+                    self.assertNotIn(stale_procedure, body)
+
+        phase4_plan = documents[2].read_text(encoding="utf-8")
+        self.assertIn("real-hostでは個別にdiagnosticではない", phase4_plan)
+        self.assertIn("`PARTIAL`", phase4_plan)
+
+    def test_phase4_evidence_vocabulary_includes_fail(self) -> None:
+        documents = (
+            ROOT / "docs/superpowers/specs/2026-08-29-phase4-stabilization-release-design.md",
+            ROOT / "docs/phase4-stabilization-smoke-test.md",
+            ROOT / "docs/superpowers/plans/2026-08-29-phase4-stabilization-release.md",
+        )
+        for path in documents:
+            body = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertRegex(
+                    body,
+                    r"`PASS`[^\n]+`PARTIAL`[^\n]+`FAIL`[^\n]+`not run`",
+                )
+
+    def test_phase3_smoke_uses_current_broker_doctor_classifications(
+        self,
+    ) -> None:
+        smoke = (ROOT / "docs/phase3-github-broker-smoke-test.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "PASS  github-broker: local App and project repository binding valid",
+            smoke,
+        )
+        self.assertIn(
+            "PASS  github-broker: local App and legacy global repository binding valid",
+            smoke,
+        )
+        self.assertNotIn("local App and project policy valid", smoke)
+
     def test_normative_docs_require_create_only_broker_branches(self) -> None:
         documents = (
             ROOT / "README.md",

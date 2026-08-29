@@ -34,7 +34,7 @@ bin/agentctl doctor PROJECT --github-broker
 bin/agentctl doctor PROJECT --agent claude --github-broker
 ```
 
-必須checkがPASSし、`github-broker`が`local App and project policy valid`を報告することを確認します。このPASSだけでGitHub側設定済みとは判定しません。
+必須checkがPASSすることを確認します。explicit project bindingでは`PASS  github-broker: local App and project repository binding valid`、legacy global fallbackでは`PASS  github-broker: local App and legacy global repository binding valid`を期待します。このPASSだけでGitHub側設定済みとは判定しません。
 
 ## 3. Runtime credential非露出
 
@@ -84,7 +84,7 @@ brokerは既存branchへのupdateを拒否します。最初の作成push後、�
 - `main`などprotected branchへの直接push
 - ref delete
 - `refs/heads/`以外へのpush
-- stale lease
+- advertisementに存在しないref + nonzero old OIDのstale lease（`tests/container/test_git_protocol.py`の自動testで拒否）
 - advertised branchへのupdate（fast-forward／non-fast-forwardともに拒否）
 
 force-push、branch delete、main変更を実際のshared branchへ試しません。negative testはdisposable repository/branchと事前承認された手順だけで行います。2026-08-26の表にあるruleset確認は当時のdated observationであり、現在のcreate-only gateの前提ではありません。
