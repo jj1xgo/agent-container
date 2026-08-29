@@ -190,24 +190,61 @@ bin/agentctl superpowers update --all-projects
 
 ## GitHub App brokerを使う
 
-Phase 3のbroker modeでは、GitHub App private keyとinstallation tokenをhost側だけに置き、containerへはproject別Unix socketと一時的なcapabilityだけを渡します。exact repositoryのclone/fetch、作業branch push、`agent-github pr create/view/checks`、選択中repositoryの`agent-github issue list/view`だけを提供し、merge、release、generic API、Issueの作成・編集・comment・closeは提供しません。Issue readは固定schemaのbounded JSONだけを返し、credentialやGitHub raw responseを返しません。
+Phase 3のbroker modeでは、GitHub App private keyとinstallation tokenをhost側だけに置き、containerへはproject別Unix socketと一時的なcapabilityだけを渡します。exact repositoryのclone/fetch、新しい作業branchの作成push、`agent-github pr create/view/checks`、選択中repositoryの`agent-github issue list/view`だけを提供し、merge、release、generic API、Issueの作成・編集・comment・closeは提供しません。Issue readは固定schemaのbounded JSONだけを返し、credentialやGitHub raw responseを返しません。family Issue create/commentはこのshipped interfaceに含めず、開発repository brokerと権限を共有しない将来Phaseのfamily専用設計へ延期します。
+
+pushはcreate-onlyです。GitHubのadvertisementに存在しないunprotectedな`refs/heads/*`をold OIDがzeroの場合だけ作成でき、既存branchへのupdateを拒否します。これはfast-forwardとnon-fast-forwardの両方を含みます。追加作業は新しいbranchを作り、必要なら新しいPRを作成してください。
 
 このbrokerは`agent-container`自身のrepositoryだけでなく、`agent-container`が管理する他のprojectでも同じ仕組みを再実装せずに利用できます。broker用の設定やcredentialは対象repositoryにcommitせず、GitHub側のApp installationとhost側の`agent-container`管理領域に置きます。新しいrepositoryで利用するときは、そのrepositoryへのGitHub App installationとbrokerを有効にしたproject登録を個別に行います。
 
-GitHub Appのselected repository installation、最小permission、全branch force-push禁止ruleset、private stateを準備してから、project登録・doctor・runに`--github-broker`を明示します。
+GitHub Appのselected repository installation、最小permission、private stateを準備します。create-only制約はbroker自身が強制するため、有料planのrulesetやbranch protectionを前提にしません。shared installationはproduction and smoke selected repositoriesの両方を維持します。Do not deselect the production repository。each installation token narrows to exactly one project repository IDなので、App identityを共有してもtokenはprojectごとのexact repositoryだけに限定されます。新しいpolicy fileにはruleset markerを書きません。旧exact schemaの`ruleset_confirmed: true`はcompatibility inputとしてだけ読み取られ、create-only制約を有効化・緩和しません。
+
+smoke recoveryでrepository IDをinventoryするときは、shell tracingを先に無効化し、agent-container専用GitHub CLI stateだけで値を変数へ取り込みます。これはhost-only bounded REST inventoryであり、container brokerへgeneric APIを追加しません。`gh repo view --json id`のGraphQL node IDではなくRESTのnumeric `.id`を使います。値は表示せず、boolean markerを出した時点で停止します。
 
 ```bash
-bin/agentctl project add OWNER/REPOSITORY \
-  --handover-root "$HANDOVER_ROOT" \
-  --github-broker \
-  --protected-branch main \
-  --confirm-force-push-ruleset
-
-bin/agentctl doctor REPOSITORY --github-broker
-bin/agentctl run REPOSITORY --github-broker
+set +x
+set -eu
+smoke_repository_id=$(
+  GH_CONFIG_DIR="$AGENT_CONTAINER_HOME/gh" \
+    gh api repos/jj1xgo/agent-container-smoke --jq .id
+)
+case "$smoke_repository_id" in
+  ''|*[!0-9]*) exit 1 ;;
+esac
+test "$smoke_repository_id" -gt 0 || exit 1
+printf '%s\n' 'smoke_repository_id_valid=true'
+# STOP: fresh approval required before registration.
 ```
 
-broker failureから専用`gh` credentialへ自動fallbackしません。設定と実host検証の全手順は[Phase 3 GitHub App broker運用ガイド](docs/phase3-github-broker.md)を参照してください。
+fresh approvalはexact smoke repository、project ID、legacy policyのatomic upgrade、broker clone、project metadata作成、sibling manifest保持を対象にします。承認後だけ、別blockで一度登録します。
+
+```bash
+if ! bin/agentctl project add jj1xgo/agent-container-smoke \
+  --project agent-container-smoke \
+  --handover-root "$HANDOVER_ROOT" \
+  --github-broker \
+  --github-repository-id "$smoke_repository_id" \
+  --default-branch main \
+  --protected-branch main; then
+  unset smoke_repository_id
+  exit 1
+fi
+unset smoke_repository_id
+# shell tracing may resume only after the ID is unset
+```
+
+IDはproject policyへ保存しますが、docs、broker audit、container output／mountへ書きません。fixture準備などのhost `gh` administrationはcontainer broker operationsとは別の承認・記録対象です。broker failureはhost `gh`、専用`gh` credential、environment token、SSH agent、host credential helperへのfallbackを決して起動しません。設定と実host検証の全手順は[Phase 3 GitHub App broker運用ガイド](docs/phase3-github-broker.md)を参照してください。
+
+## 開発時のlint
+
+Codex、Claude Code、local developer、CIは同じ`bin/lint` wrapperを使います。最初にpinned toolをinstallしてから実行してください。
+
+```bash
+python3 -m pip install --disable-pip-version-check --no-deps \
+  -r requirements-lint.txt
+bin/lint
+```
+
+`bin/lint`は`src`と`tests`のcheck-onlyで、formatやauto-fixを行わず、実行中にnetwork accessを必要としません。
 
 ## Imageの更新
 
@@ -236,7 +273,7 @@ project固有のDebian packageやNode.js versionは、対象repositoryの`.agent
 | `bin/agentctl doctor PROJECT [--agent codex\|claude\|all]` | 起動前の状態をread-onlyで診断 |
 | `bin/agentctl run PROJECT [--agent codex\|claude]` | agentを起動 |
 | `bin/agentctl stats PROJECT` | 実行中agent containerのsecret-free resource snapshotを表示 |
-| `bin/agentctl project add ... --github-broker --confirm-force-push-ruleset` | GitHub App broker modeでprojectを登録 |
+| `bin/agentctl project add ... --github-broker --github-repository-id ID` | project-scoped repository bindingでGitHub App broker modeを登録 |
 | `bin/agentctl doctor PROJECT --github-broker` | local broker stateとproject policyを診断 |
 | `bin/agentctl run PROJECT --github-broker` | credential-free Git/PR broker付きでagentを起動 |
 
@@ -252,7 +289,7 @@ project固有のDebian packageやNode.js versionは、対象repositoryの`.agent
 
 runtimeはrootless Podman、read-only root filesystem、capability削除、`no-new-privileges`、限定したmountを使用します。一方、外向きnetworkはdomain allowlistされていません。containerは被害範囲を狭める境界であり、agentへ渡したcredentialの完全な秘密保持を保証するものではありません。
 
-`main`への直接push、force-push、merge、release、repository削除は標準操作に含みません。変更は作業branchとPRでreviewしてください。
+`main`への直接push、既存branchの更新、merge、release、repository削除は標準操作に含みません。変更ごとに新しい作業branchを作り、必要なら新しいPRでreviewしてください。
 
 ## 詳細資料
 

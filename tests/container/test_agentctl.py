@@ -997,6 +997,35 @@ class AgentCtlProjectTest(unittest.TestCase):
         app.chmod(0o600)
         key.chmod(0o600)
 
+    def _interrupted_broker_state(
+        self,
+        root: Path,
+        *,
+        repository_id: int | None = None,
+        default_branch: str = "main",
+        protected_branches: tuple[str, ...] = ("main",),
+    ) -> tuple[Path, Path]:
+        self._broker_app_state(root)
+        project_dir = root / "projects/agent-container"
+        project_dir.mkdir(parents=True, mode=0o700)
+        project_dir.chmod(0o700)
+        (root / "projects").chmod(0o700)
+        policy_path = project_dir / "github-broker.json"
+        payload = {
+            "repository": "jj1xgo/agent-container",
+            "default_branch": default_branch,
+            "protected_branches": list(protected_branches),
+            "ruleset_confirmed": True,
+        }
+        if repository_id is not None:
+            payload["repository_id"] = repository_id
+        policy_path.write_text(json.dumps(payload), encoding="utf-8")
+        policy_path.chmod(0o600)
+        sibling = project_dir / "smoke-fixtures.json"
+        sibling.write_bytes(b'{"repository":"credential-free"}\n')
+        sibling.chmod(0o600)
+        return policy_path, sibling
+
     def test_project_add_clones_through_broker_without_gh_state(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp) / "state"
@@ -1026,7 +1055,7 @@ class AgentCtlProjectTest(unittest.TestCase):
                         "--handover-root", str(handovers),
                         "--github-broker", "--protected-branch", "main",
                         "--protected-branch", "master",
-                        "--confirm-force-push-ruleset",
+                        "--github-repository-id", "456",
                     ],
                     environment={"AGENT_CONTAINER_HOME": str(root)},
                     runner=runner,
@@ -1045,8 +1074,79 @@ class AgentCtlProjectTest(unittest.TestCase):
                 (root / "projects/agent-container/github-broker.json").read_text()
             )
             self.assertEqual(policy["protected_branches"], ["main", "master"])
+            self.assertEqual(policy["repository_id"], 456)
             create.assert_called_once()
             context.__exit__.assert_called_once()
+
+    def test_project_add_rejects_invalid_github_repository_ids_before_runner_or_state(
+        self,
+    ) -> None:
+        for repository_id in ("0", "-1", "true", "1.0", " "):
+            with self.subTest(repository_id=repository_id), TemporaryDirectory() as temp:
+                root = Path(temp) / "state"
+                handovers = Path(temp) / "handovers"
+                (handovers / "agent-container").mkdir(parents=True)
+                calls = []
+
+                with self.assertRaises(SystemExit):
+                    main(
+                        [
+                            "project", "add", "jj1xgo/agent-container",
+                            "--handover-root", str(handovers),
+                            "--github-broker", "--github-repository-id", repository_id,
+                        ],
+                        environment={"AGENT_CONTAINER_HOME": str(root)},
+                        runner=lambda spec: calls.append(spec),
+                    )
+
+                self.assertEqual(calls, [])
+                self.assertFalse(root.exists())
+
+    def test_project_add_rejects_github_repository_id_without_broker_before_state(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            handovers = Path(temp) / "handovers"
+            (handovers / "agent-container").mkdir(parents=True)
+            calls = []
+
+            result = main(
+                [
+                    "project", "add", "jj1xgo/agent-container",
+                    "--handover-root", str(handovers),
+                    "--github-repository-id", "456",
+                ],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec),
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(calls, [])
+            self.assertFalse(root.exists())
+
+    def test_project_add_requires_github_repository_id_for_new_broker_state(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            handovers = Path(temp) / "handovers"
+            (handovers / "agent-container").mkdir(parents=True)
+            calls = []
+
+            result = main(
+                [
+                    "project", "add", "jj1xgo/agent-container",
+                    "--handover-root", str(handovers),
+                    "--github-broker",
+                ],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec),
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(calls, [])
+            self.assertFalse(root.exists())
 
     def test_project_add_broker_start_failure_never_clones_or_falls_back(self) -> None:
         with TemporaryDirectory() as temp:
@@ -1064,7 +1164,7 @@ class AgentCtlProjectTest(unittest.TestCase):
                     [
                         "project", "add", "jj1xgo/agent-container",
                         "--handover-root", str(handovers),
-                        "--github-broker", "--confirm-force-push-ruleset",
+                        "--github-broker", "--github-repository-id", "456",
                     ],
                     environment={"AGENT_CONTAINER_HOME": str(root)},
                     runner=lambda spec: calls.append(spec)
@@ -1079,6 +1179,210 @@ class AgentCtlProjectTest(unittest.TestCase):
             self.assertFalse(
                 (root / "projects/agent-container/project.json").exists()
             )
+
+    def test_project_add_preserves_completed_matching_legacy_broker_project(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            handovers = Path(temp) / "handovers"
+            (handovers / "agent-container").mkdir(parents=True)
+            self._broker_app_state(root)
+            project_dir = root / "projects/agent-container"
+            project_dir.mkdir(parents=True, mode=0o700)
+            (root / "projects").chmod(0o700)
+            workspace = root / "workspaces/agent-container"
+            (workspace / ".git").mkdir(parents=True)
+            workspace.parent.chmod(0o700)
+            record = ProjectRecord(
+                Repository.parse("jj1xgo/agent-container"), handovers.resolve()
+            )
+            record.write(project_dir / "project.json")
+            policy_path = project_dir / "github-broker.json"
+            policy_path.write_text(
+                json.dumps(
+                    {
+                        "repository": "jj1xgo/agent-container",
+                        "default_branch": "main",
+                        "protected_branches": ["main"],
+                        "ruleset_confirmed": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            policy_path.chmod(0o600)
+            before = policy_path.read_bytes()
+
+            result = main(
+                [
+                    "project", "add", "jj1xgo/agent-container",
+                    "--handover-root", str(handovers),
+                    "--github-broker",
+                ],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: successful_podman_result(spec),
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(policy_path.read_bytes(), before)
+
+    def test_project_add_resumes_exact_interrupted_legacy_broker_registration(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            handovers = Path(temp) / "handovers"
+            (handovers / "agent-container").mkdir(parents=True)
+            policy_path, sibling = self._interrupted_broker_state(root)
+            original_sibling = sibling.read_bytes()
+            calls = []
+            broker = BrokerRuntimeMount(
+                root / "github-broker/run/agent-container/session",
+                Repository.parse("jj1xgo/agent-container"),
+            )
+
+            def runner(spec):
+                calls.append(spec)
+                if "clone" in spec.argv:
+                    (root / "workspaces/agent-container/.git").mkdir(parents=True)
+                return successful_podman_result(spec)
+
+            with patch(
+                "agent_container.agentctl.UploadPackBrokerRuntime.create"
+            ) as create:
+                create.return_value.__enter__.return_value = broker
+                result = main(
+                    [
+                        "project", "add", "jj1xgo/agent-container",
+                        "--handover-root", str(handovers),
+                        "--github-broker", "--github-repository-id", "123",
+                    ],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    stderr=StringIO(),
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                json.loads(policy_path.read_text()),
+                {
+                    "repository": "jj1xgo/agent-container",
+                    "repository_id": 123,
+                    "default_branch": "main",
+                    "protected_branches": ["main"],
+                },
+            )
+            self.assertEqual(sibling.read_bytes(), original_sibling)
+            self.assertEqual(
+                sum("clone" in call.argv for call in calls),
+                1,
+            )
+            record = ProjectRecord.read(
+                root / "projects/agent-container/project.json"
+            )
+            self.assertEqual(record.repository.slug, "jj1xgo/agent-container")
+            create.assert_called_once()
+
+    def test_project_add_interrupted_preflight_failure_preserves_legacy_policy(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            handovers = Path(temp) / "handovers"
+            (handovers / "agent-container").mkdir(parents=True)
+            policy_path, sibling = self._interrupted_broker_state(root)
+            original_policy = policy_path.read_bytes()
+            original_sibling = sibling.read_bytes()
+            calls = []
+
+            def failed_preflight(spec):
+                calls.append(spec)
+                return subprocess.CompletedProcess(spec.argv, 19)
+
+            result = main(
+                [
+                    "project", "add", "jj1xgo/agent-container",
+                    "--handover-root", str(handovers),
+                    "--github-broker", "--github-repository-id", "123",
+                ],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=failed_preflight,
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 19)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(policy_path.read_bytes(), original_policy)
+            self.assertEqual(sibling.read_bytes(), original_sibling)
+            self.assertFalse(
+                (root / "projects/agent-container/project.json").exists()
+            )
+            self.assertFalse((root / "workspaces/agent-container").exists())
+
+    def test_project_add_rejects_interrupted_legacy_upgrade_shape_mismatches(
+        self,
+    ) -> None:
+        cases = (
+            "project-file",
+            "workspace",
+            "workspace-symlink",
+            "policy",
+            "bound-id",
+        )
+        for case in cases:
+            with self.subTest(case=case), TemporaryDirectory() as temp:
+                root = Path(temp) / "state"
+                handovers = Path(temp) / "handovers"
+                (handovers / "agent-container").mkdir(parents=True)
+                existing_id = 456 if case == "bound-id" else None
+                policy_path, _ = self._interrupted_broker_state(
+                    root,
+                    repository_id=existing_id,
+                )
+                original_policy = policy_path.read_bytes()
+                project_dir = root / "projects/agent-container"
+                workspace = root / "workspaces/agent-container"
+                if case == "project-file":
+                    ProjectRecord(
+                        Repository.parse("jj1xgo/agent-container"),
+                        handovers.resolve(),
+                    ).write(project_dir / "project.json")
+                elif case == "workspace":
+                    (workspace / ".git").mkdir(parents=True)
+                    workspace.parent.chmod(0o700)
+                elif case == "workspace-symlink":
+                    target = Path(temp) / "workspace-target"
+                    target.mkdir()
+                    workspace.parent.mkdir(parents=True, mode=0o700)
+                    workspace.parent.chmod(0o700)
+                    workspace.symlink_to(target, target_is_directory=True)
+                arguments = [
+                    "project", "add", "jj1xgo/agent-container",
+                    "--handover-root", str(handovers),
+                    "--github-broker", "--github-repository-id", "123",
+                ]
+                if case == "policy":
+                    arguments.extend(
+                        ["--default-branch", "master", "--protected-branch", "master"]
+                    )
+                calls = []
+
+                result = main(
+                    arguments,
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    stderr=StringIO(),
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertEqual(policy_path.read_bytes(), original_policy)
 
     def test_project_add_records_repository_after_clone(self) -> None:
         with TemporaryDirectory() as temp:
@@ -2622,6 +2926,63 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 json.dumps(
                     {
                         "repository": "jj1xgo/agent-container",
+                        "repository_id": 789,
+                        "default_branch": "main",
+                        "protected_branches": ["main", "master"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            for path in (app, key, policy):
+                path.chmod(0o600)
+            output = StringIO()
+
+            result = main(
+                ["doctor", "agent-container", "--github-broker"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=self._successful_doctor_runner,
+                git_remote_reader=lambda path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                stdout=output,
+            )
+
+            rendered = output.getvalue()
+            self.assertEqual(result, 0)
+            self.assertIn(
+                "PASS  github-broker: local App and project repository binding valid",
+                rendered,
+            )
+            self.assertNotIn("gh-hosts", rendered)
+            self.assertNotIn("private-key-marker", rendered)
+            self.assertNotIn("789", rendered)
+            self.assertNotIn(str(root), rendered)
+
+    def test_doctor_github_broker_reports_legacy_global_binding(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            (root / "gh/hosts.yml").unlink()
+            (root / "gh").rmdir()
+            broker_root = root / "github-broker"
+            broker_root.mkdir(mode=0o700)
+            app = broker_root / "app.json"
+            key = broker_root / "private-key.pem"
+            policy = root / "projects/agent-container/github-broker.json"
+            app.write_text(
+                json.dumps(
+                    {
+                        "client_id": "Iv1abcdefghijk",
+                        "installation_id": 123,
+                        "repository_id": 456,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            key.write_text("private-key-marker", encoding="utf-8")
+            policy.write_text(
+                json.dumps(
+                    {
+                        "repository": "jj1xgo/agent-container",
                         "default_branch": "main",
                         "protected_branches": ["main", "master"],
                         "ruleset_confirmed": True,
@@ -2646,10 +3007,12 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(result, 0)
             self.assertIn(
-                "PASS  github-broker: local App and project policy valid", rendered
+                "PASS  github-broker: local App and legacy global repository binding valid",
+                rendered,
             )
             self.assertNotIn("gh-hosts", rendered)
             self.assertNotIn("private-key-marker", rendered)
+            self.assertNotIn("456", rendered)
             self.assertNotIn(str(root), rendered)
 
     def test_doctor_claude_reports_authenticated_launcher_status(self) -> None:
@@ -3707,6 +4070,29 @@ class AgentCtlParserTest(unittest.TestCase):
         self.assertEqual(migrate.source, Path("/old/.claude"))
         self.assertEqual(migrate.plugins, ["issue-ops@local-marketplace"])
         self.assertFalse(migrate.apply)
+
+    def test_broker_project_add_parses_positive_repository_id(self) -> None:
+        arguments = parser().parse_args(
+            [
+                "project", "add", "jj1xgo/agent-container-smoke",
+                "--handover-root", "/handovers",
+                "--github-broker", "--github-repository-id", "123",
+            ]
+        )
+
+        self.assertEqual(arguments.github_repository_id, 123)
+
+    def test_broker_project_add_rejects_removed_ruleset_confirmation_flag(self) -> None:
+        with self.assertRaises(SystemExit):
+            parser().parse_args(
+                [
+                    "project", "add", "jj1xgo/agent-container",
+                    "--handover-root", "/handovers",
+                    "--github-broker",
+                    "--github-repository-id", "123",
+                    "--confirm-force-push-ruleset",
+                ]
+            )
 
 
 if __name__ == "__main__":

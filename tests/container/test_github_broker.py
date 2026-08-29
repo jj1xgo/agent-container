@@ -212,6 +212,39 @@ class BrokerSessionTest(unittest.TestCase):
         self.assertNotIn(self.session.run_id, body)
         self.assertEqual(stat.S_IMODE(self.session.audit_file.stat().st_mode), 0o600)
 
+    def test_bound_repository_id_is_absent_from_audit_records(self) -> None:
+        repository_id = 987_654_321
+        policy = BrokerPolicy.create(
+            project_id="smoke",
+            repository="jj1xgo/agent-container-smoke",
+            repository_id=repository_id,
+            default_branch="main",
+            protected_branches=("main",),
+            require_repository_id=True,
+        )
+        session = BrokerSession.create(self.root, policy)
+        try:
+            session.audit(operation="git-upload-pack", status="ok")
+            body = session.audit_file.read_text(encoding="utf-8")
+            record = json.loads(body)
+
+            self.assertNotIn(str(repository_id), body)
+            self.assertEqual(
+                set(record),
+                {
+                    "timestamp",
+                    "run",
+                    "project",
+                    "repository",
+                    "operation",
+                    "status",
+                    "bytes",
+                    "policy_version",
+                },
+            )
+        finally:
+            session.close()
+
     def test_audits_issue_number_separately(self) -> None:
         self.session.audit(operation="issue-view", status="ok", issue_number=12)
         record = json.loads(self.session.audit_file.read_text(encoding="utf-8"))

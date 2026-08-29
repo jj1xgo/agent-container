@@ -23,7 +23,7 @@ Codexを主対象としつつ、Claude Codeも早期から基本的な開発作�
 - Codexの対話実行、編集、テスト、commit、作業ブランチへのpush、PR作成
 - Claude Codeの基本的な対話実行と同等のGit作業
 - 自分の開発リポジトリへの読み書き
-- familyリポジトリのコード読み取り、Issue作成・閲覧・コメント
+- 選択中repositoryのIssue list/viewによるread-only access
 - エージェント専用の認証・設定・履歴の永続化
 - Codexのhandover運用、コンテキストと利用量の可視化
 
@@ -101,10 +101,10 @@ Codex用のstatusline、handover Skill、hooksの雛形は、初期段階では`
 
 ### familyリポジトリ
 
-- 用途: コードread、Issue read/create/comment
-- 禁止: コードwrite、push、merge、release、管理設定変更
-- 方式: ホスト側または外部のGitHub MCP/broker
-- family用PATはbrokerだけが保持し、生値をコンテナやモデルcontextへ渡さない
+- 2026-08-29のscope変更前の初期案では、用途をコードread、Issue read/create/commentとしていた。この権限分離の歴史的な狙いは、family用credentialを開発repositoryのcredentialと混同しないことにある。
+- 現行のshipped interfaceは、選択中repositoryのIssue list/viewだけを提供するread-only brokerである。family Issue create/commentは提供しない。
+- コードwrite、push、merge、release、管理設定変更は提供しない。
+- credentialはhost側brokerだけが保持し、生値をcontainerやmodel contextへ渡さない。
 
 用途の違うPATを同じ環境変数名で切り替える設計にはしない。ツール境界そのものを分け、取り違えを防ぐ。
 
@@ -180,7 +180,7 @@ CPU、メモリ、ディスク容量、コンテナ稼働時間はCodexの会話
 1. 既存の認証、global設定、plugins、hooks、project固有設定を分類する。
 2. 秘密情報を除外し、必要なものだけagent-container専用領域へcopyする。
 3. まず1リポジトリでCodexを試す。
-4. clone、編集、テスト、push、PR、family Issue操作を個別に検証する。
+4. clone、編集、テスト、push、PR、選択中repositoryのread-only Issue list/viewを個別に検証する。family Issue create/commentは2026-08-29に将来Phaseのfamily専用設計へ延期しており、この移行の受け入れ操作には含めない。
 5. Claude Codeの基本実行を同じworkspaceモデルで検証する。
 6. 問題がなければ対象リポジトリを増やす。
 
@@ -208,7 +208,7 @@ CPU、メモリ、ディスク容量、コンテナ稼働時間はCodexの会話
 - 専用CODEX_HOMEとproject state
 - GitHubからのisolated clone
 - 作業ブランチ、test、push、PR
-- 外部MCP経由のfamily read/Issue操作
+- 選択中repositoryのread-only Issue list/view
 - handover Skill、SessionStart hook、推奨statusline
 
 ### Phase 2: Claude Code基本対応
@@ -224,6 +224,10 @@ CPU、メモリ、ディスク容量、コンテナ稼働時間はCodexの会話
 - container resource監視
 - 必要性が確認できた場合のみ英語文書や追加platformを拡張
 
+#### 2026-08-29 scope変更
+
+初期案に含めたfamily Issue create/commentは、開発repository brokerと権限を共有せず、将来Phaseのfamily専用設計へ延期する。現行interfaceは選択中repositoryのIssue list/viewだけを提供する。domain allowlist／egress controlもPhase 4には含めず、既知WARNを維持して独立した将来設計とする。
+
 開発GitHub認証brokerの具体的なtrust boundary、Git transport、GitHub App permission、migrationと受け入れ条件は[Phase 3開発GitHub認証broker設計](2026-08-25-phase-3-github-broker-design.md)で定義する。
 
 ## 12. 初期受け入れ条件
@@ -231,7 +235,7 @@ CPU、メモリ、ディスク容量、コンテナ稼働時間はCodexの会話
 - ホストの実`~/.codex`、`~/.claude`、開発workspaceをread-writeマウントしない
 - project Aの履歴・cache・設定をproject Bから通常参照できない
 - 自分の検証用repositoryで作業ブランチをpushし、PRを作成できる
-- family用credentialをモデルcontextへ出さず、許可されたread/Issue操作だけを実行できる
+- 選択中repositoryのIssue list/view broker credentialをモデルcontextへ出さず、read-only固定操作だけを実行できる。family Issue create/commentは将来Phaseのfamily専用設計まで提供しない。
 - `main`直接push、force-push、merge、release、削除が初期標準フローに含まれない
 - Codexを再起動して同じ会話をresumeできる
 - 別セッションが最新handoverを発見し、必要な本文を読める

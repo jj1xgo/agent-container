@@ -25,6 +25,41 @@ class BrokerPolicyTest(unittest.TestCase):
             frozenset({"main", "release/stable"}),
         )
 
+    def test_policy_accepts_positive_repository_id(self) -> None:
+        policy = BrokerPolicy.create(
+            project_id="smoke",
+            repository="jj1xgo/agent-container-smoke",
+            repository_id=123,
+            default_branch="main",
+            protected_branches=("main",),
+        )
+
+        self.assertEqual(policy.repository_id, 123)
+
+    def test_policy_rejects_invalid_repository_ids(self) -> None:
+        for value in (True, False, 0, -1, "123", None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                BrokerPolicy.create(
+                    project_id="smoke",
+                    repository="jj1xgo/agent-container-smoke",
+                    repository_id=value,
+                    default_branch="main",
+                    protected_branches=("main",),
+                    require_repository_id=True,
+                )
+
+    def test_policy_accepts_missing_repository_id_only_for_legacy_policy(self) -> None:
+        policy = BrokerPolicy.create(
+            project_id="smoke",
+            repository="jj1xgo/agent-container-smoke",
+            repository_id=None,
+            default_branch="main",
+            protected_branches=("main",),
+            require_repository_id=False,
+        )
+
+        self.assertIsNone(policy.repository_id)
+
     def test_only_fixed_operations_are_allowed(self) -> None:
         for operation in (
             "git-upload-pack",

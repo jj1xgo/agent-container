@@ -249,10 +249,9 @@ def gate_receive_pack_commands(
         if new_oid == zero_oid:
             raise ValueError("Git ref deletion is not allowed")
         advertised_oid = advertisement.refs.get(ref)
-        if advertised_oid is None:
-            if old_oid != zero_oid:
-                raise ValueError("Git push lease does not match")
-        elif old_oid != advertised_oid:
+        if advertised_oid is not None:
+            raise ValueError("Git push ref already exists")
+        if old_oid != zero_oid:
             raise ValueError("Git push lease does not match")
         updates.append(RefUpdate(old_oid=old_oid, new_oid=new_oid, ref=ref))
     return ReceivePackGate(

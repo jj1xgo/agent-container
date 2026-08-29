@@ -10,8 +10,8 @@
 - containerの環境、filesystem、process argv、`/proc/*/environ`からcredentialを読めた。
 - exact repository以外へaccessできた。
 - protected branchへのpush、ref delete、generic API、merge、releaseがbroker経由で可能だった。
+- advertisement済みの既存branchへのupdateがfast-forwardを含めてbrokerを通過した。
 - broker failureからlegacy `gh` credentialへfallbackした。
-- GitHub側で全branch force-push禁止rulesetを確認できない。
 
 credential本文を表示しないでください。検証結果にはboolean、exit status、operation名、repository slug、PR番号などsecret-free metadataだけを記録します。
 
@@ -21,7 +21,7 @@ credential本文を表示しないでください。検証結果にはboolean、
 - 対象image、project、workspace、branch、`git status`を記録する。
 - GitHub Appが`Only select repositories`でexact repositoryだけへinstallされている。
 - App permissionがMetadata read、Contents write、Pull requests write、Checks read、Issues readだけである。Issue permission更新後、GitHub側でinstallation再承認が必要な場合は完了している。
-- 全`refs/heads/**`へのforce push禁止rulesetがactiveである。
+- broker policyがcreate-onlyであり、有料planのrulesetやbranch protectionを前提にしない。
 - `$AGENT_CONTAINER_HOME/github-broker/app.json`と`private-key.pem`が通常file、current user所有、非symlink、`0600`である。
 - 親directoryが通常directory、current user所有、非symlink、`0700`である。
 
@@ -34,7 +34,7 @@ bin/agentctl doctor PROJECT --github-broker
 bin/agentctl doctor PROJECT --agent claude --github-broker
 ```
 
-必須checkがPASSし、`github-broker`が`local App and project policy valid`を報告することを確認します。このPASSだけでGitHub側設定済みとは判定しません。
+必須checkがPASSすることを確認します。explicit project bindingでは`PASS  github-broker: local App and project repository binding valid`、legacy global fallbackでは`PASS  github-broker: local App and legacy global repository binding valid`を期待します。このPASSだけでGitHub側設定済みとは判定しません。
 
 ## 3. Runtime credential非露出
 
@@ -69,7 +69,7 @@ git fetch origin
 
 ## 5. 作業branch push
 
-mainへ直接pushしないでください。disposable commitを専用branchへ作り、通常pushを確認します。
+mainへ直接pushしないでください。advertisementに存在しない一意な新しいbranchへdisposable commitを一度だけpushし、old OID zeroの作成が成功することを確認します。
 
 ```bash
 git switch -c test/github-broker-smoke-UNIQUE
@@ -77,15 +77,17 @@ git commit --allow-empty -m "test: GitHub broker smoke"
 git push -u origin test/github-broker-smoke-UNIQUE
 ```
 
-次のnegative操作がGitHub POST前またはGitHub rulesetで失敗することを確認します。
+brokerは既存branchへのupdateを拒否します。最初の作成push後、同じbranchへのfast-forwardとnon-fast-forwardを含むすべてのupdateがGitHub POST前に失敗することを確認します。追加作業は別の新しいbranchを使い、必要なら新しいPRを作ります。
+
+次のnegative操作がGitHub POST前に失敗することも確認します。
 
 - `main`などprotected branchへの直接push
 - ref delete
 - `refs/heads/`以外へのpush
-- stale lease
-- non-fast-forward push（全branch rulesetで拒否）
+- advertisementに存在しないref + nonzero old OIDのstale lease（`tests/container/test_git_protocol.py`の自動testで拒否）
+- advertised branchへのupdate（fast-forward／non-fast-forwardともに拒否）
 
-force-push、branch delete、main変更を実際のshared branchへ試しません。negative testはdisposable repository/branchと事前承認された手順だけで行います。
+force-push、branch delete、main変更を実際のshared branchへ試しません。negative testはdisposable repository/branchと事前承認された手順だけで行います。2026-08-26の表にあるruleset確認は当時のdated observationであり、現在のcreate-only gateの前提ではありません。
 
 ## 6. Pull Request固定操作
 

@@ -2,9 +2,7 @@ from base64 import urlsafe_b64decode
 from datetime import datetime, timezone
 import http.client
 import json
-import os
 from pathlib import Path
-import stat
 import subprocess
 import tempfile
 import unittest

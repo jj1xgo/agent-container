@@ -1,8 +1,6 @@
 from io import BytesIO
 import json
-import os
 from pathlib import Path
-import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -27,7 +25,6 @@ from agent_container.github_broker_transport import handle_pull_request_connecti
 from agent_container.github_broker_transport import handle_upload_pack_connection
 from agent_container.github_broker_transport import read_broker_capability
 from agent_container.github_issue import MAX_ISSUE_RESPONSE_BYTES
-from agent_container.state import Repository
 
 
 class Duplex:
@@ -253,7 +250,9 @@ def receive_advertisement() -> bytes:
     )
 
 
-def receive_request(ref: str = "refs/heads/feat/work", old: str = OLD) -> bytes:
+def receive_request(
+    ref: str = "refs/heads/feat/new-work", old: str = "0" * 40
+) -> bytes:
     return (
         pkt(
             f"{old} {NEW} {ref}".encode()

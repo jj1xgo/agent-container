@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from base64 import b64encode
-from typing import BinaryIO, Callable, Iterable, Mapping, Protocol
+from typing import Callable, Iterable, Mapping, Protocol
 import urllib.error
 import urllib.request
 

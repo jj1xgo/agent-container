@@ -1,8 +1,10 @@
 # Phase 3 GitHub broker実装計画
 
-**Goal:** 開発用GitHub credentialをcontainerへ渡さず、project限定のGit read、作業branch push、PR create/view/checksをhost broker経由で提供する。
+**Goal:** 開発用GitHub credentialをcontainerへ渡さず、project限定のGit read、新しい作業branchの作成push、PR create/view/checksをhost broker経由で提供する。
 
-**Architecture:** runtimeごと・projectごとのUnix socket brokerをhostで起動する。containerのremote helperと固定schema clientだけがsocketを利用し、GitHub App private keyとinstallation tokenはbroker memoryに限定する。Git pushはreceive-pack commandをbrokerが検査し、non-fast-forward拒否は必須GitHub rulesetと組み合わせる。
+**Architecture:** runtimeごと・projectごとのUnix socket brokerをhostで起動する。containerのremote helperと固定schema clientだけがsocketを利用し、GitHub App private keyとinstallation tokenはbroker memoryに限定する。Git pushはreceive-pack commandをbrokerが検査し、advertisementに存在しないunprotected branchをold OID zeroで作る場合だけ許可する。既存branchへのupdateを拒否し、fast-forwardもnon-fast-forwardもGitHubへ送信しない。追加作業は新しいbranchと必要に応じた新しいPRを使う。
+
+2026-08-29 security correction: create-only enforcementはbrokerの不変条件であり、GitHub rulesetや有料planのbranch protectionに依存しない。新しいpolicyにruleset markerはなく、旧exact true-marker schemaだけをcompatibility inputとして読む。doctorはpaid GitHub settingを確認済みとはclaimしない。
 
 **Tech Stack:** Python 3.11+標準library、Unix domain socket、HTTP/TLS、Git remote-helper protocol、Git pkt-line、GitHub App REST API、`unittest`、rootless Podman。
 
@@ -43,7 +45,7 @@
 2. SHA-1とSHA-256 object formatをadvertisementから確定し、OID長を固定する。
 3. receive-packの`old OID SP new OID SP ref`と最初のcapability列をparseする。
 4. delete、protected ref、`refs/heads/`外、duplicate ref、ref数超過、未知capabilityを拒否する。
-5. advertisementのexact old OIDとのlease一致を検査する。
+5. retained stale-lease ruleとして、advertisementに存在しないrefへnonzero old OIDを指定したcommandを拒否する。advertised refはcreate-onlyの存在gateで拒否されるため、このcaseは`tests/container/test_git_protocol.py`で自動検証する。
 6. packfile本文はparseせず、command検査成功後だけbounded streamへ移行するstate machineをtestする。
 
 ## 4. Slice C: broker sessionとUnix socket
@@ -145,7 +147,7 @@
 
 ### Steps
 
-1. GitHub App作成、selected repository installation、permission、全branch force-push禁止rulesetのmanual setupを記載する。
+1. GitHub App作成、selected repository installation、permissionとbrokerのcreate-only制約を記載する。
 2. broker切替と明示rollbackを記載する。
 3. unit suiteへbroker testを追加し、credential不要のlocal socket integration testをCIへ追加する。
 4. gated実host testでclone、fetch、push、PR、negative operation、token非露出を確認する。
