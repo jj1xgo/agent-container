@@ -1026,6 +1026,7 @@ class AgentCtlProjectTest(unittest.TestCase):
                         "--handover-root", str(handovers),
                         "--github-broker", "--protected-branch", "main",
                         "--protected-branch", "master",
+                        "--github-repository-id", "456",
                         "--confirm-force-push-ruleset",
                     ],
                     environment={"AGENT_CONTAINER_HOME": str(root)},
@@ -1045,8 +1046,79 @@ class AgentCtlProjectTest(unittest.TestCase):
                 (root / "projects/agent-container/github-broker.json").read_text()
             )
             self.assertEqual(policy["protected_branches"], ["main", "master"])
+            self.assertEqual(policy["repository_id"], 456)
             create.assert_called_once()
             context.__exit__.assert_called_once()
+
+    def test_project_add_rejects_invalid_github_repository_ids_before_runner_or_state(
+        self,
+    ) -> None:
+        for repository_id in ("0", "-1", "true", "1.0", " "):
+            with self.subTest(repository_id=repository_id), TemporaryDirectory() as temp:
+                root = Path(temp) / "state"
+                handovers = Path(temp) / "handovers"
+                (handovers / "agent-container").mkdir(parents=True)
+                calls = []
+
+                with self.assertRaises(SystemExit):
+                    main(
+                        [
+                            "project", "add", "jj1xgo/agent-container",
+                            "--handover-root", str(handovers),
+                            "--github-broker", "--github-repository-id", repository_id,
+                        ],
+                        environment={"AGENT_CONTAINER_HOME": str(root)},
+                        runner=lambda spec: calls.append(spec),
+                    )
+
+                self.assertEqual(calls, [])
+                self.assertFalse(root.exists())
+
+    def test_project_add_rejects_github_repository_id_without_broker_before_state(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            handovers = Path(temp) / "handovers"
+            (handovers / "agent-container").mkdir(parents=True)
+            calls = []
+
+            result = main(
+                [
+                    "project", "add", "jj1xgo/agent-container",
+                    "--handover-root", str(handovers),
+                    "--github-repository-id", "456",
+                ],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec),
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(calls, [])
+            self.assertFalse(root.exists())
+
+    def test_project_add_requires_github_repository_id_for_new_broker_state(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            handovers = Path(temp) / "handovers"
+            (handovers / "agent-container").mkdir(parents=True)
+            calls = []
+
+            result = main(
+                [
+                    "project", "add", "jj1xgo/agent-container",
+                    "--handover-root", str(handovers),
+                    "--github-broker", "--confirm-force-push-ruleset",
+                ],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec),
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(calls, [])
+            self.assertFalse(root.exists())
 
     def test_project_add_broker_start_failure_never_clones_or_falls_back(self) -> None:
         with TemporaryDirectory() as temp:
@@ -1064,7 +1136,8 @@ class AgentCtlProjectTest(unittest.TestCase):
                     [
                         "project", "add", "jj1xgo/agent-container",
                         "--handover-root", str(handovers),
-                        "--github-broker", "--confirm-force-push-ruleset",
+                        "--github-broker", "--github-repository-id", "456",
+                        "--confirm-force-push-ruleset",
                     ],
                     environment={"AGENT_CONTAINER_HOME": str(root)},
                     runner=lambda spec: calls.append(spec)
@@ -1079,6 +1152,51 @@ class AgentCtlProjectTest(unittest.TestCase):
             self.assertFalse(
                 (root / "projects/agent-container/project.json").exists()
             )
+
+    def test_project_add_preserves_completed_matching_legacy_broker_project(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            handovers = Path(temp) / "handovers"
+            (handovers / "agent-container").mkdir(parents=True)
+            self._broker_app_state(root)
+            project_dir = root / "projects/agent-container"
+            project_dir.mkdir(parents=True, mode=0o700)
+            (root / "projects").chmod(0o700)
+            workspace = root / "workspaces/agent-container"
+            (workspace / ".git").mkdir(parents=True)
+            workspace.parent.chmod(0o700)
+            record = ProjectRecord(
+                Repository.parse("jj1xgo/agent-container"), handovers.resolve()
+            )
+            record.write(project_dir / "project.json")
+            policy_path = project_dir / "github-broker.json"
+            policy_path.write_text(
+                json.dumps(
+                    {
+                        "repository": "jj1xgo/agent-container",
+                        "default_branch": "main",
+                        "protected_branches": ["main"],
+                        "ruleset_confirmed": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            policy_path.chmod(0o600)
+            before = policy_path.read_bytes()
+
+            result = main(
+                [
+                    "project", "add", "jj1xgo/agent-container",
+                    "--handover-root", str(handovers),
+                    "--github-broker", "--confirm-force-push-ruleset",
+                ],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: successful_podman_result(spec),
+                git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(policy_path.read_bytes(), before)
 
     def test_project_add_records_repository_after_clone(self) -> None:
         with TemporaryDirectory() as temp:
@@ -3707,6 +3825,17 @@ class AgentCtlParserTest(unittest.TestCase):
         self.assertEqual(migrate.source, Path("/old/.claude"))
         self.assertEqual(migrate.plugins, ["issue-ops@local-marketplace"])
         self.assertFalse(migrate.apply)
+
+    def test_broker_project_add_parses_positive_repository_id(self) -> None:
+        arguments = parser().parse_args(
+            [
+                "project", "add", "jj1xgo/agent-container-smoke",
+                "--handover-root", "/handovers",
+                "--github-broker", "--github-repository-id", "123",
+            ]
+        )
+
+        self.assertEqual(arguments.github_repository_id, 123)
 
 
 if __name__ == "__main__":

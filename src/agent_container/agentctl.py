@@ -31,6 +31,7 @@ from agent_container.handover_broker_runtime import HandoverBrokerRuntime
 from agent_container.handover_broker_runtime import HandoverBrokerRuntimeError
 from agent_container.github_app import GitHubAppMetadata
 from agent_container.github_broker_policy import BrokerPolicy
+from agent_container.github_broker_policy import validate_repository_id
 from agent_container.podman import CommandSpec
 from agent_container.podman import auth_codex_spec
 from agent_container.podman import build_image_spec
@@ -120,6 +121,16 @@ def _validate_image(value: str) -> str:
     return value
 
 
+def _positive_repository_id(value: str) -> int:
+    if not value.isascii() or not value.isdecimal() or value.startswith("0"):
+        raise argparse.ArgumentTypeError(
+            "GitHub repository ID must be a positive integer"
+        )
+    parsed = int(value)
+    validate_repository_id(parsed)
+    return parsed
+
+
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog="agentctl")
     command.add_argument(
@@ -142,6 +153,7 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument("--project")
     add.add_argument("--handover-root", type=Path, required=True)
     add.add_argument("--github-broker", action="store_true")
+    add.add_argument("--github-repository-id", type=_positive_repository_id)
     add.add_argument("--default-branch", default="main")
     add.add_argument("--protected-branch", action="append", default=[])
     add.add_argument("--confirm-force-push-ruleset", action="store_true")
@@ -382,6 +394,7 @@ def _add_project(
     default_branch: str = "main",
     protected_branches: tuple[str, ...] = (),
     ruleset_confirmed: bool = False,
+    github_repository_id: int | None = None,
 ) -> None:
     repository = Repository.parse(repository_value)
     project_id = project_value if project_value is not None else repository.name
@@ -395,17 +408,48 @@ def _add_project(
             layout.workspace, repository, git_remote_reader(layout.workspace)
         )
     policy: BrokerPolicy | None = None
+    completed_legacy_project = False
     record = ProjectRecord(repository, resolved_handover_root)
     if github_broker:
         if not ruleset_confirmed:
             raise ValueError("GitHub force-push ruleset confirmation is required")
         protected = protected_branches or (default_branch,)
-        policy = BrokerPolicy.create(
-            project_id=layout.project_id,
-            repository=repository.slug,
-            default_branch=default_branch,
-            protected_branches=protected,
-        )
+        if github_repository_id is None:
+            completed_state = (
+                workspace_exists
+                and (layout.project_file.exists() or layout.project_file.is_symlink())
+                and (
+                    layout.github_broker_policy_file.exists()
+                    or layout.github_broker_policy_file.is_symlink()
+                )
+            )
+            if not completed_state:
+                raise ValueError(
+                    "GitHub repository ID is required for new broker projects"
+                )
+            if _read_runtime_project(layout.project_file) != record:
+                raise ValueError("project metadata does not match project")
+            policy = load_broker_policy(
+                layout.github_broker_policy_file, record, layout.project_id
+            )
+            expected_legacy = BrokerPolicy.create(
+                project_id=layout.project_id,
+                repository=repository.slug,
+                default_branch=default_branch,
+                protected_branches=protected,
+            )
+            if policy.repository_id is not None or policy != expected_legacy:
+                raise ValueError("GitHub broker policy does not match project")
+            completed_legacy_project = True
+        else:
+            policy = BrokerPolicy.create(
+                project_id=layout.project_id,
+                repository=repository.slug,
+                repository_id=github_repository_id,
+                default_branch=default_branch,
+                protected_branches=protected,
+                require_repository_id=True,
+            )
         GitHubAppMetadata.load(
             layout.github_broker_root / "app.json",
             layout.github_broker_root / "private-key.pem",
@@ -436,7 +480,8 @@ def _add_project(
         )
     _seed_project_codex_home(layout, profile_root)
     _install_superpowers(layout, image, runner)
-    record.write(layout.project_file)
+    if not completed_legacy_project:
+        record.write(layout.project_file)
 
 
 def _runtime_preflight(
@@ -1129,7 +1174,8 @@ def main(
             validate_project_id(arguments.project)
         elif arguments.command == "project" and arguments.project_command == "add":
             broker_options = (
-                arguments.default_branch != "main"
+                arguments.github_repository_id is not None
+                or arguments.default_branch != "main"
                 or bool(arguments.protected_branch)
                 or arguments.confirm_force_push_ruleset
             )
@@ -1237,6 +1283,7 @@ def main(
                 arguments.default_branch,
                 tuple(arguments.protected_branch),
                 arguments.confirm_force_push_ruleset,
+                arguments.github_repository_id,
             )
             return 0
         if arguments.command == "project" and arguments.project_command == "update-profile":
