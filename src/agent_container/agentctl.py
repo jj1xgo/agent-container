@@ -486,21 +486,22 @@ def _add_project(
             layout.github_broker_root / "app.json",
             layout.github_broker_root / "private-key.pem",
         )
-        if upgrade_interrupted_legacy:
-            assert existing_policy is not None
-            if (
-                layout.project_file.exists()
-                or layout.project_file.is_symlink()
-                or layout.workspace.exists()
-                or layout.workspace.is_symlink()
-            ):
-                raise ValueError(
-                    "interrupted GitHub broker registration state does not match"
-                )
-            upgrade_legacy_broker_policy(
-                layout.github_broker_policy_file, existing_policy, policy
-            )
     _podman_preflight(runner, image_required=image)
+    if upgrade_interrupted_legacy:
+        assert existing_policy is not None
+        assert policy is not None
+        if (
+            layout.project_file.exists()
+            or layout.project_file.is_symlink()
+            or layout.workspace.exists()
+            or layout.workspace.is_symlink()
+        ):
+            raise ValueError(
+                "interrupted GitHub broker registration state does not match"
+            )
+        upgrade_legacy_broker_policy(
+            layout.github_broker_policy_file, existing_policy, policy
+        )
     _prepare_project_directories(layout, include_gh=not github_broker)
     if github_broker:
         assert policy is not None

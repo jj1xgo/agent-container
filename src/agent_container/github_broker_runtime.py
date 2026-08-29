@@ -20,7 +20,6 @@ from agent_container.github_pr import GitHubPullRequestTransport
 from agent_container.podman import BrokerRuntimeMount
 from agent_container.state import ProjectRecord
 from agent_container.state import StateLayout
-from agent_container.state import ensure_private_directory
 from agent_container.state import ensure_private_file
 
 
@@ -131,14 +130,47 @@ def write_broker_policy(path: Path, policy: BrokerPolicy) -> None:
         os.close(descriptor)
 
 
+def _validate_private_directory_stat(directory_stat: os.stat_result) -> None:
+    if (
+        not stat.S_ISDIR(directory_stat.st_mode)
+        or stat.S_IMODE(directory_stat.st_mode) != 0o700
+        or directory_stat.st_uid != os.getuid()
+    ):
+        raise PermissionError("GitHub broker policy parent is not private")
+
+
+def _validate_policy_parent_identity(
+    directory: Path, expected: tuple[int, int]
+) -> None:
+    try:
+        canonical = directory.resolve(strict=True)
+        path_stat = os.stat(directory, follow_symlinks=False)
+        canonical_stat = os.stat(canonical, follow_symlinks=False)
+    except OSError:
+        raise ValueError("GitHub broker policy parent changed during upgrade") from None
+    _validate_private_directory_stat(path_stat)
+    if (
+        not stat.S_ISDIR(path_stat.st_mode)
+        or (path_stat.st_dev, path_stat.st_ino) != expected
+        or (canonical_stat.st_dev, canonical_stat.st_ino) != expected
+    ):
+        raise ValueError("GitHub broker policy parent changed during upgrade")
+
+
 def _legacy_policy_snapshot(
-    path: Path, expected: BrokerPolicy
+    parent_descriptor: int, name: str, expected: BrokerPolicy
 ) -> tuple[bytes, tuple[int, int, int, int, int, int]]:
-    ensure_private_file(path)
+    path_stat = os.stat(
+        name,
+        dir_fd=parent_descriptor,
+        follow_symlinks=False,
+    )
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise ValueError("GitHub broker policy must not be a symlink")
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags)
+    descriptor = os.open(name, flags, dir_fd=parent_descriptor)
     try:
         file_stat = os.fstat(descriptor)
         if (
@@ -147,6 +179,11 @@ def _legacy_policy_snapshot(
             or file_stat.st_uid != os.getuid()
         ):
             raise PermissionError("GitHub broker policy is not a private file")
+        if (
+            path_stat.st_dev != file_stat.st_dev
+            or path_stat.st_ino != file_stat.st_ino
+        ):
+            raise ValueError("GitHub broker policy changed during upgrade")
         chunks: list[bytes] = []
         while True:
             chunk = os.read(descriptor, 65_536)
@@ -156,7 +193,11 @@ def _legacy_policy_snapshot(
         body = b"".join(chunks)
     finally:
         os.close(descriptor)
-    path_stat = os.lstat(path)
+    path_stat = os.stat(
+        name,
+        dir_fd=parent_descriptor,
+        follow_symlinks=False,
+    )
     if (
         not stat.S_ISREG(path_stat.st_mode)
         or path_stat.st_dev != file_stat.st_dev
@@ -177,14 +218,21 @@ def _legacy_policy_snapshot(
     return body, identity
 
 
-def _open_policy_temporary(path: Path) -> tuple[Path, int]:
+def _open_policy_temporary(
+    parent_descriptor: int, policy_name: str
+) -> tuple[str, int]:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     for _ in range(128):
-        temporary = path.parent / f".{path.name}.{secrets.token_hex(16)}"
+        temporary = f".{policy_name}.{secrets.token_hex(16)}"
         try:
-            return temporary, os.open(temporary, flags, 0o600)
+            return temporary, os.open(
+                temporary,
+                flags,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
         except FileExistsError:
             continue
     raise FileExistsError("could not create GitHub broker policy temporary file")
@@ -199,42 +247,55 @@ def upgrade_legacy_broker_policy(
         or replace(requested, repository_id=None) != existing
     ):
         raise ValueError("GitHub broker policy is not an exact legacy match")
-    ensure_private_directory(path.parent)
-    original = _legacy_policy_snapshot(path, existing)
-    body = _encode_broker_policy(requested)
-    temporary: Path | None = None
+    directory_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    parent_descriptor = os.open(path.parent, directory_flags)
+    temporary: str | None = None
     descriptor: int | None = None
     replaced = False
     try:
-        temporary, descriptor = _open_policy_temporary(path)
+        parent_stat = os.fstat(parent_descriptor)
+        _validate_private_directory_stat(parent_stat)
+        parent_identity = (parent_stat.st_dev, parent_stat.st_ino)
+        _validate_policy_parent_identity(path.parent, parent_identity)
+        original = _legacy_policy_snapshot(
+            parent_descriptor, path.name, existing
+        )
+        body = _encode_broker_policy(requested)
+        temporary, descriptor = _open_policy_temporary(
+            parent_descriptor, path.name
+        )
         os.fchmod(descriptor, 0o600)
         _write_all(descriptor, body)
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = None
-        if _legacy_policy_snapshot(path, existing) != original:
+        if (
+            _legacy_policy_snapshot(parent_descriptor, path.name, existing)
+            != original
+        ):
             raise ValueError("GitHub broker policy changed during upgrade")
-        ensure_private_directory(path.parent)
-        os.replace(temporary, path)
+        _validate_policy_parent_identity(path.parent, parent_identity)
+        os.replace(
+            temporary,
+            path.name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
         replaced = True
-        directory_flags = os.O_RDONLY
-        if hasattr(os, "O_DIRECTORY"):
-            directory_flags |= os.O_DIRECTORY
-        if hasattr(os, "O_NOFOLLOW"):
-            directory_flags |= os.O_NOFOLLOW
-        parent_descriptor = os.open(path.parent, directory_flags)
-        try:
-            os.fsync(parent_descriptor)
-        finally:
-            os.close(parent_descriptor)
+        os.fsync(parent_descriptor)
     finally:
         if descriptor is not None:
             os.close(descriptor)
         if temporary is not None and not replaced:
             try:
-                temporary.unlink()
+                os.unlink(temporary, dir_fd=parent_descriptor)
             except FileNotFoundError:
                 pass
+        os.close(parent_descriptor)
 
 
 @dataclass

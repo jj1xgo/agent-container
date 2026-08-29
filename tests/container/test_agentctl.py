@@ -1280,6 +1280,43 @@ class AgentCtlProjectTest(unittest.TestCase):
             self.assertEqual(record.repository.slug, "jj1xgo/agent-container")
             create.assert_called_once()
 
+    def test_project_add_interrupted_preflight_failure_preserves_legacy_policy(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            handovers = Path(temp) / "handovers"
+            (handovers / "agent-container").mkdir(parents=True)
+            policy_path, sibling = self._interrupted_broker_state(root)
+            original_policy = policy_path.read_bytes()
+            original_sibling = sibling.read_bytes()
+            calls = []
+
+            def failed_preflight(spec):
+                calls.append(spec)
+                return subprocess.CompletedProcess(spec.argv, 19)
+
+            result = main(
+                [
+                    "project", "add", "jj1xgo/agent-container",
+                    "--handover-root", str(handovers),
+                    "--github-broker", "--github-repository-id", "123",
+                    "--confirm-force-push-ruleset",
+                ],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=failed_preflight,
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 19)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(policy_path.read_bytes(), original_policy)
+            self.assertEqual(sibling.read_bytes(), original_sibling)
+            self.assertFalse(
+                (root / "projects/agent-container/project.json").exists()
+            )
+            self.assertFalse((root / "workspaces/agent-container").exists())
+
     def test_project_add_rejects_interrupted_legacy_upgrade_shape_mismatches(
         self,
     ) -> None:

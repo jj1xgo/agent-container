@@ -1,10 +1,12 @@
 import json
+import os
 from pathlib import Path
 import stat
 from tempfile import TemporaryDirectory
 import unittest
 from unittest import mock
 
+import agent_container.github_broker_runtime as github_broker_runtime
 from agent_container.github_app import GitHubAppMetadata
 from agent_container.github_broker_runtime import UploadPackBrokerRuntime
 from agent_container.github_broker_runtime import broker_token_metadata
@@ -302,6 +304,63 @@ class BrokerPolicyUpgradeTest(unittest.TestCase):
             self.assertEqual(path.read_bytes(), original)
             self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o755)
             self.assertEqual(list(path.parent.glob(".github-broker.json.*")), [])
+
+    def test_rejects_wrong_owner_without_changing_bytes(self) -> None:
+        existing = self._policy()
+        requested = self._policy(repository_id=123)
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "github-broker.json"
+            self._write_policy(path, existing)
+            original = path.read_bytes()
+
+            with mock.patch(
+                "agent_container.github_broker_runtime.os.getuid",
+                return_value=os.getuid() + 1,
+            ):
+                with self.assertRaises(PermissionError):
+                    upgrade_legacy_broker_policy(path, existing, requested)
+
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(list(path.parent.glob(".github-broker.json.*")), [])
+
+    def test_rejects_replaced_parent_and_cleans_held_directory_temp(self) -> None:
+        existing = self._policy()
+        requested = self._policy(repository_id=123)
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            parent = root / "project"
+            parent.mkdir(mode=0o700)
+            path = parent / "github-broker.json"
+            self._write_policy(path, existing)
+            original = path.read_bytes()
+            moved_parent = root / "project-before-swap"
+            real_validate = github_broker_runtime._validate_policy_parent_identity
+            validations = 0
+
+            def swap_before_second_validation(directory, expected):
+                nonlocal validations
+                validations += 1
+                if validations == 2:
+                    directory.rename(moved_parent)
+                    directory.mkdir(mode=0o700)
+                    self._write_policy(directory / path.name, existing)
+                return real_validate(directory, expected)
+
+            with mock.patch.object(
+                github_broker_runtime,
+                "_validate_policy_parent_identity",
+                side_effect=swap_before_second_validation,
+            ):
+                with self.assertRaises(ValueError):
+                    upgrade_legacy_broker_policy(path, existing, requested)
+
+            self.assertEqual((moved_parent / path.name).read_bytes(), original)
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(
+                list(moved_parent.glob(".github-broker.json.*")),
+                [],
+            )
+            self.assertEqual(list(parent.glob(".github-broker.json.*")), [])
 
 
 class BrokerRuntimeConstructionTest(unittest.TestCase):
