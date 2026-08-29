@@ -92,6 +92,45 @@ def read_stateless_request(stream: BinaryIO) -> bytes | None:
             raise ValueError("Git stateless request has too many packets")
 
 
+def _is_delete_only_receive_pack(commands: bytes) -> bool:
+    offset = 0
+    updates = 0
+    while offset < len(commands):
+        header = commands[offset : offset + 4]
+        if len(header) != 4 or _HEX_HEADER.fullmatch(header) is None:
+            return False
+        length = int(header, 16)
+        offset += 4
+        if length == 0:
+            return updates > 0 and offset == len(commands)
+        if length < 4 or offset + length - 4 > len(commands):
+            return False
+        line = commands[offset : offset + length - 4].removesuffix(b"\n")
+        offset += length - 4
+        if updates == 0:
+            line = line.split(b"\0", 1)[0]
+        parts = line.split(b" ")
+        if len(parts) != 3 or len(parts[1]) not in {40, 64}:
+            return False
+        if parts[1] != b"0" * len(parts[1]):
+            return False
+        updates += 1
+    return False
+
+
+def read_receive_pack_request(stream: BinaryIO) -> bytes:
+    commands = read_stateless_request(stream)
+    if commands is None:
+        raise ValueError("Git receive-pack request is invalid")
+    if _is_delete_only_receive_pack(commands):
+        return commands
+    remaining = MAX_RECEIVE_PACK_REQUEST_BYTES - len(commands)
+    body = commands + stream.read(remaining + 1)
+    if len(body) > MAX_RECEIVE_PACK_REQUEST_BYTES:
+        raise ValueError("Git receive-pack request is invalid")
+    return body
+
+
 def _connect_response(chunks: Iterable[bytes]) -> Iterable[bytes]:
     tail = b""
     for chunk in chunks:
@@ -152,9 +191,7 @@ class ReceivePackRemoteHelper:
             raise ValueError("Git receive-pack advertisement is invalid")
         self.stdout.write(advertisement)
         self.stdout.flush()
-        request = self.stdin.read(MAX_RECEIVE_PACK_REQUEST_BYTES + 1)
-        if not request or len(request) > MAX_RECEIVE_PACK_REQUEST_BYTES:
-            raise ValueError("Git receive-pack request is invalid")
+        request = read_receive_pack_request(self.stdin)
         for chunk in self.transport.push(request):
             if not isinstance(chunk, bytes) or not chunk:
                 raise ValueError("Git receive-pack response is invalid")

@@ -37,6 +37,16 @@ class FakeReceiveTransport:
         return (b"push-result",)
 
 
+class OpenDeleteRequestStream(BytesIO):
+    """Model Git waiting for a delete response without closing helper stdin."""
+
+    def read(self, size: int = -1) -> bytes:
+        remaining = len(self.getbuffer()) - self.tell()
+        if size < 0 or size > remaining:
+            raise BlockingIOError("read would wait for client EOF")
+        return super().read(size)
+
+
 class StatelessRequestTest(unittest.TestCase):
     def test_reads_one_request_including_delimiter_and_flush(self) -> None:
         first = pkt(b"command=fetch\n") + b"0001" + pkt(b"done\n") + b"0000"
@@ -162,7 +172,14 @@ class RemoteHelperTest(unittest.TestCase):
 
     def test_runs_one_receive_pack_exchange(self) -> None:
         transport = FakeReceiveTransport()
-        push = b"commands-and-pack"
+        push = (
+            pkt(
+                b"1111111111111111111111111111111111111111 "
+                b"2222222222222222222222222222222222222222 "
+                b"refs/heads/feat/work\0report-status\n"
+            )
+            + b"0000PACKpayload"
+        )
         stdin = BytesIO(
             b"capabilities\nconnect git-receive-pack\n" + push
         )
@@ -182,6 +199,31 @@ class RemoteHelperTest(unittest.TestCase):
             stdout.getvalue(),
             b"connect\nstateless-connect\n\n\nadvertisementpush-result",
         )
+
+    def test_delete_push_does_not_wait_for_client_eof(self) -> None:
+        transport = FakeReceiveTransport()
+        delete = (
+            pkt(
+                b"1111111111111111111111111111111111111111 "
+                b"0000000000000000000000000000000000000000 "
+                b"refs/heads/feat/work\0report-status\n"
+            )
+            + b"0000"
+        )
+        stdin = OpenDeleteRequestStream(
+            b"capabilities\nconnect git-receive-pack\n" + delete
+        )
+
+        result = run_remote_helper(
+            ["origin", "agent-broker://jj1xgo/agent-container"],
+            {"AGENT_BROKER_REPOSITORY": "jj1xgo/agent-container"},
+            transport,
+            stdin,
+            BytesIO(),
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(transport.requests, [delete])
 
     def test_stateless_helper_rejects_non_packet_commands(self) -> None:
         repository = Repository.parse("jj1xgo/agent-container")

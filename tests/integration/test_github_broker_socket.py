@@ -114,11 +114,79 @@ class FakeSigner:
         return b"binary-signature"
 
 
+class OpenDeleteRequestStream(BytesIO):
+    def read(self, size: int = -1) -> bytes:
+        remaining = len(self.getbuffer()) - self.tell()
+        if size < 0 or size > remaining:
+            raise BlockingIOError("read would wait for client EOF")
+        return super().read(size)
+
+
 @unittest.skipUnless(
     RUN_SOCKET_INTEGRATION,
     "set AGENT_CONTAINER_RUN_SOCKET_INTEGRATION=1 for Unix socket integration",
 )
 class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
+    def test_denied_delete_finishes_without_waiting_for_client_eof(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ab-") as temporary:
+            state = Path(temporary) / "state"
+            state.mkdir(mode=0o700)
+            policy = BrokerPolicy.create(
+                project_id="agent-container",
+                repository="jj1xgo/agent-container",
+                default_branch="main",
+                protected_branches=("main",),
+            )
+            session = BrokerSession.create(state, policy)
+            receive = FakeReceivePackTransport()
+            runtime = UploadPackBrokerRuntime(  # type: ignore[arg-type]
+                session,
+                FakeUploadPackTransport(),
+                receive,
+                FakePullRequestTransport(),
+            )
+            delete = (
+                pkt(
+                    f"{OLD} {'0' * 40} refs/heads/feat/work".encode()
+                    + b"\0report-status side-band-64k object-format=sha1\n"
+                )
+                + b"0000"
+            )
+            stdin = OpenDeleteRequestStream(
+                b"capabilities\nconnect git-receive-pack\n" + delete
+            )
+
+            with runtime:
+                client = BrokerReceivePackClient(
+                    session.socket_path,
+                    session.capability_path,
+                    "agent-container",
+                    "jj1xgo/agent-container",
+                )
+                try:
+                    with self.assertRaisesRegex(ValueError, "stream is incomplete"):
+                        run_remote_helper(
+                            ["origin", "agent-broker://jj1xgo/agent-container"],
+                            {
+                                "AGENT_BROKER_REPOSITORY": (
+                                    "jj1xgo/agent-container"
+                                )
+                            },
+                            client,
+                            stdin,
+                            BytesIO(),
+                        )
+                finally:
+                    client.close()
+
+            self.assertEqual(receive.requests, [])
+            record = json.loads(
+                session.audit_file.read_text(encoding="utf-8").splitlines()[-1]
+            )
+            self.assertEqual(record["operation"], "git-receive-pack")
+            self.assertEqual(record["status"], "denied")
+            self.assertNotIn("ref", record)
+
     def test_token_protocol_failure_does_not_stop_issue_runtime(self) -> None:
         marker = "secret-malformed-token-status"
 
