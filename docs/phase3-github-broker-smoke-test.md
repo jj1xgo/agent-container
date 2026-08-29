@@ -150,12 +150,14 @@ agent-github issue view ISSUE_NUMBER
 | work-branch push | normal push succeeds; protected/delete/stale/NFF denied | PARTIAL: `test/github-broker-smoke-20260826-1`の通常push成功。危険なnegative pushは未実施 | 2026-08-26 |
 | PR create/view/checks | allowed operations succeed; generic/merge absent | PASS: PR #38 create／view／checks成功。generic API、merge、releaseはexit 2 | 2026-08-26 |
 | audit/cleanup | secret-free records; runtime artifacts removed | PASS: allowlist fieldにGit／PR成功記録、終了後socket／capabilityなし | 2026-08-26 |
-| Issue App permission | `Issues | read`; GitHub installation reapproval if required | not run | — |
-| Issue list/PR exclusion | open Issue only; 最大30件; Pull Requestを除外 | not run | — |
-| Issue view/body | specified Issue fixed fields and body only | not run | — |
-| Issue write/query/cross-repository denial | create/edit/comment/close/search/query/pagination/generic API/cross-repository read denied | not run | — |
-| Issue credential non-exposure | stdout permits allowlisted body only; stderr/audit/raw endpoint payload omit token, capability, raw response, and excluded raw-response field sentinel | not run | — |
-| Issue expired capability | runtime cleanup rejects stale Issue client | not run | — |
-| Issue Git/PR regression | clone/fetch/push and PR create/view/checks unchanged | not run | — |
+| Issue App permission | `Issues | read`; GitHub installation reapproval if required | PARTIAL: exact permission要求を含む`issue-list`が実hostで成功。App設定値とinstallation再承認そのものの記録は未取得 | 2026-08-29 |
+| Issue list/PR exclusion | open Issue only; 最大30件; Pull Requestを除外 | PARTIAL: `issue list`はexit 0、stderrなし、固定response `{"issues":[]}`。repositoryにIssueがなく、最大件数とPR除外の実data観測は未実施 | 2026-08-29 |
+| Issue view/body | specified Issue fixed fields and body only | not run: open／closed Issueが存在せず、test用Issueを作成しない境界を優先 | 2026-08-29 |
+| Issue write/query/cross-repository denial | create/edit/comment/close/search/query/pagination/generic API/cross-repository read denied | PASS: create／edit／comment／close／searchはGitHub接続前にexit 2、query／pagination／generic API／repository指定interfaceなし | 2026-08-29 |
+| Issue credential non-exposure | stdout permits allowlisted body only; stderr/audit/raw endpoint payload omit token, capability, raw response, and excluded raw-response field sentinel | PARTIAL: 空list応答のstdoutは固定schema、stderr 0 byte。auditは`bytes`、`operation`、`policy_version`、`project`、`repository`、`run`、`status`、`timestamp`だけ。非空Issueのbody／除外fieldは未観測 | 2026-08-29 |
+| Issue expired capability | runtime cleanup rejects stale Issue client | PARTIAL: runtime終了後にsocket／capabilityが残らないことを確認。stale client requestによる実拒否は未実施 | 2026-08-29 |
+| Issue Git/PR regression | clone/fetch/push and PR create/view/checks unchanged | PARTIAL: Git 2.53でfetch、PR #52 view／checksが成功。pushとPR createはGitHub状態変更を避けて未再実行 | 2026-08-29 |
 
-既存Git/PR smokeの記録は上表のとおりです。Issue read-only実host smokeは未実行であり、Issue App permission、list／PR exclusion、view／body、write/query/cross-repository denial、credential非露出、expired capability、Git/PR regressionの新規観測はすべて`not run`です。test用Issueを作成せず、App設定変更、認証済みruntime起動、host PASSの主張はこの文書更新では行いません。
+既存Git/PR smokeと2026-08-29のIssue read-only実host smokeの記録は上表のとおりです。既存Issueがないためview／bodyは`not run`、App設定そのもの、data依存のPR除外と非空payloadの非露出、stale client実拒否、状態変更を伴うpush／PR create再実行は`PARTIAL`のままです。test用Issueは作成していません。
+
+Git 2.53.0のfetch regressionでは、helper negotiation、stateless response終端、terminal flush処理を順に切り分け、PR #53–#55で修正しました。最終imageでは`git-upload-pack`と`issue-list`がともにaudit `status=ok`、`stage`なしとなり、runtime終了後にsocket／capabilityが残らないことを確認しました。途中の失敗を最終PASSとして扱わず、上表は最終再実行の観測だけを記録しています。
