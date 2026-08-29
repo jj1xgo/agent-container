@@ -1,5 +1,4 @@
 import hmac
-import os
 from pathlib import Path
 import stat
 from tempfile import TemporaryDirectory

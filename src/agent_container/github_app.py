@@ -1,9 +1,8 @@
 from base64 import urlsafe_b64encode
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 import http.client
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
