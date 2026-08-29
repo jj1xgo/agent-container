@@ -92,12 +92,29 @@ def read_stateless_request(stream: BinaryIO) -> bytes | None:
             raise ValueError("Git stateless request has too many packets")
 
 
+def _connect_response(chunks: Iterable[bytes]) -> Iterable[bytes]:
+    tail = b""
+    for chunk in chunks:
+        if not isinstance(chunk, bytes) or not chunk:
+            raise ValueError("Git upload-pack response is invalid")
+        combined = tail + chunk
+        if len(combined) > 4:
+            yield combined[:-4]
+            tail = combined[-4:]
+        else:
+            tail = combined
+    if tail != b"0002":
+        raise ValueError("Git upload-pack response is invalid")
+    yield b"0000"
+
+
 @dataclass
 class StatelessRemoteHelper:
     repository: Repository
     transport: UploadPackTransport
     stdin: BinaryIO
     stdout: BinaryIO
+    connect_mode: bool = False
 
     def run(self) -> int:
         advertisement = self.transport.discover()
@@ -110,7 +127,10 @@ class StatelessRemoteHelper:
             request = read_stateless_request(self.stdin)
             if request is None:
                 return 0
-            for chunk in self.transport.rpc(request):
+            chunks = self.transport.rpc(request)
+            if self.connect_mode:
+                chunks = _connect_response(chunks)
+            for chunk in chunks:
                 if not isinstance(chunk, bytes) or not chunk:
                     raise ValueError("Git upload-pack response is invalid")
                 self.stdout.write(chunk)
@@ -170,7 +190,11 @@ def run_remote_helper(
         stdout.write(b"\n")
         stdout.flush()
         return StatelessRemoteHelper(
-            repository, selected, stdin, stdout  # type: ignore[arg-type]
+            repository,
+            selected,  # type: ignore[arg-type]
+            stdin,
+            stdout,
+            connect_mode=connect == b"connect git-upload-pack\n",
         ).run()
     if connect == b"connect git-receive-pack\n":
         selected = (

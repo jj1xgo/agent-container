@@ -393,8 +393,8 @@ class GitHubBrokerSocketIntegrationTest(unittest.TestCase):
                 b"connect\nstateless-connect\n\n"
                 b"\n"
                 b"000eversion 2\n0000"
-                b"0008NAK\n0002"
-                b"0008NAK\n0002",
+                b"0008NAK\n0000"
+                b"0008NAK\n0000",
             )
             self.assertEqual(
                 push_stdout.getvalue(),

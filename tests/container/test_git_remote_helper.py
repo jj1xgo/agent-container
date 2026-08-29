@@ -105,9 +105,17 @@ class RemoteHelperTest(unittest.TestCase):
         )
 
     def test_runs_connect_upload_pack_exchange_for_git_2_53(self) -> None:
-        transport = FakeTransport()
-        request = pkt(b"command=ls-refs\n") + b"0000"
-        stdin = BytesIO(b"capabilities\nconnect git-upload-pack\n" + request)
+        class SplitResponseTransport(FakeTransport):
+            def rpc(self, request: bytes):  # type: ignore[no-untyped-def]
+                self.requests.append(request)
+                return (pkt(b"response\n"), b"00", b"02")
+
+        transport = SplitResponseTransport()
+        first = pkt(b"command=ls-refs\n") + b"0000"
+        second = pkt(b"command=fetch\n") + b"0000"
+        stdin = BytesIO(
+            b"capabilities\nconnect git-upload-pack\n" + first + second
+        )
         stdout = BytesIO()
 
         result = run_remote_helper(
@@ -119,14 +127,35 @@ class RemoteHelperTest(unittest.TestCase):
         )
 
         self.assertEqual(result, 0)
-        self.assertEqual(transport.requests, [request])
+        self.assertEqual(transport.requests, [first, second])
         self.assertEqual(
             stdout.getvalue(),
             b"connect\nstateless-connect\n\n\n"
             + transport.discover()
             + pkt(b"response\n")
-            + b"0002",
+            + b"0000"
+            + pkt(b"response\n")
+            + b"0000",
         )
+
+    def test_connect_upload_pack_rejects_missing_response_end(self) -> None:
+        class MissingResponseEndTransport(FakeTransport):
+            def rpc(self, request: bytes):  # type: ignore[no-untyped-def]
+                self.requests.append(request)
+                return (pkt(b"response\n"), b"0000")
+
+        with self.assertRaisesRegex(ValueError, "response is invalid"):
+            run_remote_helper(
+                ["origin", "agent-broker://jj1xgo/agent-container"],
+                {"AGENT_BROKER_REPOSITORY": "jj1xgo/agent-container"},
+                MissingResponseEndTransport(),
+                BytesIO(
+                    b"capabilities\nconnect git-upload-pack\n"
+                    + pkt(b"command=ls-refs\n")
+                    + b"0000"
+                ),
+                BytesIO(),
+            )
 
     def test_runs_one_receive_pack_exchange(self) -> None:
         transport = FakeReceiveTransport()
