@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新規GitHub broker projectへ`--github-repository-id`を明示するproject-scoped repository bindingと、local doctorでexplicit binding／legacy global fallbackを区別する診断を追加しました。
+
+### Changed
+
+- Phase 4 smokeの`upload-discovery`失敗は、global App metadataのrepository IDとsmoke repositoryの不一致が原因でした。project policyへrepository IDを限定し、既存旧schema policyだけはlegacy fallbackを維持します。
+- operator/smoke手順へboundedな`gh repo view ... --json databaseId --jq .databaseId` inventory、partial-state recovery gate、retry直前のfresh approvalを追加しました。host gateは未再実行で、結果は`not run`のままです。
+
+### Security boundaries
+
+- repository IDはproject policyからexactly one repositoryのtoken発行にだけ使い、broker audit、container output、container mountへ追加しません。doctorはlocal stateだけを検査し、remote App selection、permission、ruleset、networkを証明しません。
+
 ## [0.3.0] - 2026-08-28
 
 ### Added

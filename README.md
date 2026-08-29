@@ -194,12 +194,13 @@ Phase 3のbroker modeでは、GitHub App private keyとinstallation tokenをhost
 
 このbrokerは`agent-container`自身のrepositoryだけでなく、`agent-container`が管理する他のprojectでも同じ仕組みを再実装せずに利用できます。broker用の設定やcredentialは対象repositoryにcommitせず、GitHub側のApp installationとhost側の`agent-container`管理領域に置きます。新しいrepositoryで利用するときは、そのrepositoryへのGitHub App installationとbrokerを有効にしたproject登録を個別に行います。
 
-GitHub Appのselected repository installation、最小permission、全branch force-push禁止ruleset、private stateを準備してから、project登録・doctor・runに`--github-broker`を明示します。
+GitHub Appのselected repository installation、最小permission、全branch force-push禁止ruleset、private stateを準備します。新規broker projectはhostで`gh repo view OWNER/REPOSITORY --json databaseId --jq .databaseId`を使って対象IDをinventoryし、`--github-repository-id`へ明示的に渡すproject-scoped bindingを使います。IDはbroker auditやcontainer output／mountへ書きません。既存の旧schema policyだけはlegacy global fallbackを維持します。
 
 ```bash
 bin/agentctl project add OWNER/REPOSITORY \
   --handover-root "$HANDOVER_ROOT" \
   --github-broker \
+  --github-repository-id POSITIVE_INTEGER \
   --protected-branch main \
   --confirm-force-push-ruleset
 
@@ -211,7 +212,7 @@ fixture準備などのhost `gh` administrationはcontainer broker operationsと�
 
 ## 開発時のlint
 
-Codex、Claude Code、local developer、CIは同じlint commandを使います。最初にpinned toolをinstallしてから実行してください。
+Codex、Claude Code、local developer、CIは同じ`bin/lint` wrapperを使います。最初にpinned toolをinstallしてから実行してください。
 
 ```bash
 python3 -m pip install --disable-pip-version-check --no-deps \
@@ -219,7 +220,7 @@ python3 -m pip install --disable-pip-version-check --no-deps \
 bin/lint
 ```
 
-`bin/lint`は`src`と`tests`をcheckするだけで、formatやauto-fixは行いません。command自身はnetwork accessもしません。
+`bin/lint`は`src`と`tests`のcheck-onlyで、formatやauto-fixを行わず、実行中にnetwork accessを必要としません。
 
 ## Imageの更新
 
@@ -248,7 +249,7 @@ project固有のDebian packageやNode.js versionは、対象repositoryの`.agent
 | `bin/agentctl doctor PROJECT [--agent codex\|claude\|all]` | 起動前の状態をread-onlyで診断 |
 | `bin/agentctl run PROJECT [--agent codex\|claude]` | agentを起動 |
 | `bin/agentctl stats PROJECT` | 実行中agent containerのsecret-free resource snapshotを表示 |
-| `bin/agentctl project add ... --github-broker --confirm-force-push-ruleset` | GitHub App broker modeでprojectを登録 |
+| `bin/agentctl project add ... --github-broker --github-repository-id ID --confirm-force-push-ruleset` | project-scoped repository bindingでGitHub App broker modeを登録 |
 | `bin/agentctl doctor PROJECT --github-broker` | local broker stateとproject policyを診断 |
 | `bin/agentctl run PROJECT --github-broker` | credential-free Git/PR broker付きでagentを起動 |
 

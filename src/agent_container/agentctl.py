@@ -1117,14 +1117,19 @@ def _doctor(
                     layout.github_broker_root / "app.json",
                     layout.github_broker_root / "private-key.pem",
                 )
-                load_broker_policy(
+                policy = load_broker_policy(
                     layout.github_broker_policy_file, record, layout.project_id
+                )
+                binding = (
+                    "project repository binding"
+                    if policy.repository_id is not None
+                    else "legacy global repository binding"
                 )
                 checks.append(
                     CheckResult(
                         "PASS",
                         "github-broker",
-                        "local App and project policy valid",
+                        f"local App and {binding} valid",
                     )
                 )
             except (ValueError, OSError) as error:

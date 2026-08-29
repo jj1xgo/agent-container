@@ -30,6 +30,17 @@ LINT_INSTALL_STEP = '''      - name: Install lint dependency
 LINT_RUN_STEP = '''      - name: Run Ruff lint
         run: bin/lint
 '''
+BROAD_CONTAINER_CONTEXT_COPY = re.compile(
+    r'(?im)^[ \t]*(?:COPY|ADD)(?:[ \t]+--[^ \t\r\n]+)*[ \t]+'
+    r'(?:\.(?:[ \t]|$)|\[[ \t]*"\."[ \t]*,)'
+)
+README_LINT_SHARED_CONTRACT = (
+    "Codex、Claude Code、local developer、CIは同じ`bin/lint` wrapperを使います。"
+)
+README_LINT_BEHAVIOR_CONTRACT = (
+    "`bin/lint`は`src`と`tests`のcheck-onlyで、formatやauto-fixを行わず、"
+    "実行中にnetwork accessを必要としません。"
+)
 
 
 class RuffLintToolingTest(unittest.TestCase):
@@ -70,24 +81,35 @@ class RuffLintToolingTest(unittest.TestCase):
         containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
         self.assertNotIn("requirements-lint.txt", containerfile)
         self.assertNotIn("ruff", containerfile.lower())
-        self.assertNotRegex(
-            containerfile,
-            r"(?im)^\\s*(?:COPY|ADD)(?:\\s+--[^\\s]+)*\\s+\\.(?:\\s|$)",
+        self.assertIsNone(BROAD_CONTAINER_CONTEXT_COPY.search(containerfile))
+
+    def test_broad_context_copy_guard_rejects_shell_and_json_forms(self) -> None:
+        for instruction in (
+            "COPY . /opt/app",
+            "ADD . /opt/app",
+            "COPY --chown=agent:agent . /opt/app",
+            'COPY [".", "/opt/app"]',
+            'ADD [".", "/opt/app"]',
+        ):
+            with self.subTest(instruction=instruction):
+                self.assertIsNotNone(
+                    BROAD_CONTAINER_CONTEXT_COPY.search(instruction), instruction
+                )
+
+    def test_broad_context_copy_guard_allows_current_explicit_sources(self) -> None:
+        containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
+        current_copy_lines = "\n".join(
+            line
+            for line in containerfile.splitlines()
+            if line.startswith(("COPY ", "ADD "))
         )
+        self.assertTrue(current_copy_lines)
+        self.assertIsNone(BROAD_CONTAINER_CONTEXT_COPY.search(current_copy_lines))
 
     def test_readme_documents_the_shared_lint_contract(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        for phrase in (
-            "Codex",
-            "Claude Code",
-            "local developer",
-            "CI",
-            "bin/lint",
-            "format",
-            "auto-fix",
-            "network access",
-        ):
-            self.assertIn(phrase, readme)
+        self.assertIn(README_LINT_SHARED_CONTRACT, readme)
+        self.assertIn(README_LINT_BEHAVIOR_CONTRACT, readme)
 
     def test_exact_config_contract_rejects_an_extra_rule_in_memory(self) -> None:
         mutated = RUFF_CONFIG.replace('"F"]', '"F", "W"]')
@@ -487,6 +509,35 @@ class Phase4DocumentationTest(unittest.TestCase):
             "最終承認",
         ):
             self.assertIn(required, smoke)
+
+    def test_repository_binding_and_observed_failure_are_documented(self) -> None:
+        operator = (ROOT / "docs/phase3-github-broker.md").read_text(
+            encoding="utf-8"
+        )
+        smoke = (ROOT / "docs/phase4-stabilization-smoke-test.md").read_text(
+            encoding="utf-8"
+        )
+        for body in (operator, smoke):
+            for required in (
+                "--github-repository-id",
+                "project-scoped",
+                "legacy global fallback",
+                "upload-discovery",
+                "remote App selection",
+            ):
+                with self.subTest(document=body[:40], required=required):
+                    self.assertIn(required, body)
+            self.assertIn("global App metadataのrepository IDが", body)
+            self.assertIn("smoke repository", body)
+        for required_recovery_detail in (
+            "mode `0700`のproject directory",
+            "mode `0600`の旧schema broker policy",
+            "mode `0600` `smoke-fixtures.json`",
+            "mode `0700`のhandover directory",
+            "`project.json`とworkspaceは作成されていない",
+            "fresh approval",
+        ):
+            self.assertIn(required_recovery_detail, smoke)
 
     def test_phase4_smoke_starts_without_claiming_results(self) -> None:
         smoke = (ROOT / "docs/phase4-stabilization-smoke-test.md").read_text(

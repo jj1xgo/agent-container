@@ -2923,6 +2923,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 json.dumps(
                     {
                         "repository": "jj1xgo/agent-container",
+                        "repository_id": 789,
                         "default_branch": "main",
                         "protected_branches": ["main", "master"],
                         "ruleset_confirmed": True,
@@ -2947,10 +2948,69 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(result, 0)
             self.assertIn(
-                "PASS  github-broker: local App and project policy valid", rendered
+                "PASS  github-broker: local App and project repository binding valid",
+                rendered,
             )
             self.assertNotIn("gh-hosts", rendered)
             self.assertNotIn("private-key-marker", rendered)
+            self.assertNotIn("789", rendered)
+            self.assertNotIn(str(root), rendered)
+
+    def test_doctor_github_broker_reports_legacy_global_binding(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            (root / "gh/hosts.yml").unlink()
+            (root / "gh").rmdir()
+            broker_root = root / "github-broker"
+            broker_root.mkdir(mode=0o700)
+            app = broker_root / "app.json"
+            key = broker_root / "private-key.pem"
+            policy = root / "projects/agent-container/github-broker.json"
+            app.write_text(
+                json.dumps(
+                    {
+                        "client_id": "Iv1abcdefghijk",
+                        "installation_id": 123,
+                        "repository_id": 456,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            key.write_text("private-key-marker", encoding="utf-8")
+            policy.write_text(
+                json.dumps(
+                    {
+                        "repository": "jj1xgo/agent-container",
+                        "default_branch": "main",
+                        "protected_branches": ["main", "master"],
+                        "ruleset_confirmed": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            for path in (app, key, policy):
+                path.chmod(0o600)
+            output = StringIO()
+
+            result = main(
+                ["doctor", "agent-container", "--github-broker"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=self._successful_doctor_runner,
+                git_remote_reader=lambda path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                stdout=output,
+            )
+
+            rendered = output.getvalue()
+            self.assertEqual(result, 0)
+            self.assertIn(
+                "PASS  github-broker: local App and legacy global repository binding valid",
+                rendered,
+            )
+            self.assertNotIn("gh-hosts", rendered)
+            self.assertNotIn("private-key-marker", rendered)
+            self.assertNotIn("456", rendered)
             self.assertNotIn(str(root), rendered)
 
     def test_doctor_claude_reports_authenticated_launcher_status(self) -> None:

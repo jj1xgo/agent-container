@@ -2,6 +2,8 @@
 
 Phase 3では、GitHub credentialをcontainerへ渡さず、project限定のclone/fetch、作業branch push、Pull Request作成・閲覧・checks確認、Issue一覧・詳細のreadをhost側broker経由で提供します。現在は明示的な`--github-broker` opt-inです。brokerに失敗してもlegacy `gh` credentialへfallbackしません。
 
+repository bindingはproject-scopedです。global App stateはclient ID、installation ID、private keyを共有し、新規policyはprojectごとのrepository IDを保持します。旧schema policyだけは既存動作を保つlegacy global fallbackを使います。local inventoryやdoctorはremote App selectionを証明しません。
+
 2026-08-29のscope整合として、shipped interfaceは選択中repositoryのIssue list/viewだけである。family Issue create/commentは開発repository brokerと権限を共有せず、将来Phaseのfamily専用設計へ延期する。fixture準備などで行うhost `gh` administrationはcontainer broker operationsから分離し、broker failureがhost `gh`、legacy credential、environment token、SSH agent、host credential helperへのfallbackを起動することはない。外向きnetworkのdomain allowlistは既知WARNとして維持し、独立した将来Phaseで設計する。
 
 設計上のsecurity boundaryは[Phase 3設計](superpowers/specs/2026-08-25-phase-3-github-broker-design.md)を参照してください。実環境で有効化する前に[Phase 3 smoke test](phase3-github-broker-smoke-test.md)を完了します。
@@ -36,7 +38,7 @@ Actions、Administration、Members、Secrets、Environments、Deployments、Work
 
 GitHub側で全`refs/heads/**`へのforce pushを禁止するrulesetを有効にします。Git wire protocolのupdate commandだけではnew commitがold commitの子孫かbrokerが判定できないため、このrulesetは省略できません。brokerは別途、protected ref、delete、non-head ref、stale lease、未知capabilityを拒否します。
 
-Appのclient ID、installation ID、対象repository IDとprivate keyを取得します。値をchat、handover、commit、shell historyへ貼り付けません。
+Appのclient ID、installation IDとprivate keyを取得します。対象repository IDはproject登録の直前に、下記のbounded host inventoryで取得します。値をchat、handover、commit、shell historyへ貼り付けません。
 
 ## Host private state
 
@@ -55,7 +57,7 @@ $AGENT_CONTAINER_HOME/github-broker/app.json
 $AGENT_CONTAINER_HOME/github-broker/private-key.pem
 ```
 
-`app.json`は次の固定schemaです。placeholderをGitHubで確認した実値へ置き換えます。
+`app.json`は次の固定schemaです。placeholderをGitHubで確認した実値へ置き換えます。`repository_id`は旧schema projectのlegacy global fallbackだけに使う互換fieldで、新規projectのbinding sourceではありません。
 
 ```json
 {
@@ -73,25 +75,35 @@ chmod 600 \
   "$AGENT_CONTAINER_HOME/github-broker/private-key.pem"
 ```
 
-private key、App JWT、installation tokenは表示しません。installation tokenはexact repository IDと上記permissionを指定してbrokerが発行し、host memoryだけにcacheします。
+private key、App JWT、installation tokenは表示しません。installation tokenはproject policyのexact repository ID（legacy policyではglobal fallback ID）と上記permissionを指定してbrokerが発行し、host memoryだけにcacheします。
 
 ## Broker modeでprojectを登録する
 
-handover directoryを先に作り、rulesetをGitHub上で確認した後に登録します。
+handover directoryを先に作り、rulesetをGitHub上で確認した後に登録します。hostの認証済み`gh`でexact repositoryだけをqueryし、返された正のdecimal IDを表示せず変数へ保持します。
 
 ```bash
 export HANDOVER_ROOT="$HOME/handovers"
 mkdir -p "$HANDOVER_ROOT/REPOSITORY"
 
+GITHUB_REPOSITORY_ID="$(
+  gh repo view OWNER/REPOSITORY --json databaseId --jq .databaseId
+)"
+case "$GITHUB_REPOSITORY_ID" in
+  ''|*[!0-9]*) exit 1 ;;
+esac
+test "$GITHUB_REPOSITORY_ID" -gt 0 || exit 1
+
 bin/agentctl project add OWNER/REPOSITORY \
   --handover-root "$HANDOVER_ROOT" \
   --github-broker \
+  --github-repository-id "$GITHUB_REPOSITORY_ID" \
   --default-branch main \
   --protected-branch main \
   --confirm-force-push-ruleset
+unset GITHUB_REPOSITORY_ID
 ```
 
-`--confirm-force-push-ruleset`は実際に全branch force-push禁止rulesetを確認した場合だけ指定します。default branchは必ずprotected branchになります。`master`など他の保護対象があれば`--protected-branch`を繰り返します。
+`--github-repository-id`は`--github-broker`専用で、新規broker projectでは必須です。IDはprojectのmode `0600` policyへ保存しますが、broker audit、container output、container mountへ書きません。`--confirm-force-push-ruleset`は実際に全branch force-push禁止rulesetを確認した場合だけ指定します。default branchは必ずprotected branchになります。`master`など他の保護対象があれば`--protected-branch`を繰り返します。
 
 登録時のcloneはbroker経由です。broker起動、App state、policy、token発行、GitHub transportのどれかが失敗した場合、cloneやproject record作成を行わず、legacy `gh`へfallbackしません。
 
@@ -111,7 +123,7 @@ bin/agentctl doctor PROJECT --agent claude --github-broker
 bin/agentctl run PROJECT --agent claude --github-broker
 ```
 
-`doctor --github-broker`はlocal App metadata、private keyのfile boundary、project policyをread-onlyで検査します。`PASS github-broker: local App and project policy valid`はlocal stateだけの判定で、GitHub installation、permission、repository ID、ruleset、network到達性の実確認を意味しません。それらはsmoke testで確認します。
+`doctor --github-broker`はlocal App metadata、private keyのfile boundary、project policyをread-onlyで検査します。新schemaなら`PASS  github-broker: local App and project repository binding valid`、旧schemaなら`PASS  github-broker: local App and legacy global repository binding valid`と表示します。どちらもlocal stateだけの判定であり、remote App selection、GitHub installation、permission、repository identity、ruleset、network到達性の実確認を意味しません。それらはsmoke testで確認します。doctorはnumeric repository IDを表示せず、network probeも行いません。
 
 runtimeごとにproject別Unix socketとephemeral capabilityを生成し、read-only mountします。runtime終了時に両方を破棄します。broker modeでは`GH_CONFIG_DIR`、hostの`gh` state、credential helper、token環境変数をcontainerへ渡しません。
 
@@ -151,11 +163,15 @@ PR body、Issue title、body、author、label、URL、credential、GitHub error 
 
 ## 移行とrollback
 
-既存projectをbroker modeへ暗黙移行しません。初期版では、App stateとrulesetを準備した上で、broker modeを使うprojectとして登録・実host smokeを行います。一つのruntimeへbrokerとlegacy `gh` credentialを同時に渡しません。
+既存projectをbroker modeへ暗黙移行しません。旧schema broker policyはread可能で、runtimeはglobal `app.json`のrepository IDを使うlegacy global fallbackを維持します。一つのruntimeへbrokerとlegacy `gh` credentialを同時に渡しません。
+
+中断した新規登録の旧schema policyをproject-scopedへupgradeできるのは、`--github-repository-id`を明示し、repository、default/protected branches、ruleset確認がexact matchし、`project.json`とworkspaceがともに存在せず非symlinkで、policyがcurrent user所有のmode `0600`通常非symlink fileである場合だけです。既存sibling fileは保持し、既存の別ID、完成済みproject、workspace、mismatch、安全でないmetadata、malformed schemaではpolicyを変更せず停止します。retry前にはbounded read-only inventoryと新しいhost承認が必要です。
 
 rollbackはbroker障害からの自動fallbackではなく、利用者が明示的に通常modeを選ぶ運用変更です。legacy `gh` stateは自動削除しません。ただし、brokerで登録したworkspaceをそのままcredential modeへ切り替えて安全だと推測せず、project metadata、origin、credential scopeをreviewします。
 
 ## Failure対応
+
+2026-08-29のPhase 4初回登録ではtoken発行後の`upload-discovery`が失敗しました。観測された原因はglobal App metadataのrepository IDがsmoke repositoryと異なり、別のselected repositoryだけに限定されたtokenをsmoke projectへ使ったことです。これはremote App selectionやpermission gateの成功を意味しません。project-scoped bindingの実装後も、partial stateを再inventoryし新しいhost承認を得るまで登録をretryしません。
 
 - `github-broker` doctorがFAIL: file path、owner、mode、symlink、metadata schema、project policyを修正します。private key本文は表示しません。
 - clone/fetch/push/PR/Issue readが失敗: App installation、exact repository ID、permission、ruleset、networkをhost側で確認します。tokenやGitHub error bodyを採取しません。
