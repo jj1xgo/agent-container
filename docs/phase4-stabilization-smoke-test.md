@@ -9,12 +9,12 @@
 - private key、JWT、installation token、capability、Authorization headerの値・長さ・prefix・suffix・hashをstdout、stderr、log、handover、command lineへ出した。
 - containerのenvironment、filesystem、process argv、`/proc/*/environ`からcredentialを読めた。
 - exact repository以外へaccessできた、またはprotected branchへのpush、ref delete、generic API、merge、releaseがbroker経由で可能だった。
+- advertisement済みの既存branchへのupdateがfast-forwardを含めてbrokerを通過した。
 - broker failureがlegacy `gh` credential、environment token、SSH agent、host credential helperへのfallbackを起動した。
-- GitHub側の全branch force-push禁止rulesetとbypassなしを確認できない。
 
 credential本文を表示しない。記録するのは固定schemaの結果、boolean、exit status、operation名、repository slug、PR番号などsecret-free metadataだけとする。host `gh` administrationによるfixture準備はcontainer broker operationsと別の承認・記録対象であり、失敗した外部操作を自動再実行しない。
 
-repository bindingはproject-scopedで、新規登録には`--github-repository-id`を必須とする。旧schema policyのlegacy global fallbackは既存project互換性だけのために残る。shared installationはproduction and smoke selected repositoriesの両方を維持する。Do not deselect the production repository。each installation token narrows to exactly one project repository IDであり、local doctorはremote App selectionを証明しない。
+repository bindingはproject-scopedで、新規登録には`--github-repository-id`を必須とする。pushはcreate-onlyで、advertisementに存在しないunprotected branchをold OID zeroで作る場合だけ許可し、既存branchへのupdateを拒否する。fast-forwardもnon-fast-forwardも拒否し、追加作業は新しいbranchと必要に応じた新しいPRを使う。新しいpolicy fileにruleset markerはなく、旧exact true-marker schemaはcompatibility inputとしてだけ読み、既存projectのlegacy global fallbackを維持する。shared installationはproduction and smoke selected repositoriesの両方を維持する。Do not deselect the production repository。each installation token narrows to exactly one project repository IDであり、local doctorはremote App selectionやpaid GitHub branch settingを証明しない。
 
 ## 1. Scope reconciliation
 
@@ -46,11 +46,11 @@ printf '%s\n' 'reviewed_candidate_valid=true'
 
 - `main`は初期READMEだけを持つ。open Issueは固定title、body、label、milestoneを持ち、closed Issueはviewのstateとbody確認に使う。
 - open Pull RequestはIssue listから除外される固定sentinelを持つ。Issue／PR番号と期待値はhost側の`$AGENT_CONTAINER_HOME/projects/agent-container-smoke/smoke-fixtures.json`へ、ownerが実行userのmode `0600`通常fileとして記録し、containerへmountしない。
-- GitHub Appは`Only select repositories`でproduction repositoryを選択したまま、このexact smoke repositoryも選択し、Metadata read、Contents write、Pull requests write、Checks read、Issues readだけを付与する。全branch rulesetはforce-pushを禁止しbypassを持たない。
+- GitHub Appは`Only select repositories`でproduction repositoryを選択したまま、このexact smoke repositoryも選択し、Metadata read、Contents write、Pull requests write、Checks read、Issues readだけを付与する。create-only enforcementはbroker自身が行い、有料planのrulesetやbranch protectionを前提にしない。
 
 通常の新規登録では、同じproject ID、workspace、handover directory、broker project recordが存在するcollisionをread-onlyで確認する。いずれかが存在する場合は停止し、既存stateを削除、上書き、再利用、別repositoryへ再割当てしない。
 
-今回のretryだけは、上記の観測済みpartial stateからの限定upgrade gateを使う。次のcheckがすべて成功し、policy内のrepository、default branch、protected branches、ruleset確認が要求値とexact matchすることをsecret値を出力せず検査できた場合だけ先へ進む。余分・不足・symlink・owner/mode mismatch・malformed stateがあれば変更せず停止する。
+今回のretryだけは、上記の観測済みpartial stateからの限定upgrade gateを使う。次のcheckがすべて成功し、policy内のrepository、default branch、protected branchesと旧exact true markerがcompatibility schemaに一致することをsecret値を出力せず検査できた場合だけ先へ進む。余分・不足・symlink・owner/mode mismatch・malformed stateがあれば変更せず停止する。
 
 ```bash
 export AGENT_HANDOVER_ROOT="$HOME/handovers"
@@ -165,7 +165,7 @@ printf '%s\n' 'smoke_repository_id_valid=true'
 # STOP: fresh approval required before registration.
 ```
 
-ここで必ず停止する。filesystem／policy／manifest／ID validityのboolean evidenceを示し、exact repository、project ID、legacy policy atomic upgrade、broker clone、project metadata作成、sibling manifest保持だけを対象とするfresh approvalを得る。fixture、production repository、App selection、ruleset、releaseのmutationは含めない。
+ここで必ず停止する。filesystem／policy／manifest／ID validityのboolean evidenceを示し、exact repository、project ID、legacy policy atomic upgrade、broker clone、project metadata作成、sibling manifest保持だけを対象とするfresh approvalを得る。fixture、production repository、App selection、GitHub repository setting、releaseのmutationは含めない。
 
 ### Fresh approval後の一度だけの登録
 
@@ -178,8 +178,7 @@ if ! bin/agentctl project add jj1xgo/agent-container-smoke \
   --github-broker \
   --github-repository-id "$smoke_repository_id" \
   --default-branch main \
-  --protected-branch main \
-  --confirm-force-push-ruleset; then
+  --protected-branch main; then
   unset smoke_repository_id
   exit 1
 fi
@@ -199,9 +198,11 @@ bin/agentctl doctor agent-container-smoke --agent claude --github-broker
 bin/agentctl doctor agent-container --github-broker
 ```
 
-doctorのPASSはlocal App metadata、private key boundary、project policyだけを意味し、remote App selection、GitHub installation、permission、repository identity、ruleset、network到達性の確認ではない。explicit policyでは`project repository binding valid`、旧schemaでは`legacy global repository binding valid`と区別するがnumeric IDは表示しない。runtime内で`GH_CONFIG_DIR`、`GITHUB_TOKEN`、`GH_TOKEN`、host Git credential store、SSH agent、hostの`.config/gh`、App private key、`app.json`が利用不能であり、project別socketとephemeral capabilityだけがread-only mountされることを値を表示せず確認する。
+doctorのPASSはlocal App metadata、private key boundary、project policyだけを意味し、remote App selection、GitHub installation、permission、repository identity、paid GitHub branch setting、network到達性の確認ではない。explicit policyでは`project repository binding valid`、旧schemaでは`legacy global repository binding valid`と区別するがnumeric IDは表示しない。runtime内で`GH_CONFIG_DIR`、`GITHUB_TOKEN`、`GH_TOKEN`、host Git credential store、SSH agent、hostの`.config/gh`、App private key、`app.json`が利用不能であり、project別socketとephemeral capabilityだけがread-only mountされることを値を表示せず確認する。
 
 ## 4. Git/PR gate
+
+以下はcreate-only修正版のreview、新しいimage build、対象を限定した新しい承認が完了するまで実行しない。
 
 mainへ直接pushしない。正の操作は一意なwork branchだけで行う。`git push`の直前に、exact repositoryと`test/github-broker-smoke-UNIQUE`だけを対象とするhost承認を得る。`agent-github pr create`の直前にも、同じrepository・branch・smoke PRだけを対象とする別の外部状態承認を得る。
 
@@ -221,7 +222,7 @@ agent-github pr view PR_NUMBER
 agent-github pr checks PR_NUMBER
 ```
 
-clone/fetch、通常push、PR create/view/checksがbounded JSONで成功することを確認する。protected branch、delete、non-head ref、cross-repository、non-fast-forward操作はtest repository内で拒否されることを確認する。stale leaseは決定論的に同期できる方法が先に成立した場合だけ実hostで確認し、race依存の並行pushは使わない。merge、release、generic API interfaceは存在しない。smoke PRはmergeしない。
+clone/fetchと、advertisementに存在しない一意なbranchの最初の作成pushが成功することを確認する。その後、同じbranchへのfast-forward／non-fast-forward update、protected branch、delete、non-head ref、cross-repository操作がGitHub POST前に拒否されることを確認する。追加作業には別の新しいbranchと必要に応じた新しいPRを使う。stale leaseは決定論的に同期できる方法が先に成立した場合だけ実hostで確認し、race依存の並行pushは使わない。merge、release、generic API interfaceは存在しない。smoke PRはmergeしない。
 
 gate完了後、smoke PRをcloseし、対応する一意な`test/github-broker-smoke-UNIQUE` branchだけを削除する場合は、broker操作と混同しないhost `gh` administrationとして、PR番号、repository、branchを示した別の実行直前host承認を得る。固定fixture Issue、Pull Request、`main`、他branchは変更・削除しない。
 
@@ -265,16 +266,20 @@ scope整合の文書変更と必要なtest変更がmainへmerge済みであり�
 
 2026-08-29、review済みcandidateのbuildと固定CLI probe、部分filesystem state、旧schema policy、Issue #1／#2・Pull Request #3を含むexact fixture manifest、および非記録のpositive repository IDをhostで確認した。その後、fresh approvalを得た一度だけの承認済み登録が成功し、broker経由のclone、project metadata、project-scoped bindingが作成された。登録前後でfixture manifestのdigestは不変だった。
 
-登録後のsmoke Codex doctorは全local checkがPASS、smoke Claude doctorも認証状態`authenticated`を含めてPASS、production doctorも`legacy global repository binding valid`を含めてPASSだった。3回とも既知の`network-policy`だけがWARNだった。これらはlocal stateの証拠であり、remote App selection／rulesetはPARTIALのままである。先の独立API確認は401／403で読み出せなかったため、manual completion reportをremote proofへ格上げしない。
+登録後のsmoke Codex doctorは全local checkがPASS、smoke Claude doctorも認証状態`authenticated`を含めてPASS、production doctorも`legacy global repository binding valid`を含めてPASSだった。3回とも既知の`network-policy`だけがWARNだった。これらはlocal stateの証拠である。App selectionの先の独立API確認は401／403で読み出せず、private ruleset inventoryはHTTP 403の`upgrade-or-public`制限だったため、manual completion reportをremote proofへ格上げしない。
 
-初回登録失敗の`upload-discovery`とその原因診断は上記「観測済みの初回失敗」に残す。今回の成功はその履歴を上書きしない。Git/PR、Issue data、cleanup/stale client、releaseは未実施である。
+初回登録失敗の`upload-discovery`とその原因診断は上記「観測済みの初回失敗」に残す。その後、receive-pack hangを切り分け、bounded requestをGitHubへ転送する前のframingを直したreceive-pack修正を適用した。この履歴を後続のpush観測で上書きしない。
+
+承認済みnegative gateでは、初回のdisposable branch作成は成功し、protected main、delete、tagは拒否された。しかしunrelated-history force pushは成功し、runtimeは安全停止したためruntime内の最終OID checkは実行されなかった。続く別のbounded host observationでremote branchが変更されたことを確認した。この結果はFAILであり、成功へ読み替えない。retry、復元、PR、Issue、cleanup、releaseは実施していない。
+
+修正版のhost gateは、review済み実装と新しいimageに対する別承認後、未使用のdisposable branchまたは明示承認された復元だけを使う。それまでは外部操作を再開しない。
 
 | check | expected | observed | date |
 | --- | --- | --- | --- |
 | Scope reconciliation | initial design, README, and operator guide agree | PASS | 2026-08-29 |
-| Fixture repository | private exact repository, fixtures, App selection, ruleset | PARTIAL | 2026-08-29 |
+| Fixture repository | private exact repository and fixtures; ruleset inventory | FAIL/PARTIAL: HTTP 403 upgrade-or-public | 2026-08-29 |
 | Project registration and local doctor | one approved registration; manifest preserved; smoke Codex/Claude and production doctor | PASS | 2026-08-29 |
-| Git/PR gate | clone/fetch/push/PR succeed; negative operations denied | not run | — |
+| Git/PR gate | new branch succeeds; existing branch/protected/delete/tag updates denied | FAIL: unrelated-history force push accepted; remote branch changed | 2026-08-29 |
 | Issue data gate | list/view/body fixed schema; Pull Request除外; excluded sentinel absent | not run | — |
 | Cleanup/stale client | runtime artifacts removed and stale client denied | not run | — |
 | Release gate | tests, review, CI, changelog, final approval, v0.4.0 | not run | — |

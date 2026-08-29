@@ -87,12 +87,13 @@ brokerはreceive-packのserver advertisementをcontainerへ転送した後、con
 - delete refを拒否する。
 - `main`、`master`とproject policyで指定したprotected refへのupdateを拒否する。
 - `refs/heads/`以外へのpushを拒否する。
-- commandの`old OID`が直前にGitHubからadvertiseされた同じrefのOIDと一致しない場合は拒否する。
+- advertisementに存在するすべてのbranchへのupdateを拒否する。
+- advertisementに存在しないrefはcommandの`old OID`がzeroの場合だけ作成を許可する。
 - 一度のrequestで更新できるref数と転送量に上限を設ける。
 
-Git wire protocolは更新commandにforce flagを持たず、`old OID`と`new OID`だけではnew commitがold commitの子孫か判定できない。brokerがpackfileを展開してuntrusted Git object graphを処理する方式は初期実装で採用しない。そのためnon-fast-forward拒否は、対象repositoryのGitHub rulesetで全`refs/heads/**`に対してforce pushを禁止することを必須条件とする。brokerのlease一致検査とGitHub rulesetを重ね、どちらかを省略した状態を「force-push拒否済み」と扱わない。`doctor`はruleset確認に必要なpermissionをbrokerへ追加せず、初期版では利用者がGitHub設定を確認したことをproject policyへ明示登録する。
+Git wire protocolは更新commandにforce flagを持たず、`old OID`と`new OID`だけではnew commitがold commitの子孫か判定できない。brokerがpackfileを展開してuntrusted Git object graphを処理する方式も採用しない。このためpushはcreate-onlyとし、既存branchへのupdateを拒否する。fast-forwardとnon-fast-forwardを区別せず、advertised branchはすべてGitHub POST前に拒否する。追加作業には新しいbranchと、必要に応じて新しいPRを使う。
 
-receive-packのref update parserとGitHub ruleset確認が完成するまではpush対応を有効にしない。単なる認証付きbyte proxyを「branch制限済み」として公開しない。
+このcreate-only制約はbrokerの不変条件であり、GitHub rulesetや有料planのbranch protectionに依存しない。新しいpolicy fileにruleset markerを保存しない。旧exact true-marker schemaはcompatibility inputとしてだけ読み取り、`doctor`は有料のGitHub branch settingを確認済みとはclaimしない。
 
 host brokerはuntrusted workspaceで`git`、hook、filter、credential helperを実行しない。Git object処理はcontainer側Gitに残し、brokerはprotocol framing、policy検査、GitHubとのnetwork transportだけを担当する。
 
@@ -167,7 +168,7 @@ token、JWT、private key、Authorization header、request body、PR本文、Git
 
 1. brokerをread-only Git操作だけで導入し、既存`gh`方式と明示optionで切り替える。
 2. exact repository制限、secret非露出、別project拒否を実hostで検証する。
-3. receive-pack policy parserを追加し、作業branchへのnon-force pushだけを有効にする。
+3. receive-pack policy parserを追加し、未advertisedな新しい作業branchの作成pushだけを有効にする。
 4. allowlist済みPR create/view/checksを追加する。
 5. `project add`、Codex runtime、Claude runtimeから`gh` directory mountと`gh auth git-credential`を削除する。
 6. 全登録projectの移行後、専用`gh` credentialを自動削除せずquarantineまたは手動rollback用に残す。
@@ -189,9 +190,9 @@ token、JWT、private key、Authorization header、request body、PR本文、Git
 ### 実host test
 
 - exact repositoryのcloneとfetchが成功する。
-- 作業branchへの通常pushが成功する。
+- 未advertisedな新しい作業branchへの作成pushが成功する。
 - `main`直接push、ref delete、別repository accessがbrokerで失敗する。
-- non-fast-forward pushが必須GitHub rulesetで失敗し、broker auditにはGitHub拒否として記録される。
+- 作成済みbranchへのfast-forwardとnon-fast-forwardの両方がbrokerで失敗し、GitHub receive-pack RPCが呼ばれない。
 - PR create/view/checksが成功し、mergeとgeneric APIが利用できない。
 - container内の環境、mount、process argv、helper応答、filesystemにtokenが存在しない。
 - broker停止後にGit操作とPR操作がfail closedになる。
@@ -205,7 +206,7 @@ token、JWT、private key、Authorization header、request body、PR本文、Git
 2. project別Unix socket lifecycleとsecret-free auditを実装する。
 3. GitHub App JWTとrepository-scoped installation token発行を実装する。
 4. read-only Git remote helperとupload-pack transportを実装する。
-5. receive-pack command parser、lease/ref policy、GitHub ruleset前提の検証を実装する。
+5. receive-pack command parserとcreate-only ref policyを実装する。
 6. PR create/view/checks clientを実装する。
 7. `agentctl doctor`とruntime orchestrationへ統合する。
 8. 実host security gate後にlegacy `gh` runtime mountを削除する。

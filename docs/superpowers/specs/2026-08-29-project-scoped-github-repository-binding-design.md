@@ -90,16 +90,15 @@ Non-broker project registration is unchanged.
 
 ## Policy schema and compatibility
 
-New `$AGENT_CONTAINER_HOME/projects/PROJECT/github-broker.json` records contain
-the existing exact fields plus:
+New `$AGENT_CONTAINER_HOME/projects/PROJECT/github-broker.json` records use this
+exact schema:
 
 ```json
 {
   "repository": "OWNER/REPOSITORY",
   "repository_id": 123,
   "default_branch": "main",
-  "protected_branches": ["main"],
-  "ruleset_confirmed": true
+  "protected_branches": ["main"]
 }
 ```
 
@@ -107,15 +106,21 @@ The numeric value above is illustrative only. Runtime validation requires a
 positive non-boolean integer and rejects unknown fields, duplicates, symlinks,
 wrong ownership, or modes other than `0600`.
 
-Legacy policies with the exact old field set remain readable. For them only,
-runtime token construction falls back to the global App metadata repository
-ID. This preserves the behavior of an existing single-repository production
-project. Newly written policies always contain `repository_id`; the CLI never
-creates another legacy policy.
+Legacy policies with the exact old field set, including an exact
+`"ruleset_confirmed": true` marker, remain readable. For them only, runtime
+token construction falls back to the global App metadata repository ID. The
+marker is compatibility input only and does not enable, configure, or weaken
+push enforcement. Newly written policies always contain `repository_id` and
+never contain a ruleset marker; the CLI never creates another legacy policy.
 
 The local `doctor` distinguishes an explicit project binding from a legacy
 global fallback. It does not claim to verify remote App selection, permission,
-repository identity, or ruleset state.
+repository identity, paid GitHub branch settings, or network behavior.
+
+Push enforcement is create-only regardless of policy schema: only an absent,
+unprotected `refs/heads/*` with a zero old OID can be created. The brokerは
+既存branchへのupdateを拒否し、fast-forwardもnon-fast-forwardも許可しない。
+Subsequent work uses a 新しいbranch and, when needed, a new pull request.
 
 ## Interrupted-registration recovery
 
@@ -129,7 +134,7 @@ when all of these conditions hold:
 
 1. `--github-repository-id` is explicitly supplied.
 2. The existing policy's repository, default branch, protected branches, and
-   ruleset confirmation exactly match the requested values.
+   exact legacy true marker match the compatibility schema.
 3. `project.json` and the project workspace are both absent and are not
    symlinks.
 4. The existing policy is a current-user-owned regular non-symlink file at

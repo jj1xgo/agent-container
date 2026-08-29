@@ -10,6 +10,13 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-29-project-scoped-github-repository-binding-design.md`
 
+**2026-08-29 security correction:** Broker push is create-only. Only an absent
+unprotected `refs/heads/*` with a zero old OID may be created; brokerは
+既存branchへのupdateを拒否し、fast-forwardもnon-fast-forwardも拒否する。
+Subsequent work uses a 新しいbranch and, when needed, a new PR. New policies
+have no ruleset marker; an exact legacy true-marker schema is compatibility
+input only, and doctor does not claim a paid GitHub branch setting was checked.
+
 ## Global Constraints
 
 - Keep global `app.json` and `private-key.pem` as the only App identity/key state; never duplicate the private key.
@@ -20,7 +27,7 @@
 - Refuse unknown policy fields, duplicate JSON keys, booleans, zero/negative IDs, symlinks, wrong owners, and modes other than `0600`.
 - Do not modify, delete, or retry the host partial state until Tasks 1–5 pass review and Task 6 receives fresh approval.
 - A failed external operation is never automatically retried.
-- Keep all existing Git/PR/Checks/Issue operation and branch-policy boundaries unchanged.
+- Keep all existing Git/PR/Checks/Issue operation boundaries; use the corrected create-only branch policy above.
 
 ---
 
@@ -106,7 +113,8 @@ bound = legacy | {"repository_id": 123}
 ```
 
 Assert legacy loads with `repository_id is None`, bound loads with `123`, and
-new writes include exactly the five bound keys. Add subtests rejecting
+new writes include exactly the four bound keys without `ruleset_confirmed`.
+Add subtests rejecting
 `repository_id` values `True`, `0`, `-1`, and `"123"`, plus one unknown-key
 case.
 
@@ -458,7 +466,7 @@ PYTHONPATH=src python3 -m unittest \
 Use the loaded policy's `repository_id is None` state to select the exact
 bounded or legacy PASS detail. Do not print the numeric ID or add a network
 probe. Keep the existing warning that doctor does not prove remote installation,
-permission, repository selection, or ruleset state.
+permission, repository selection, paid GitHub branch settings, or network state.
 
 - [ ] **Step 4: Update documentation and changelog**
 
@@ -543,8 +551,8 @@ Stop on any failure. Do not retry automatically.
 Require: project directory `0700`; policy and fixture manifest regular,
 non-symlink, current-user-owned, `0600`; absent `project.json`; absent
 workspace; existing handover directory `0700`. Load the policy through the
-reviewed code and confirm exact repository/default/protected/ruleset fields and
-legacy `repository_id is None`. Validate the manifest exact keys and fixture
+reviewed code and confirm exact repository/default/protected fields, the exact
+legacy true marker, and `repository_id is None`. Validate the manifest exact keys and fixture
 numbers without printing its body.
 
 ```bash
@@ -665,7 +673,7 @@ registration.
 
 Name the exact repository, project ID, legacy policy atomic upgrade, broker
 clone, project metadata creation, and existing sibling manifest preservation.
-State that no fixture, production repository, App setting, ruleset, or release
+State that no fixture, production repository, App setting, or release
 mutation is included.
 
 The shared installation must retain production and smoke selected repositories.
@@ -681,8 +689,7 @@ if ! bin/agentctl project add jj1xgo/agent-container-smoke \
   --github-broker \
   --github-repository-id "$smoke_repository_id" \
   --default-branch main \
-  --protected-branch main \
-  --confirm-force-push-ruleset; then
+  --protected-branch main; then
   unset smoke_repository_id
   exit 1
 fi

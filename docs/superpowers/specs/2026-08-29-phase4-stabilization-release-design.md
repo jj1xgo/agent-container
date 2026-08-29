@@ -10,6 +10,8 @@ Phase 1からPhase 3で、Codex／Claude Codeの分離runtime、project別state�
 
 Phase 4では新しい権限やplatformを追加しない。設計と現行interfaceを一致させ、専用test repositoryで安全に再現できる残存gateを閉じ、証拠と残存制約を固定したうえで`v0.4.0`をreleaseする。
 
+2026-08-29のnegative gateで、private repositoryのruleset inventoryはHTTP 403のupgrade-or-public制限となり、unrelated-history force pushが受理された。これを受け、broker pushはGitHub設定に依存しないcreate-onlyへ修正する。advertisementに存在しないunprotected branchをold OID zeroで作る場合だけ許可し、既存branchへのupdateを拒否する。fast-forwardもnon-fast-forwardも拒否し、追加作業は新しいbranchと必要に応じた新しいPRを使う。
+
 ## 2. 監査結果
 
 | 分類 | 項目 | 根拠と扱い |
@@ -24,7 +26,7 @@ Phase 4では新しい権限やplatformを追加しない。設計と現行inter
 | 完了 | Issue list／viewのread-only interface | code、unit／socket test、空list実host smoke |
 | PARTIAL | Issue view／body、PR除外、非空payloadの情報制限 | 実repositoryにIssueがなくdata依存gateを未観測 |
 | PARTIAL | Issue stale client拒否 | runtime artifact cleanupは確認、stale request未実施 |
-| PARTIAL | protected／delete／stale／non-fast-forward push拒否 | 自動testは存在するがshared repositoryでの危険なnegative smokeは未実施 |
+| 修正必須 | existing branch update拒否 | disposable branchへのunrelated-history force pushが成功したためcreate-only broker gateへ変更 |
 | PARTIAL | token更新をまたぐ長時間session | 401時一度だけ更新する自動testは存在し、実時間expiryは未観測 |
 | scope変更 | family repositoryのIssue create／comment | 現行interfaceは選択repository限定read-only。writeは将来Phaseへ延期 |
 | 未着手 | outbound networkのdomain allowlist | 既知のdoctor WARNとして維持し、独立した将来Phaseへ延期 |
@@ -89,14 +91,14 @@ broker失敗時にlegacy `gh` credential、environment token、SSH agent、host 
 - rootless Podman、rebuild済みimage、Codex／Claude doctorの必須checkが成功する。
 - test projectのmetadata、workspace origin、broker policyがexact repositoryに一致する。
 - 既存GitHub App installationのselected repositoryへtest repositoryを追加し、他の選択を変更しない。要求permissionと実responseはcredential値ではなく許可名とlevelで確認する。
-- test repositoryの全branch rulesetがforce-pushを禁止し、bypassを持たない。
+- create-only enforcementはbroker自身の不変条件であり、有料planのrulesetやbranch protectionを前提にしない。
 - container内にlegacy `gh` credential、GitHub token環境変数、host Git credential store、SSH agentが存在しない。
 
 ### 6.2 Git／PR gate
 
 - cloneとfetchが成功する。
-- 一意なwork branchへの通常pushが成功する。
-- protected branch、delete、non-fast-forward、non-head ref、cross-repository操作が拒否される。
+- advertisementに存在しない一意なwork branchへの作成pushが成功する。
+- 同じbranchへのfast-forward／non-fast-forward update、protected branch、delete、non-head ref、cross-repository操作がbrokerからGitHubへ送信する前に拒否される。
 - stale leaseは自動testを必須証拠とする。advertisement後・RPC前のremote更新をcredential非露出のまま決定論的に同期できる方法を先にspikeし、成立した場合だけ実hostで実行する。race依存の並行pushは使わず、決定論的な方法が成立しなければ`PARTIAL`として理由と受容判断を記録する。
 - negative操作はbrokerが送信前に拒否できるcaseを優先する。GitHubへ到達させる必要があるcaseもtest repository内だけで実行する。
 - PR create／view／checksが成功し、merge、release、generic API interfaceが存在しない。
@@ -169,7 +171,7 @@ test成功は正しさの証明ではない。reviewではcredential、mount、n
 - merge後の問題は履歴を書き換えずrevert PRで戻す。
 - 公開済みreleaseに問題がある場合もtagを移動せず、修正版を新しいversionとしてreleaseする。
 - test repositoryとfixtureは再現用に保持する。
-- App installation、ruleset、fixtureなどhost側変更は、変更前後とrollback手順をcredential-freeに記録する。
+- App installation、fixtureなどhost側変更は、変更前後とrollback手順をcredential-freeに記録する。
 - sandbox、mount、permission、network、credential境界を弱めるfallbackは採用しない。
 
 ## 11. Phase 4完了条件

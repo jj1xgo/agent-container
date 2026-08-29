@@ -10,6 +10,16 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-29-phase4-stabilization-release-design.md`
 
+**2026-08-29 security correction and stop state:** Broker push is create-only:
+only an absent unprotected branch with a zero old OID may be created. Brokerは
+既存branchへのupdateを拒否し、fast-forwardもnon-fast-forwardも拒否する。
+Further work uses a 新しいbranch and, when needed, a new PR. The private
+ruleset inventory returned HTTP 403 upgrade-or-public, and the original
+unrelated-history negative push was accepted. The remote disposable branch
+changed; no retry, restoration, PR, Issue, cleanup, or release followed. Do not
+resume the external plan until the corrected implementation is reviewed and a
+new disposable branch or an explicitly approved restoration is authorized.
+
 ## Global Constraints
 
 - Do not add a family Issue write interface, egress proxy, domain allowlist, new platform, merge endpoint, release endpoint, repository administration, or generic GitHub API proxy.
@@ -152,7 +162,7 @@ Copy the security constraints and exact commands from the approved spec and curr
 | check | expected | observed | date |
 | --- | --- | --- | --- |
 | Scope reconciliation | initial design, README, and operator guide agree | not run | — |
-| Fixture repository | private exact repository, fixtures, App selection, ruleset | not run | — |
+| Fixture repository | private exact repository and fixtures; ruleset inventory | FAIL/PARTIAL: HTTP 403 upgrade-or-public | 2026-08-29 |
 | Git/PR gate | clone/fetch/push/PR succeed; negative operations denied | not run | — |
 | Issue data gate | list/view/body fixed schema; Pull Request除外; excluded sentinel absent | not run | — |
 | Cleanup/stale client | runtime artifacts removed and stale client denied | not run | — |
@@ -187,7 +197,7 @@ git commit -m "docs: reconcile Phase 4 scope and gates"
 
 **Interfaces:**
 - Consumes: approved repository name and external-state approval boundary.
-- Produces: private repository with main README, milestone, open Issue, closed Issue, open PR, all-branch no-force-push ruleset, and a credential-free private manifest.
+- Produces: private repository with main README, milestone, open Issue, closed Issue, open PR, and a credential-free private manifest.
 
 - [ ] **Step 1: Perform read-only collision checks**
 
@@ -216,11 +226,11 @@ gh repo view jj1xgo/agent-container-smoke \
 
 Expected: `nameWithOwner` is exact, visibility is `PRIVATE`, and default branch is `main`. Do not retry creation after a nonzero result until read-only inventory proves no repository was created.
 
-- [ ] **Step 4: Obtain approval and configure GitHub-side safety**
+- [ ] **Step 4: Obtain approval and verify GitHub App selection**
 
-Ask approval to add the test repository to the existing GitHub App selected repositories and to create an active all-branch ruleset that forbids force pushes with no bypass. Use GitHub settings UI for these administration changes; do not add repository-administration operations to the broker.
+Ask approval to add the test repository to the existing GitHub App selected repositories. Do not add repository-administration operations to the broker. Create-only enforcement is local and does not require a paid ruleset or branch protection.
 
-Verify read-only through GitHub UI or an allowlisted host query. Record repository selection, permission names/levels, active ruleset, force-push prohibition, and bypass absence without credential or raw token data.
+Verify read-only through GitHub UI or an allowlisted host query. Record repository selection and permission names/levels without credential or raw token data.
 
 - [ ] **Step 5: Obtain fixture-creation approval**
 
@@ -312,7 +322,7 @@ Replace only the three numeric examples with observed positive integers. Validat
 - External workspace: `$AGENT_CONTAINER_HOME/workspaces/agent-container-smoke/`
 
 **Interfaces:**
-- Consumes: test repository, App selection, ruleset, fixture manifest, existing App private state.
+- Consumes: test repository, App selection, fixture manifest, existing App private state.
 - Produces: project ID `agent-container-smoke`, exact broker policy, isolated clone, and passing Codex/Claude doctors.
 
 - [ ] **Step 1: Verify registration preconditions read-only**
@@ -332,12 +342,12 @@ bin/agentctl project add jj1xgo/agent-container-smoke \
   --project agent-container-smoke \
   --handover-root "$AGENT_HANDOVER_ROOT" \
   --github-broker \
+  --github-repository-id POSITIVE_INTEGER \
   --default-branch main \
-  --protected-branch main \
-  --confirm-force-push-ruleset
+  --protected-branch main
 ```
 
-Expected: exact repository cloned through the broker; no legacy `gh` fallback; project policy records `main` as default/protected and confirmed ruleset.
+Expected: exact repository cloned through the broker; no legacy `gh` fallback; project policy records repository binding and `main` as default/protected with no ruleset marker.
 
 - [ ] **Step 4: Run both doctors**
 
@@ -346,7 +356,7 @@ bin/agentctl doctor agent-container-smoke --github-broker
 bin/agentctl doctor agent-container-smoke --agent claude --github-broker
 ```
 
-Expected: every required check passes and only the documented network-policy warning remains. Remember that doctor does not prove remote App permission or ruleset state.
+Expected: every required check passes and only the documented network-policy warning remains. Remember that doctor does not prove remote App permission, paid GitHub branch settings, or network behavior.
 
 - [ ] **Step 5: Rebuild and inspect the release-candidate image**
 
@@ -354,7 +364,6 @@ Run the normal latest build without fixed CLI version flags:
 
 ```bash
 bin/agentctl build
-podman image inspect --format '{{.Id}}' localhost/agent-container:dev
 podman run --rm localhost/agent-container:dev python3 -m agent_container.agentctl --version
 podman run --rm localhost/agent-container:dev agent-github --help >/dev/null
 podman run --rm localhost/agent-container:dev \
@@ -363,7 +372,7 @@ podman run --rm localhost/agent-container:dev \
   /opt/agent-container/src/agent_container/version.py
 ```
 
-Expected: build succeeds, the wrapper is executable, and Python source mode is `0644`. Record public versions and image ID only; do not record credential paths or values.
+Expected: build succeeds, the wrapper is executable, and Python source mode is `0644`. Record public versions only; do not record image identifiers, credential paths, or values.
 
 ### Task 5: Execute Git and Pull Request broker gates
 
@@ -438,7 +447,7 @@ git push origin "HEAD:refs/tags/phase4-broker-smoke-denied-$run_id"
 
 Expected: protected main, delete, and non-head ref each fail before mutation. Capture exit code and allowlisted audit `{timestamp,operation,status,stage,ref}` only. Stop immediately if any forbidden mutation succeeds; do not attempt automatic restoration.
 
-- [ ] **Step 6: Execute a deterministic non-fast-forward denial**
+- [ ] **Step 6: Verify create-only denial on the advertised branch**
 
 Create an unrelated commit object without changing the checkout, then attempt one forced update of only the disposable smoke branch:
 
@@ -448,7 +457,7 @@ unrelated_oid=$(printf '%s\n' 'test: unrelated Phase 4 history' | git commit-tre
 git push --force origin "$unrelated_oid:refs/heads/$smoke_branch"
 ```
 
-Expected: the GitHub all-branch ruleset rejects the update, the remote smoke branch is unchanged, and audit records a fixed receive failure without commit content. Do not print object contents or pack data.
+Expected after the create-only correction: the broker rejects this advertised-branch update before the GitHub receive-pack RPC, whether it is fast-forward or non-fast-forward; the remote smoke branch remains unchanged and audit records `git-receive-pack` as denied without commit content. Do not print object contents or pack data.
 
 - [ ] **Step 7: Spike deterministic stale-lease synchronization**
 

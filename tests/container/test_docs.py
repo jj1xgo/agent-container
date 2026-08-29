@@ -545,10 +545,10 @@ class Phase3DocumentationTest(unittest.TestCase):
             "Checks | read",
             "app.json",
             "private-key.pem",
-            "--confirm-force-push-ruleset",
             "agent-github pr create",
             "agent-github pr view",
             "agent-github pr checks",
+            "既存branchへのupdateを拒否",
             "legacy `gh` credentialへfallbackしません",
         ):
             self.assertIn(expected, body)
@@ -627,6 +627,89 @@ class Phase3DocumentationTest(unittest.TestCase):
 
 
 class Phase4DocumentationTest(unittest.TestCase):
+    def test_current_broker_commands_omit_obsolete_ruleset_confirmation(
+        self,
+    ) -> None:
+        documents = (
+            ROOT / "README.md",
+            ROOT / "docs/phase3-github-broker.md",
+            ROOT / "docs/phase3-github-broker-smoke-test.md",
+            ROOT / "docs/phase4-stabilization-smoke-test.md",
+            ROOT / "docs/superpowers/plans/2026-08-29-project-scoped-github-repository-binding.md",
+            ROOT / "docs/superpowers/plans/2026-08-29-phase4-stabilization-release.md",
+        )
+        for path in documents:
+            body = path.read_text(encoding="utf-8")
+            shell_blocks = re.findall(
+                r"```(?:bash|sh)\n(.*?)```", body, flags=re.DOTALL
+            )
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertTrue(shell_blocks)
+                self.assertNotIn(
+                    "--confirm-force-push-ruleset", "\n".join(shell_blocks)
+                )
+
+    def test_current_policy_schema_omits_legacy_ruleset_marker(self) -> None:
+        path = (
+            ROOT
+            / "docs/superpowers/specs/2026-08-29-project-scoped-github-repository-binding-design.md"
+        )
+        body = path.read_text(encoding="utf-8")
+        schema_section = body.split("## Policy schema and compatibility", 1)[1]
+        example = re.search(
+            r"```json\n(.*?)```", schema_section, flags=re.DOTALL
+        )
+        self.assertIsNotNone(example)
+        policy = json.loads(example.group(1))
+        self.assertEqual(
+            set(policy),
+            {
+                "repository",
+                "repository_id",
+                "default_branch",
+                "protected_branches",
+            },
+        )
+        self.assertNotIn("ruleset_confirmed", policy)
+
+    def test_normative_docs_require_create_only_broker_branches(self) -> None:
+        documents = (
+            ROOT / "README.md",
+            ROOT / "docs/phase3-github-broker.md",
+            ROOT / "docs/phase3-github-broker-smoke-test.md",
+            ROOT / "docs/superpowers/specs/2026-08-25-phase-3-github-broker-design.md",
+            ROOT / "docs/superpowers/specs/2026-08-29-project-scoped-github-repository-binding-design.md",
+            ROOT / "docs/superpowers/specs/2026-08-29-phase4-stabilization-release-design.md",
+            ROOT / "docs/superpowers/plans/2026-08-25-phase-3-github-broker.md",
+            ROOT / "docs/superpowers/plans/2026-08-29-project-scoped-github-repository-binding.md",
+            ROOT / "docs/superpowers/plans/2026-08-29-phase4-stabilization-release.md",
+        )
+        for path in documents:
+            body = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertIn("既存branchへのupdateを拒否", body)
+                self.assertIn("fast-forward", body)
+                self.assertIn("新しいbranch", body)
+
+    def test_phase4_smoke_preserves_failed_force_push_gate_evidence(self) -> None:
+        smoke = (ROOT / "docs/phase4-stabilization-smoke-test.md").read_text(
+            encoding="utf-8"
+        )
+        for required in (
+            "HTTP 403",
+            "upgrade-or-public",
+            "初回のdisposable branch作成は成功",
+            "protected main、delete、tagは拒否",
+            "unrelated-history force pushは成功",
+            "runtime内の最終OID checkは実行されなかった",
+            "別のbounded host observation",
+            "remote branchが変更された",
+            "retry、復元、PR、Issue、cleanup、releaseは実施していない",
+            "receive-pack hang",
+            "receive-pack修正",
+        ):
+            self.assertIn(required, smoke)
+
     def test_tracked_operational_docs_do_not_advertise_obsolete_id_lookup(
         self,
     ) -> None:
@@ -754,14 +837,20 @@ class Phase4DocumentationTest(unittest.TestCase):
             ),
             (
                 "Fixture repository",
-                "private exact repository, fixtures, App selection, ruleset",
-                "PARTIAL",
+                "private exact repository and fixtures; ruleset inventory",
+                "FAIL/PARTIAL: HTTP 403 upgrade-or-public",
                 "2026-08-29",
             ),
             (
                 "Project registration and local doctor",
                 "one approved registration; manifest preserved; smoke Codex/Claude and production doctor",
                 "PASS",
+                "2026-08-29",
+            ),
+            (
+                "Git/PR gate",
+                "new branch succeeds; existing branch/protected/delete/tag updates denied",
+                "FAIL: unrelated-history force push accepted; remote branch changed",
                 "2026-08-29",
             ),
         )
@@ -771,7 +860,6 @@ class Phase4DocumentationTest(unittest.TestCase):
                 smoke,
             )
         for check in (
-            "Git/PR gate",
             "Issue data gate",
             "Cleanup/stale client",
             "Release gate",
@@ -788,7 +876,7 @@ class Phase4DocumentationTest(unittest.TestCase):
             "production doctor",
             "legacy global repository binding valid",
             "network-policy",
-            "App selection／rulesetはPARTIAL",
+            "private ruleset inventoryはHTTP 403",
             "401／403",
         ):
             self.assertIn(required, smoke)
