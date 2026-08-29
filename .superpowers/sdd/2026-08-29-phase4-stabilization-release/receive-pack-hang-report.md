@@ -61,3 +61,26 @@ The real Unix-socket regression
 The first socket-suite attempt inside the restricted sandbox failed only because local
 Unix socket bind was denied; the approved local-only verification passed outside that
 sandbox.
+
+## Review round 1 remediation
+
+The independent review found no Critical or Important issue and requested broader
+mutation protection for the early-completion classifier. A table-driven RED test showed
+that the first version incorrectly classified six malformed/ambiguous shapes as eligible
+for early completion: duplicate refs, a missing first capability separator, a capability
+section on a later command, a second NUL, mixed object formats, and a non-hex old OID.
+
+The classifier now requires one non-empty capability section on the first command and no
+later NUL, uniform SHA-1 or SHA-256 hex OID widths, a nonzero old OID, an all-zero new OID,
+`refs/` names, unique refs, and an exact terminal flush. Table vectors also cover valid
+single and multiple SHA-1 deletes, SHA-256 deletes, mixed delete/update requests,
+trailing data, missing flush, empty sections, invalid lengths, and truncated packets.
+Requests that are not proven valid all-delete sections retain the bounded PACK/EOF path;
+the broker remains the policy authority.
+
+Review-remediation verification before commit:
+
+- Focused remote-helper/protocol/broker suite: 52 passed.
+- Local Unix-socket integration suite: 4 passed.
+- Ruff 0.16.4: `All checks passed!`.
+- `git diff --check`: clean.

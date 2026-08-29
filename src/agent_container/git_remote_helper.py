@@ -10,6 +10,7 @@ MAX_STATELESS_REQUEST_BYTES = 16 * 1024 * 1024
 MAX_RECEIVE_PACK_REQUEST_BYTES = 256 * 1024 * 1024
 MAX_STATELESS_PACKETS = 65_536
 _HEX_HEADER = re.compile(br"^[0-9a-fA-F]{4}$")
+_HEX_OID = re.compile(br"^[0-9a-fA-F]+$")
 
 
 class UploadPackTransport(Protocol):
@@ -95,6 +96,8 @@ def read_stateless_request(stream: BinaryIO) -> bytes | None:
 def _is_delete_only_receive_pack(commands: bytes) -> bool:
     offset = 0
     updates = 0
+    oid_length: int | None = None
+    refs: set[bytes] = set()
     while offset < len(commands):
         header = commands[offset : offset + 4]
         if len(header) != 4 or _HEX_HEADER.fullmatch(header) is None:
@@ -108,12 +111,33 @@ def _is_delete_only_receive_pack(commands: bytes) -> bool:
         line = commands[offset : offset + length - 4].removesuffix(b"\n")
         offset += length - 4
         if updates == 0:
-            line = line.split(b"\0", 1)[0]
+            if line.count(b"\0") != 1:
+                return False
+            line, capabilities = line.split(b"\0", 1)
+            if not capabilities:
+                return False
+        elif b"\0" in line:
+            return False
         parts = line.split(b" ")
-        if len(parts) != 3 or len(parts[1]) not in {40, 64}:
+        if len(parts) != 3 or len(parts[0]) not in {40, 64}:
             return False
-        if parts[1] != b"0" * len(parts[1]):
+        old_oid, new_oid, ref = parts
+        if (
+            len(new_oid) != len(old_oid)
+            or _HEX_OID.fullmatch(old_oid) is None
+            or _HEX_OID.fullmatch(new_oid) is None
+            or old_oid == b"0" * len(old_oid)
+        ):
             return False
+        if oid_length is None:
+            oid_length = len(old_oid)
+        elif len(old_oid) != oid_length:
+            return False
+        if new_oid != b"0" * len(new_oid):
+            return False
+        if not ref.startswith(b"refs/") or ref in refs:
+            return False
+        refs.add(ref)
         updates += 1
     return False
 

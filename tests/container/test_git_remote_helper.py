@@ -2,6 +2,7 @@ from io import BytesIO
 import unittest
 
 from agent_container.git_remote_helper import MAX_STATELESS_REQUEST_BYTES
+from agent_container.git_remote_helper import _is_delete_only_receive_pack
 from agent_container.git_remote_helper import StatelessRemoteHelper
 from agent_container.git_remote_helper import parse_broker_repository_url
 from agent_container.git_remote_helper import read_stateless_request
@@ -11,6 +12,18 @@ from agent_container.state import Repository
 
 def pkt(body: bytes) -> bytes:
     return f"{len(body) + 4:04x}".encode() + body
+
+
+def delete_command(
+    old: bytes,
+    ref: bytes,
+    *,
+    capabilities: bytes | None = None,
+) -> bytes:
+    body = old + b" " + b"0" * len(old) + b" " + ref
+    if capabilities is not None:
+        body += b"\0" + capabilities
+    return pkt(body + b"\n")
 
 
 class FakeTransport:
@@ -69,6 +82,86 @@ class StatelessRequestTest(unittest.TestCase):
         oversized = pkt(b"x" * 1000) * (MAX_STATELESS_REQUEST_BYTES // 1004 + 1)
         with self.assertRaisesRegex(ValueError, "too large"):
             read_stateless_request(BytesIO(oversized))
+
+
+class ReceivePackCompletionClassifierTest(unittest.TestCase):
+    def test_accepts_only_well_formed_all_delete_sections(self) -> None:
+        sha1 = b"1" * 40
+        sha256 = b"a" * 64
+        cases = {
+            "sha1": delete_command(
+                sha1,
+                b"refs/heads/one",
+                capabilities=b"report-status side-band-64k",
+            )
+            + b"0000",
+            "sha256": delete_command(
+                sha256,
+                b"refs/heads/two",
+                capabilities=b"report-status object-format=sha256",
+            )
+            + b"0000",
+            "multiple": delete_command(
+                sha1, b"refs/heads/one", capabilities=b"report-status"
+            )
+            + delete_command(sha1, b"refs/heads/two")
+            + b"0000",
+        }
+        for name, commands in cases.items():
+            with self.subTest(name=name):
+                self.assertTrue(_is_delete_only_receive_pack(commands))
+
+    def test_rejects_mixed_duplicate_and_malformed_sections(self) -> None:
+        sha1 = b"1" * 40
+        first = delete_command(
+            sha1, b"refs/heads/one", capabilities=b"report-status"
+        )
+        update = pkt(
+            sha1
+            + b" "
+            + b"2" * 40
+            + b" refs/heads/two\n"
+        )
+        cases = {
+            "mixed-delete-update": first + update + b"0000",
+            "duplicate-ref": first
+            + delete_command(sha1, b"refs/heads/one")
+            + b"0000",
+            "missing-capabilities": delete_command(
+                sha1, b"refs/heads/one"
+            )
+            + b"0000",
+            "second-capability-section": first
+            + delete_command(
+                sha1,
+                b"refs/heads/two",
+                capabilities=b"report-status",
+            )
+            + b"0000",
+            "second-nul": delete_command(
+                sha1,
+                b"refs/heads/one",
+                capabilities=b"report-status\0agent=git/2.53",
+            )
+            + b"0000",
+            "mixed-object-formats": first
+            + delete_command(b"2" * 64, b"refs/heads/two")
+            + b"0000",
+            "non-hex-old": delete_command(
+                b"z" * 40,
+                b"refs/heads/one",
+                capabilities=b"report-status",
+            )
+            + b"0000",
+            "trailing-data": first + b"0000PACK",
+            "missing-flush": first,
+            "empty": b"0000",
+            "invalid-length": b"0003",
+            "truncated-packet": b"0010short",
+        }
+        for name, commands in cases.items():
+            with self.subTest(name=name):
+                self.assertFalse(_is_delete_only_receive_pack(commands))
 
 
 class RemoteHelperTest(unittest.TestCase):
