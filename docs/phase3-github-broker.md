@@ -79,7 +79,7 @@ private key、App JWT、installation tokenは表示しません。installation t
 
 ## Broker modeでprojectを登録する
 
-handover directoryを先に作り、rulesetをGitHub上で確認します。hostのagent-container専用`gh` stateでexact smoke repositoryだけをqueryします。shell tracingを先に無効化し、返された正のdecimal IDは表示せず変数へ保持します。
+handover directoryを先に作り、rulesetをGitHub上で確認します。hostのagent-container専用`gh` stateでexact smoke repositoryだけをqueryします。これはhost-only bounded REST inventoryであり、container brokerへgeneric APIを追加しません。`gh repo view --json id`のGraphQL node IDではなくRESTのnumeric `.id`を使います。shell tracingを先に無効化し、返された正のdecimal IDは表示せず変数へ保持します。
 
 ```bash
 export HANDOVER_ROOT="$HOME/handovers"
@@ -89,8 +89,7 @@ set +x
 set -eu
 smoke_repository_id=$(
   GH_CONFIG_DIR="$AGENT_CONTAINER_HOME/gh" \
-    gh repo view jj1xgo/agent-container-smoke \
-      --json databaseId --jq .databaseId
+    gh api repos/jj1xgo/agent-container-smoke --jq .id
 )
 case "$smoke_repository_id" in
   ''|*[!0-9]*) exit 1 ;;

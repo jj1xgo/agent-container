@@ -462,8 +462,10 @@ permission, repository selection, or ruleset state.
 
 - [ ] **Step 4: Update documentation and changelog**
 
-Document the new project-add option with a bounded `gh repo view ... --json
-databaseId --jq .databaseId` host inventory step. State that the ID is passed
+Document the new project-add option with a bounded host-only
+`GH_CONFIG_DIR=... gh api repos/OWNER/REPOSITORY --jq .id` REST inventory step.
+State that this does not add generic API access to the container broker, that
+GraphQL `gh repo view --json id` is not the numeric repository ID, and that the ID is passed
 explicitly but never written to audit/container output. Record the diagnosed
 Phase 4 `upload-discovery` failure, project-scoped fix, legacy fallback, exact
 partial-state recovery gate, and the fact that host retry still requires fresh
@@ -645,8 +647,7 @@ set +x
 set -eu
 smoke_repository_id=$(
   GH_CONFIG_DIR="$AGENT_CONTAINER_HOME/gh" \
-    gh repo view jj1xgo/agent-container-smoke \
-      --json databaseId --jq .databaseId
+    gh api repos/jj1xgo/agent-container-smoke --jq .id
 )
 case "$smoke_repository_id" in
   ''|*[!0-9]*) exit 1 ;;

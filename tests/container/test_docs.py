@@ -747,6 +747,9 @@ class Phase4DocumentationTest(unittest.TestCase):
                 for required in (
                     "set +x",
                     'GH_CONFIG_DIR="$AGENT_CONTAINER_HOME/gh"',
+                    "gh api repos/jj1xgo/agent-container-smoke --jq .id",
+                    "host-only",
+                    "generic API",
                     "smoke_repository_id=$(",
                     'test "$smoke_repository_id" -gt 0',
                     "smoke_repository_id_valid=true",
@@ -755,9 +758,10 @@ class Phase4DocumentationTest(unittest.TestCase):
                     "unset smoke_repository_id",
                 ):
                     self.assertIn(required, body)
+                self.assertNotIn("--json databaseId", body)
 
                 tracing_off = body.index("set +x")
-                lookup = body.index("gh repo view", tracing_off)
+                lookup = body.index("gh api repos/", tracing_off)
                 marker = body.index("smoke_repository_id_valid=true", lookup)
                 stop = body.index(
                     "# STOP: fresh approval required before registration.", marker
@@ -779,7 +783,7 @@ class Phase4DocumentationTest(unittest.TestCase):
                     for block in re.findall(
                         r"```(?:bash|sh)\n(.*?)```", body, flags=re.DOTALL
                     )
-                    if "gh repo view" in block
+                    if "smoke_repository_id=$(" in block
                 )
                 self.assertIn("smoke_repository_id=$(", lookup_block)
                 self.assertLess(
@@ -788,7 +792,7 @@ class Phase4DocumentationTest(unittest.TestCase):
                 )
                 self.assertLess(
                     lookup_block.index('GH_CONFIG_DIR="$AGENT_CONTAINER_HOME/gh"'),
-                    lookup_block.index("gh repo view"),
+                    lookup_block.index("gh api repos/"),
                 )
                 self.assertNotIn("project add", lookup_block)
                 self.assertNotIn('echo "$smoke_repository_id"', lookup_block)
@@ -796,6 +800,7 @@ class Phase4DocumentationTest(unittest.TestCase):
                     lookup_block,
                     r"printf[^\n]*\$smoke_repository_id",
                 )
+                self.assertNotIn("gh repo view --json id", lookup_block)
                 registration_block = next(
                     block
                     for block in re.findall(
@@ -804,7 +809,7 @@ class Phase4DocumentationTest(unittest.TestCase):
                     if '--github-repository-id "$smoke_repository_id"' in block
                 )
                 self.assertNotEqual(lookup_block, registration_block)
-                self.assertNotIn("gh repo view", registration_block)
+                self.assertNotIn("gh api repos/", registration_block)
 
     def test_repository_id_lookup_fails_closed_before_success_marker(self) -> None:
         documents = (
@@ -819,7 +824,11 @@ class Phase4DocumentationTest(unittest.TestCase):
             _write_executable(
                 fake_bin / "gh",
                 "#!/bin/sh\n"
-                "printf '%s\\n' \"${FAKE_REPOSITORY_ID:-123}\"\n"
+                "[ \"$*\" = 'api repos/jj1xgo/agent-container-smoke --jq .id' ] "
+                "|| exit 64\n"
+                "if [ \"${FAKE_NO_OUTPUT:-0}\" = 0 ]; then\n"
+                "  printf '%s\\n' \"${FAKE_REPOSITORY_ID:-123}\"\n"
+                "fi\n"
                 "[ \"${FAKE_GH_FAIL:-0}\" = 0 ]\n",
             )
             base_environment = {
@@ -828,12 +837,29 @@ class Phase4DocumentationTest(unittest.TestCase):
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
             }
             for path in documents:
-                block = _shell_block(path, "gh repo view")
-                with self.subTest(path=path.name, repository_id="0"):
+                block = _shell_block(path, "smoke_repository_id=$(")
+                for value in ("0", "not-decimal", "R_kgDOExample"):
+                    with self.subTest(path=path.name, repository_id=value):
+                        result = subprocess.run(
+                            ["/bin/sh", "-c", block],
+                            cwd=ROOT,
+                            env={
+                                **base_environment,
+                                "FAKE_REPOSITORY_ID": value,
+                            },
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertNotIn(
+                            "smoke_repository_id_valid=true", result.stdout
+                        )
+                with self.subTest(path=path.name, repository_id="no output"):
                     result = subprocess.run(
                         ["/bin/sh", "-c", block],
                         cwd=ROOT,
-                        env={**base_environment, "FAKE_REPOSITORY_ID": "0"},
+                        env={**base_environment, "FAKE_NO_OUTPUT": "1"},
                         capture_output=True,
                         text=True,
                         check=False,

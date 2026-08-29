@@ -155,8 +155,7 @@ set +x
 set -eu
 smoke_repository_id=$(
   GH_CONFIG_DIR="$AGENT_CONTAINER_HOME/gh" \
-    gh repo view jj1xgo/agent-container-smoke \
-      --json databaseId --jq .databaseId
+    gh api repos/jj1xgo/agent-container-smoke --jq .id
 )
 case "$smoke_repository_id" in
   ''|*[!0-9]*) exit 1 ;;
@@ -188,7 +187,7 @@ unset smoke_repository_id
 # shell tracing may resume only after the ID is unset
 ```
 
-`gh repo view ... --json databaseId --jq .databaseId`はexact repositoryだけのbounded host inventoryである。取得IDはCLIへ明示的に渡すが、broker audit、container output、container mountへ書かない。このcommandと登録retryは同じ承認ではなく、登録retryには実行直前のfresh approvalが必要である。
+`GH_CONFIG_DIR=... gh api repos/jj1xgo/agent-container-smoke --jq .id`はhost-onlyで実行するexact repositoryのbounded REST inventoryである。これはcontainer brokerへgeneric APIを追加するものではない。`gh repo view --json id`が返すGraphQL node IDではなく、RESTのnumeric repository IDだけを取得する。取得IDはCLIへ明示的に渡すが、broker audit、container output、container mountへ書かない。このcommandと登録retryは同じ承認ではなく、登録retryには実行直前のfresh approvalが必要である。
 
 ## 3. Local doctor and credential non-exposure
 

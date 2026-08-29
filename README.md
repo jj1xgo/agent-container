@@ -196,15 +196,14 @@ Phase 3のbroker modeでは、GitHub App private keyとinstallation tokenをhost
 
 GitHub Appのselected repository installation、最小permission、全branch force-push禁止ruleset、private stateを準備します。shared installationはproduction and smoke selected repositoriesの両方を維持します。Do not deselect the production repository。each installation token narrows to exactly one project repository IDなので、App identityを共有してもtokenはprojectごとのexact repositoryだけに限定されます。既存の旧schema policyだけはlegacy global fallbackを維持します。
 
-smoke recoveryでrepository IDをinventoryするときは、shell tracingを先に無効化し、agent-container専用GitHub CLI stateだけで値を変数へ取り込みます。値は表示せず、boolean markerを出した時点で停止します。
+smoke recoveryでrepository IDをinventoryするときは、shell tracingを先に無効化し、agent-container専用GitHub CLI stateだけで値を変数へ取り込みます。これはhost-only bounded REST inventoryであり、container brokerへgeneric APIを追加しません。`gh repo view --json id`のGraphQL node IDではなくRESTのnumeric `.id`を使います。値は表示せず、boolean markerを出した時点で停止します。
 
 ```bash
 set +x
 set -eu
 smoke_repository_id=$(
   GH_CONFIG_DIR="$AGENT_CONTAINER_HOME/gh" \
-    gh repo view jj1xgo/agent-container-smoke \
-      --json databaseId --jq .databaseId
+    gh api repos/jj1xgo/agent-container-smoke --jq .id
 )
 case "$smoke_repository_id" in
   ''|*[!0-9]*) exit 1 ;;
