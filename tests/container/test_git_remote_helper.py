@@ -151,11 +151,10 @@ class RemoteHelperTest(unittest.TestCase):
             b"connect\nstateless-connect\n\n\nadvertisementpush-result",
         )
 
-    def test_rejects_push_and_unknown_commands(self) -> None:
+    def test_stateless_helper_rejects_non_packet_commands(self) -> None:
         repository = Repository.parse("jj1xgo/agent-container")
         for body in (
             b"list\n",
-            b"capabilities\nconnect git-archive\n",
             b"capabilities\nstateless-connect git-receive-pack\n",
         ):
             with self.subTest(body=body):
@@ -164,6 +163,20 @@ class RemoteHelperTest(unittest.TestCase):
                 )
                 with self.assertRaises(ValueError):
                     helper.run()
+
+    def test_run_remote_helper_rejects_unknown_service(self) -> None:
+        transport = FakeTransport()
+
+        with self.assertRaisesRegex(ValueError, "service is not allowed"):
+            run_remote_helper(
+                ["origin", "agent-broker://jj1xgo/agent-container"],
+                {"AGENT_BROKER_REPOSITORY": "jj1xgo/agent-container"},
+                transport,
+                BytesIO(b"capabilities\nconnect git-archive\n"),
+                BytesIO(),
+            )
+
+        self.assertEqual(transport.requests, [])
 
     def test_does_not_write_transport_error_or_credential(self) -> None:
         class Failing(FakeTransport):
