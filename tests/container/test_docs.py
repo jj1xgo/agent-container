@@ -97,6 +97,36 @@ def _write_executable(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
     path.chmod(0o755)
+
+
+def _create_partial_state(temp_root: Path) -> dict[str, Path]:
+    project = temp_root / "agent-container/projects/agent-container-smoke"
+    project.mkdir(parents=True, mode=0o700)
+    project.chmod(0o700)
+    policy = project / "github-broker.json"
+    manifest = project / "smoke-fixtures.json"
+    for item in (policy, manifest):
+        item.write_text("{}", encoding="utf-8")
+        item.chmod(0o600)
+    handover = temp_root / "handovers/agent-container-smoke"
+    handover.mkdir(parents=True, mode=0o700)
+    handover.chmod(0o700)
+    return {
+        "project": project,
+        "policy": policy,
+        "manifest": manifest,
+        "handover": handover,
+        "project_json": project / "project.json",
+        "workspace": temp_root / "agent-container/workspaces/agent-container-smoke",
+    }
+
+
+def _replace_with_symlink(path: Path, target: Path) -> None:
+    if path.is_dir():
+        path.rmdir()
+    elif path.exists():
+        path.unlink()
+    path.symlink_to(target)
 README_LINT_BEHAVIOR_CONTRACT = (
     "`bin/lint`は`src`と`tests`のcheck-onlyで、formatやauto-fixを行わず、"
     "実行中にnetwork accessを必要としません。"
@@ -879,49 +909,135 @@ class Phase4DocumentationTest(unittest.TestCase):
             ROOT / "docs/superpowers/plans/2026-08-29-project-scoped-github-repository-binding.md",
             ROOT / "docs/phase4-stabilization-smoke-test.md",
         )
+        invalidations = (
+            ("project missing", "project", "missing"),
+            ("project symlink", "project", "symlink-directory"),
+            ("project mode", "project", "mode"),
+            ("project owner", "project", "owner"),
+            ("policy not file", "policy", "directory"),
+            ("policy symlink", "policy", "symlink-file"),
+            ("policy mode", "policy", "mode"),
+            ("policy owner", "policy", "owner"),
+            ("manifest not file", "manifest", "directory"),
+            ("manifest symlink", "manifest", "symlink-file"),
+            ("manifest mode", "manifest", "mode"),
+            ("manifest owner", "manifest", "owner"),
+            ("handover missing", "handover", "missing"),
+            ("handover symlink", "handover", "symlink-directory"),
+            ("handover mode", "handover", "mode"),
+            ("handover owner", "handover", "owner"),
+            ("project metadata exists", "project_json", "file"),
+            ("project metadata symlink", "project_json", "dangling-symlink"),
+            ("workspace exists", "workspace", "directory"),
+            ("workspace symlink", "workspace", "dangling-symlink"),
+        )
         for path in documents:
-            with self.subTest(path=path.name):
+            block = _shell_block(path, "partial_state_filesystem_valid=true")
+            for label, target_name, mutation in invalidations:
+                with self.subTest(path=path.name, invalidation=label):
+                    with TemporaryDirectory() as temp:
+                        temp_root = Path(temp)
+                        paths = _create_partial_state(temp_root)
+                        target = paths[target_name]
+                        fake_bin = temp_root / "fake-bin"
+                        _write_executable(
+                            fake_bin / "stat",
+                            "#!/bin/sh\n"
+                            "last=\n"
+                            "for argument do last=$argument; done\n"
+                            "if [ \"$last\" = \"${FAKE_STAT_TARGET:-}\" ]; then\n"
+                            "  case \"${FAKE_STAT_FAILURE:-}:$*\" in\n"
+                            "    mode:*%a:%u*) printf '%s:%s\\n' \"$FAKE_BAD_MODE\" \"$REAL_UID\"; exit 0 ;;\n"
+                            "    owner:*%a:%u*) printf '%s:%s\\n' \"$FAKE_GOOD_MODE\" \"$FAKE_BAD_UID\"; exit 0 ;;\n"
+                            "    mode:*%a*) printf '%s\\n' \"$FAKE_BAD_MODE\"; exit 0 ;;\n"
+                            "    owner:*%u*) printf '%s\\n' \"$FAKE_BAD_UID\"; exit 0 ;;\n"
+                            "  esac\n"
+                            "fi\n"
+                            "exec /usr/bin/stat \"$@\"\n",
+                        )
+                        environment = {
+                            **os.environ,
+                            "HOME": str(temp_root),
+                            "AGENT_CONTAINER_HOME": str(
+                                temp_root / "agent-container"
+                            ),
+                            "AGENT_HANDOVER_ROOT": str(temp_root / "handovers"),
+                            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                        }
+                        if mutation in {"mode", "owner"}:
+                            good_mode = "600" if target_name in {
+                                "policy",
+                                "manifest",
+                            } else "700"
+                            environment.update(
+                                {
+                                    "FAKE_STAT_TARGET": str(target),
+                                    "FAKE_STAT_FAILURE": mutation,
+                                    "FAKE_GOOD_MODE": good_mode,
+                                    "FAKE_BAD_MODE": (
+                                        "644" if good_mode == "600" else "755"
+                                    ),
+                                    "REAL_UID": str(os.getuid()),
+                                    "FAKE_BAD_UID": str(os.getuid() + 1),
+                                }
+                            )
+                        elif mutation == "missing":
+                            if target_name == "project":
+                                target.rename(temp_root / "parked-project")
+                            else:
+                                target.rmdir()
+                        elif mutation == "directory":
+                            if target.exists():
+                                target.unlink()
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            target.mkdir()
+                        elif mutation == "file":
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            target.write_text("present", encoding="utf-8")
+                        elif mutation == "symlink-file":
+                            linked = temp_root / f"linked-{target.name}"
+                            linked.write_text("{}", encoding="utf-8")
+                            _replace_with_symlink(target, linked)
+                        elif mutation == "symlink-directory":
+                            linked = temp_root / f"linked-{target.name}"
+                            linked.mkdir()
+                            if target_name == "project":
+                                target.rename(temp_root / "parked-project")
+                                target.symlink_to(linked)
+                            else:
+                                _replace_with_symlink(target, linked)
+                        elif mutation == "dangling-symlink":
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            target.symlink_to(temp_root / "absent-target")
+                        result = subprocess.run(
+                            ["/bin/sh", "-c", block],
+                            cwd=ROOT,
+                            env=environment,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertNotIn(
+                            "partial_state_filesystem_valid=true",
+                            result.stdout,
+                        )
+
+            with self.subTest(path=path.name, invalidation="none"):
                 with TemporaryDirectory() as temp:
                     temp_root = Path(temp)
-                    environment = {
-                        **os.environ,
-                        "HOME": str(temp_root),
-                        "AGENT_CONTAINER_HOME": str(temp_root / "agent-container"),
-                        "AGENT_HANDOVER_ROOT": str(temp_root / "handovers"),
-                    }
-                    block = _shell_block(
-                        path, "partial_state_filesystem_valid=true"
-                    )
+                    _create_partial_state(temp_root)
                     result = subprocess.run(
                         ["/bin/sh", "-c", block],
                         cwd=ROOT,
-                        env=environment,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertNotIn(
-                        "partial_state_filesystem_valid=true", result.stdout
-                    )
-
-                    project = (
-                        temp_root
-                        / "agent-container/projects/agent-container-smoke"
-                    )
-                    project.mkdir(parents=True, mode=0o700)
-                    project.chmod(0o700)
-                    for name in ("github-broker.json", "smoke-fixtures.json"):
-                        item = project / name
-                        item.write_text("{}", encoding="utf-8")
-                        item.chmod(0o600)
-                    handover = temp_root / "handovers/agent-container-smoke"
-                    handover.mkdir(parents=True, mode=0o700)
-                    handover.chmod(0o700)
-                    result = subprocess.run(
-                        ["/bin/sh", "-c", block],
-                        cwd=ROOT,
-                        env=environment,
+                        env={
+                            **os.environ,
+                            "HOME": str(temp_root),
+                            "AGENT_CONTAINER_HOME": str(
+                                temp_root / "agent-container"
+                            ),
+                            "AGENT_HANDOVER_ROOT": str(temp_root / "handovers"),
+                        },
                         capture_output=True,
                         text=True,
                         check=False,
@@ -975,30 +1091,29 @@ class Phase4DocumentationTest(unittest.TestCase):
                         "AGENT_CONTAINER_HOME": str(temp_root),
                     }
 
-                    manifest_path.write_text(
-                        json.dumps(
-                            {
-                                **fixture,
-                                "open_issue": 4,
-                                "closed_issue": 5,
-                                "pull_request": 6,
-                            }
-                        ),
-                        encoding="utf-8",
-                    )
-                    manifest_path.chmod(0o600)
-                    result = subprocess.run(
-                        ["/bin/sh", "-c", block],
-                        cwd=ROOT,
-                        env=environment,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertNotIn(
-                        "fixture_manifest_valid=true", result.stdout
-                    )
+                    for field, wrong_value in (
+                        ("open_issue", 4),
+                        ("closed_issue", 5),
+                        ("pull_request", 6),
+                    ):
+                        with self.subTest(path=path.name, field=field):
+                            manifest_path.write_text(
+                                json.dumps({**fixture, field: wrong_value}),
+                                encoding="utf-8",
+                            )
+                            manifest_path.chmod(0o600)
+                            result = subprocess.run(
+                                ["/bin/sh", "-c", block],
+                                cwd=ROOT,
+                                env=environment,
+                                capture_output=True,
+                                text=True,
+                                check=False,
+                            )
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertNotIn(
+                                "fixture_manifest_valid=true", result.stdout
+                            )
 
                     manifest_path.write_text(
                         json.dumps(fixture), encoding="utf-8"
