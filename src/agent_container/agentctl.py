@@ -157,7 +157,6 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument("--github-repository-id", type=_positive_repository_id)
     add.add_argument("--default-branch", default="main")
     add.add_argument("--protected-branch", action="append", default=[])
-    add.add_argument("--confirm-force-push-ruleset", action="store_true")
     update_profile = project_subcommands.add_parser("update-profile")
     update_profile.add_argument("project")
     superpowers = subcommands.add_parser("superpowers")
@@ -394,7 +393,6 @@ def _add_project(
     github_broker: bool = False,
     default_branch: str = "main",
     protected_branches: tuple[str, ...] = (),
-    ruleset_confirmed: bool = False,
     github_repository_id: int | None = None,
 ) -> None:
     repository = Repository.parse(repository_value)
@@ -415,8 +413,6 @@ def _add_project(
     completed_legacy_project = False
     record = ProjectRecord(repository, resolved_handover_root)
     if github_broker:
-        if not ruleset_confirmed:
-            raise ValueError("GitHub force-push ruleset confirmation is required")
         protected = protected_branches or (default_branch,)
         if github_repository_id is None:
             completed_state = (
@@ -1235,7 +1231,6 @@ def main(
                 arguments.github_repository_id is not None
                 or arguments.default_branch != "main"
                 or bool(arguments.protected_branch)
-                or arguments.confirm_force_push_ruleset
             )
             if broker_options and not arguments.github_broker:
                 raise ValueError("GitHub broker options require --github-broker")
@@ -1340,7 +1335,6 @@ def main(
                 arguments.github_broker,
                 arguments.default_branch,
                 tuple(arguments.protected_branch),
-                arguments.confirm_force_push_ruleset,
                 arguments.github_repository_id,
             )
             return 0

@@ -1056,7 +1056,6 @@ class AgentCtlProjectTest(unittest.TestCase):
                         "--github-broker", "--protected-branch", "main",
                         "--protected-branch", "master",
                         "--github-repository-id", "456",
-                        "--confirm-force-push-ruleset",
                     ],
                     environment={"AGENT_CONTAINER_HOME": str(root)},
                     runner=runner,
@@ -1138,7 +1137,7 @@ class AgentCtlProjectTest(unittest.TestCase):
                 [
                     "project", "add", "jj1xgo/agent-container",
                     "--handover-root", str(handovers),
-                    "--github-broker", "--confirm-force-push-ruleset",
+                    "--github-broker",
                 ],
                 environment={"AGENT_CONTAINER_HOME": str(root)},
                 runner=lambda spec: calls.append(spec),
@@ -1166,7 +1165,6 @@ class AgentCtlProjectTest(unittest.TestCase):
                         "project", "add", "jj1xgo/agent-container",
                         "--handover-root", str(handovers),
                         "--github-broker", "--github-repository-id", "456",
-                        "--confirm-force-push-ruleset",
                     ],
                     environment={"AGENT_CONTAINER_HOME": str(root)},
                     runner=lambda spec: calls.append(spec)
@@ -1217,7 +1215,7 @@ class AgentCtlProjectTest(unittest.TestCase):
                 [
                     "project", "add", "jj1xgo/agent-container",
                     "--handover-root", str(handovers),
-                    "--github-broker", "--confirm-force-push-ruleset",
+                    "--github-broker",
                 ],
                 environment={"AGENT_CONTAINER_HOME": str(root)},
                 runner=lambda spec: successful_podman_result(spec),
@@ -1257,7 +1255,6 @@ class AgentCtlProjectTest(unittest.TestCase):
                         "project", "add", "jj1xgo/agent-container",
                         "--handover-root", str(handovers),
                         "--github-broker", "--github-repository-id", "123",
-                        "--confirm-force-push-ruleset",
                     ],
                     environment={"AGENT_CONTAINER_HOME": str(root)},
                     runner=runner,
@@ -1268,7 +1265,15 @@ class AgentCtlProjectTest(unittest.TestCase):
                 )
 
             self.assertEqual(result, 0)
-            self.assertEqual(json.loads(policy_path.read_text())["repository_id"], 123)
+            self.assertEqual(
+                json.loads(policy_path.read_text()),
+                {
+                    "repository": "jj1xgo/agent-container",
+                    "repository_id": 123,
+                    "default_branch": "main",
+                    "protected_branches": ["main"],
+                },
+            )
             self.assertEqual(sibling.read_bytes(), original_sibling)
             self.assertEqual(
                 sum("clone" in call.argv for call in calls),
@@ -1301,7 +1306,6 @@ class AgentCtlProjectTest(unittest.TestCase):
                     "project", "add", "jj1xgo/agent-container",
                     "--handover-root", str(handovers),
                     "--github-broker", "--github-repository-id", "123",
-                    "--confirm-force-push-ruleset",
                 ],
                 environment={"AGENT_CONTAINER_HOME": str(root)},
                 runner=failed_preflight,
@@ -1358,7 +1362,6 @@ class AgentCtlProjectTest(unittest.TestCase):
                     "project", "add", "jj1xgo/agent-container",
                     "--handover-root", str(handovers),
                     "--github-broker", "--github-repository-id", "123",
-                    "--confirm-force-push-ruleset",
                 ]
                 if case == "policy":
                     arguments.extend(
@@ -2926,7 +2929,6 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                         "repository_id": 789,
                         "default_branch": "main",
                         "protected_branches": ["main", "master"],
-                        "ruleset_confirmed": True,
                     }
                 ),
                 encoding="utf-8",
@@ -4079,6 +4081,18 @@ class AgentCtlParserTest(unittest.TestCase):
         )
 
         self.assertEqual(arguments.github_repository_id, 123)
+
+    def test_broker_project_add_rejects_removed_ruleset_confirmation_flag(self) -> None:
+        with self.assertRaises(SystemExit):
+            parser().parse_args(
+                [
+                    "project", "add", "jj1xgo/agent-container",
+                    "--handover-root", "/handovers",
+                    "--github-broker",
+                    "--github-repository-id", "123",
+                    "--confirm-force-push-ruleset",
+                ]
+            )
 
 
 if __name__ == "__main__":

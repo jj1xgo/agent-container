@@ -20,7 +20,7 @@ from agent_container.state import StateLayout
 
 
 class BrokerRuntimePolicyTest(unittest.TestCase):
-    def test_loads_exact_repository_policy_with_confirmed_ruleset(self) -> None:
+    def test_loads_legacy_global_policy_with_true_ruleset_marker(self) -> None:
         with TemporaryDirectory() as temp:
             path = Path(temp) / "policy.json"
             path.write_text(
@@ -45,7 +45,7 @@ class BrokerRuntimePolicyTest(unittest.TestCase):
             self.assertEqual(policy.default_branch, "main")
             self.assertIsNone(policy.repository_id)
 
-    def test_loads_bound_repository_policy_with_repository_id(self) -> None:
+    def test_loads_legacy_bound_policy_with_true_ruleset_marker(self) -> None:
         with TemporaryDirectory() as temp:
             path = Path(temp) / "policy.json"
             path.write_text(
@@ -69,7 +69,30 @@ class BrokerRuntimePolicyTest(unittest.TestCase):
 
             self.assertEqual(policy.repository_id, 123)
 
-    def test_rejects_invalid_bound_ids_and_unknown_policy_keys(self) -> None:
+    def test_loads_new_bound_policy_without_ruleset_marker(self) -> None:
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "policy.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "repository": "jj1xgo/agent-container",
+                        "repository_id": 123,
+                        "default_branch": "main",
+                        "protected_branches": ["main"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            path.chmod(0o600)
+            record = ProjectRecord(
+                Repository.parse("jj1xgo/agent-container"), Path("/handovers")
+            )
+
+            policy = load_broker_policy(path, record, "agent-container")
+
+            self.assertEqual(policy.repository_id, 123)
+
+    def test_rejects_invalid_bound_ids_and_unknown_policy_schemas(self) -> None:
         record = ProjectRecord(
             Repository.parse("jj1xgo/agent-container"), Path("/handovers")
         )
@@ -91,14 +114,25 @@ class BrokerRuntimePolicyTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         load_broker_policy(path, record, "agent-container")
 
-            path.write_text(
-                json.dumps(legacy | {"unexpected": True}), encoding="utf-8"
+            invalid_schemas = (
+                legacy | {"ruleset_confirmed": False},
+                legacy | {"unexpected": True},
+                {
+                    "repository": "jj1xgo/agent-container",
+                    "repository_id": 123,
+                    "default_branch": "main",
+                    "protected_branches": ["main"],
+                    "unexpected": True,
+                },
             )
-            path.chmod(0o600)
-            with self.assertRaises(ValueError):
-                load_broker_policy(path, record, "agent-container")
+            for payload in invalid_schemas:
+                with self.subTest(payload=payload):
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                    path.chmod(0o600)
+                    with self.assertRaises(ValueError):
+                        load_broker_policy(path, record, "agent-container")
 
-    def test_writes_only_bound_five_key_policy_schema(self) -> None:
+    def test_writes_only_new_bound_four_key_policy_schema(self) -> None:
         legacy = BrokerPolicy.create(
             project_id="agent-container",
             repository="jj1xgo/agent-container",
@@ -129,35 +163,29 @@ class BrokerRuntimePolicyTest(unittest.TestCase):
                     "repository_id": 123,
                     "default_branch": "main",
                     "protected_branches": ["main"],
-                    "ruleset_confirmed": True,
                 },
             )
 
-    def test_rejects_unconfirmed_or_mismatched_policy(self) -> None:
+    def test_rejects_mismatched_policy_repository(self) -> None:
         record = ProjectRecord(
             Repository.parse("jj1xgo/agent-container"), Path("/handovers")
         )
         with TemporaryDirectory() as temp:
             path = Path(temp) / "policy.json"
-            for repository, confirmed in (
-                ("jj1xgo/other", True),
-                ("jj1xgo/agent-container", False),
-            ):
-                with self.subTest(repository=repository, confirmed=confirmed):
-                    path.write_text(
-                        json.dumps(
-                            {
-                                "repository": repository,
-                                "default_branch": "main",
-                                "protected_branches": ["main"],
-                                "ruleset_confirmed": confirmed,
-                            }
-                        ),
-                        encoding="utf-8",
-                    )
-                    path.chmod(0o600)
-                    with self.assertRaises(ValueError):
-                        load_broker_policy(path, record, "agent-container")
+            path.write_text(
+                json.dumps(
+                    {
+                        "repository": "jj1xgo/other",
+                        "default_branch": "main",
+                        "protected_branches": ["main"],
+                        "ruleset_confirmed": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            path.chmod(0o600)
+            with self.assertRaises(ValueError):
+                load_broker_policy(path, record, "agent-container")
 
 
 class BrokerPolicyUpgradeTest(unittest.TestCase):

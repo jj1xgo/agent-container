@@ -56,18 +56,22 @@ def _decode_broker_policy(
         )
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise ValueError("GitHub broker policy is invalid") from None
-    legacy_keys = {
-        "repository",
-        "default_branch",
-        "protected_branches",
-        "ruleset_confirmed",
-    }
-    bound_keys = legacy_keys | {"repository_id"}
-    if not isinstance(payload, dict) or set(payload) not in (legacy_keys, bound_keys):
+    base_keys = {"repository", "default_branch", "protected_branches"}
+    new_bound_keys = base_keys | {"repository_id"}
+    legacy_global_keys = base_keys | {"ruleset_confirmed"}
+    legacy_bound_keys = new_bound_keys | {"ruleset_confirmed"}
+    if not isinstance(payload, dict) or set(payload) not in (
+        new_bound_keys,
+        legacy_global_keys,
+        legacy_bound_keys,
+    ):
         raise ValueError("GitHub broker policy is invalid")
     if payload["repository"] != record.repository.slug:
         raise ValueError("GitHub broker policy repository does not match project")
-    if payload["ruleset_confirmed"] is not True:
+    if (
+        set(payload) in (legacy_global_keys, legacy_bound_keys)
+        and payload["ruleset_confirmed"] is not True
+    ):
         raise ValueError("GitHub broker force-push ruleset is not confirmed")
     protected = payload["protected_branches"]
     if (
@@ -82,7 +86,7 @@ def _decode_broker_policy(
         repository_id=payload.get("repository_id"),
         default_branch=payload["default_branch"],
         protected_branches=protected,
-        require_repository_id=set(payload) == bound_keys,
+        require_repository_id="repository_id" in payload,
     )
 
 
@@ -100,7 +104,6 @@ def _encode_broker_policy(policy: BrokerPolicy) -> bytes:
             "repository_id": policy.repository_id,
             "default_branch": policy.default_branch,
             "protected_branches": sorted(policy.protected_branches),
-            "ruleset_confirmed": True,
         },
         ensure_ascii=True,
         indent=2,
