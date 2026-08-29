@@ -263,10 +263,17 @@ scope整合の文書変更と必要なtest変更がmainへmerge済みであり�
 
 実行後、該当する`not run`だけを日時、対象repository、期待結果、観測結果、`PASS`または`PARTIAL`へ証拠どおり置換する。途中の失敗を後続成功で隠さず、root causeと最終再実行を区別する。
 
+2026-08-29、review済みcandidateのbuildと固定CLI probe、部分filesystem state、旧schema policy、Issue #1／#2・Pull Request #3を含むexact fixture manifest、および非記録のpositive repository IDをhostで確認した。その後、fresh approvalを得た一度だけの承認済み登録が成功し、broker経由のclone、project metadata、project-scoped bindingが作成された。登録前後でfixture manifestのdigestは不変だった。
+
+登録後のsmoke Codex doctorは全local checkがPASS、smoke Claude doctorも認証状態`authenticated`を含めてPASS、production doctorも`legacy global repository binding valid`を含めてPASSだった。3回とも既知の`network-policy`だけがWARNだった。これらはlocal stateの証拠であり、remote App selection／rulesetはPARTIALのままである。先の独立API確認は401／403で読み出せなかったため、manual completion reportをremote proofへ格上げしない。
+
+初回登録失敗の`upload-discovery`とその原因診断は上記「観測済みの初回失敗」に残す。今回の成功はその履歴を上書きしない。Git/PR、Issue data、cleanup/stale client、releaseは未実施である。
+
 | check | expected | observed | date |
 | --- | --- | --- | --- |
-| Scope reconciliation | initial design, README, and operator guide agree | not run | — |
-| Fixture repository | private exact repository, fixtures, App selection, ruleset | not run | — |
+| Scope reconciliation | initial design, README, and operator guide agree | PASS | 2026-08-29 |
+| Fixture repository | private exact repository, fixtures, App selection, ruleset | PARTIAL | 2026-08-29 |
+| Project registration and local doctor | one approved registration; manifest preserved; smoke Codex/Claude and production doctor | PASS | 2026-08-29 |
 | Git/PR gate | clone/fetch/push/PR succeed; negative operations denied | not run | — |
 | Issue data gate | list/view/body fixed schema; Pull Request除外; excluded sentinel absent | not run | — |
 | Cleanup/stale client | runtime artifacts removed and stale client denied | not run | — |

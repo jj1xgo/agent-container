@@ -741,19 +741,59 @@ class Phase4DocumentationTest(unittest.TestCase):
         ):
             self.assertIn(required_recovery_detail, smoke)
 
-    def test_phase4_smoke_starts_without_claiming_results(self) -> None:
+    def test_phase4_smoke_records_only_observed_host_recovery_results(self) -> None:
         smoke = (ROOT / "docs/phase4-stabilization-smoke-test.md").read_text(
             encoding="utf-8"
         )
+        expected_rows = (
+            (
+                "Scope reconciliation",
+                "initial design, README, and operator guide agree",
+                "PASS",
+                "2026-08-29",
+            ),
+            (
+                "Fixture repository",
+                "private exact repository, fixtures, App selection, ruleset",
+                "PARTIAL",
+                "2026-08-29",
+            ),
+            (
+                "Project registration and local doctor",
+                "one approved registration; manifest preserved; smoke Codex/Claude and production doctor",
+                "PASS",
+                "2026-08-29",
+            ),
+        )
+        for check, expected, observed, date in expected_rows:
+            self.assertIn(
+                f"| {check} | {expected} | {observed} | {date} |",
+                smoke,
+            )
         for check in (
-            "Scope reconciliation",
-            "Fixture repository",
             "Git/PR gate",
             "Issue data gate",
             "Cleanup/stale client",
             "Release gate",
         ):
             self.assertRegex(smoke, rf"\| {check} \| [^\n]+ \| not run \|")
+        for required in (
+            "upload-discovery",
+            "初回登録失敗",
+            "一度だけの承認済み登録",
+            "fixture manifestのdigestは不変",
+            "smoke Codex doctor",
+            "smoke Claude doctor",
+            "authenticated",
+            "production doctor",
+            "legacy global repository binding valid",
+            "network-policy",
+            "App selection／rulesetはPARTIAL",
+            "401／403",
+        ):
+            self.assertIn(required, smoke)
+        self.assertNotRegex(smoke, r"repository ID\s*[=:]\s*\d+")
+        self.assertNotIn("base-image-id:", smoke)
 
     def test_repository_id_lookup_is_non_recording_and_approval_gated(self) -> None:
         documents = (
