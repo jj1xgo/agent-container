@@ -127,6 +127,8 @@ class StatelessRemoteHelper:
             request = read_stateless_request(self.stdin)
             if request is None:
                 return 0
+            if self.connect_mode and request == b"0000":
+                return 0
             chunks = self.transport.rpc(request)
             if self.connect_mode:
                 chunks = _connect_response(chunks)
