@@ -816,6 +816,26 @@ class Phase4DocumentationTest(unittest.TestCase):
         ):
             self.assertIn(required, smoke)
 
+    def test_phase4_smoke_records_successful_create_only_rerun(self) -> None:
+        smoke = (ROOT / "docs/phase4-stabilization-smoke-test.md").read_text(
+            encoding="utf-8"
+        )
+        for required in (
+            "test/phase4-create-only-20260829-102228",
+            "通常のfast-forward push",
+            "unrelated-history force pushを拒否",
+            "audit line countが34から35へexactly 1件増え",
+            "runtime `8fc3608504080047`",
+            "`git-receive-pack`が`denied`",
+            "remoteは初回作成commitのまま",
+            "local remote-tracking refが存在しなかった",
+            "`remote_branch_unchanged=false`は非診断結果",
+            "audit line countが37",
+            "`git-upload-pack`が`ok`",
+            "修正版再検証PASS",
+        ):
+            self.assertIn(required, smoke)
+
     def test_tracked_operational_docs_do_not_advertise_obsolete_id_lookup(
         self,
     ) -> None:
@@ -956,7 +976,7 @@ class Phase4DocumentationTest(unittest.TestCase):
             (
                 "Git/PR gate",
                 "new branch succeeds; existing branch/protected/delete/tag updates denied",
-                "FAIL: unrelated-history force push accepted; remote branch changed",
+                "PASS: 修正前FAILを保持し、修正版再検証PASS。fast-forward／unrelated-history更新を拒否しremote不変",
                 "2026-08-29",
             ),
         )

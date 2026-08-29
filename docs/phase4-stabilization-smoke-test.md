@@ -272,14 +272,18 @@ scope整合の文書変更と必要なtest変更がmainへmerge済みであり�
 
 承認済みnegative gateでは、初回のdisposable branch作成は成功し、protected main、delete、tagは拒否された。しかしunrelated-history force pushは成功し、runtimeは安全停止したためruntime内の最終OID checkは実行されなかった。続く別のbounded host observationでremote branchが変更されたことを確認した。この結果はFAILであり、成功へ読み替えない。retry、復元、PR、Issue、cleanup、releaseは実施していない。
 
-修正版のhost gateは、review済み実装と新しいimageに対する別承認後、未使用のdisposable branchまたは明示承認された復元だけを使う。それまでは外部操作を再開しない。
+修正版のhost gateは、review済み実装と新しいimageに対する別承認後、未使用のdisposable branchまたは明示承認された復元だけを使う。この停止条件に従い、修正前に変更されたbranchは復元・再利用しなかった。
+
+同日、別承認を得て新しいdisposable branch `test/phase4-create-only-20260829-102228` で修正版を再検証した。初回branch作成は成功し、同じbranchへの通常のfast-forward pushとunrelated-history force pushを拒否した。force-push拒否ではaudit line countが34から35へexactly 1件増え、runtime `8fc3608504080047` の`git-receive-pack`が`denied`だった。
+
+続く承認済みbounded read-only確認では、最初の比較に使ったlocal remote-tracking refが存在しなかったため`remote_branch_unchanged=false`は非診断結果として扱った。local branchの親がsubject `test: Phase 4 create-only creation`の初回作成commitであることをnetworkなしで確認してから、別承認による一度だけのqueryでremoteは初回作成commitのままと確認した。最後のquery後はaudit line countが37で、同じruntimeの`git-upload-pack`が`ok`だった。OID、pack、raw response、credentialは表示せず、retry、fallback、復元、cleanupは実施していない。
 
 | check | expected | observed | date |
 | --- | --- | --- | --- |
 | Scope reconciliation | initial design, README, and operator guide agree | PASS | 2026-08-29 |
 | Fixture repository | private exact repository and fixtures; ruleset inventory | FAIL/PARTIAL: HTTP 403 upgrade-or-public | 2026-08-29 |
 | Project registration and local doctor | one approved registration; manifest preserved; smoke Codex/Claude and production doctor | PASS | 2026-08-29 |
-| Git/PR gate | new branch succeeds; existing branch/protected/delete/tag updates denied | FAIL: unrelated-history force push accepted; remote branch changed | 2026-08-29 |
+| Git/PR gate | new branch succeeds; existing branch/protected/delete/tag updates denied | PASS: 修正前FAILを保持し、修正版再検証PASS。fast-forward／unrelated-history更新を拒否しremote不変 | 2026-08-29 |
 | Issue data gate | list/view/body fixed schema; Pull Request除外; excluded sentinel absent | not run | — |
 | Cleanup/stale client | runtime artifacts removed and stale client denied | not run | — |
 | Release gate | tests, review, CI, changelog, final approval, v0.4.0 | not run | — |
