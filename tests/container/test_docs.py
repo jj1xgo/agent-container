@@ -627,6 +627,27 @@ class Phase3DocumentationTest(unittest.TestCase):
 
 
 class Phase4DocumentationTest(unittest.TestCase):
+    def test_tracked_operational_docs_do_not_advertise_obsolete_id_lookup(
+        self,
+    ) -> None:
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z", "--", "README.md", "CHANGELOG.md", "docs"],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+        ).stdout.split(b"\0")
+        markdown = tuple(
+            ROOT / item.decode("utf-8")
+            for item in tracked
+            if item.endswith(b".md")
+        )
+        self.assertTrue(markdown)
+        for path in markdown:
+            body = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertNotIn("--json databaseId", body)
+                self.assertNotIn("--jq .databaseId", body)
+
     def test_release_candidate_probe_matches_container_image_layout(self) -> None:
         containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
         installed_wrappers = set(

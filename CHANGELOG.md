@@ -11,7 +11,7 @@
 ### Changed
 
 - Phase 4 smokeの`upload-discovery`失敗は、global App metadataのrepository IDとsmoke repositoryの不一致が原因でした。project policyへrepository IDを限定し、既存旧schema policyだけはlegacy fallbackを維持します。
-- operator/smoke手順へboundedな`gh repo view ... --json databaseId --jq .databaseId` inventory、partial-state recovery gate、retry直前のfresh approvalを追加しました。host gateは未再実行で、結果は`not run`のままです。
+- operator/smoke手順へhost-only bounded REST `GH_CONFIG_DIR=... gh api repos/OWNER/REPOSITORY --jq .id` inventory、partial-state recovery gate、retry直前のfresh approvalを追加しました。GraphQL `gh repo view --json id`のnode IDはnumeric repository IDとして使いません。host gateは未再実行で、結果は`not run`のままです。
 
 ### Security boundaries
 
