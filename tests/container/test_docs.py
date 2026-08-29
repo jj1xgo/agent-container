@@ -875,6 +875,33 @@ class Phase4DocumentationTest(unittest.TestCase):
         ):
             self.assertIn(required, smoke)
 
+    def test_v040_release_notes_match_verified_phase4_scope(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        smoke = (ROOT / "docs/phase4-stabilization-smoke-test.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("Current release: `v0.4.0`", readme)
+        self.assertIn("## [Unreleased]\n\n## [0.4.0] - 2026-08-29", changelog)
+        self.assertIn(
+            "[0.4.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.4.0",
+            changelog,
+        )
+        for required in (
+            "Issue list/view read-only",
+            "Git 2.53",
+            "create-only",
+            "修正版の実host gate",
+            "family Issue create/comment",
+            "domain allowlist",
+        ):
+            self.assertIn(required, changelog)
+        self.assertRegex(
+            smoke,
+            r"\| Release gate \| [^\n]+ \| not run \| — \|",
+        )
+
     def test_tracked_operational_docs_do_not_advertise_obsolete_id_lookup(
         self,
     ) -> None:

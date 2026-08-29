@@ -4,21 +4,28 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-29
+
 ### Added
 
 - 新規GitHub broker projectへ`--github-repository-id`を明示するproject-scoped repository bindingと、local doctorでexplicit binding／legacy global fallbackを区別する診断を追加しました。
+- 選択中repositoryのIssue list/view read-only interfaceを追加しました。固定schemaでopen Issue一覧とopen／closed Issue詳細を返し、Pull Requestと除外fieldを応答から外します。
+- private fixture repositoryを使うPhase 4 smoke gateを追加し、create-only Git、Issue read、runtime cleanup、stale client拒否をcredential-freeなbounded evidenceで確認できるようにしました。
 
 ### Changed
 
 - GitHub broker pushをcreate-onlyへ変更しました。advertisementに存在しないunprotectedなbranchをold OID zeroで作成する場合だけ許可し、fast-forwardを含む既存branchへのupdateを拒否します。追加作業は新しいbranchと、必要に応じて新しいPRを使います。
+- Git 2.53のupload-pack／receive-pack framingとdelete-only request終端へ対応し、terminal flushやopen client pipeでbroker接続が停止しないようにしました。
+- Phase 4でREADME、初期設計、operator guideのscopeを整合し、shipped interfaceを選択中repositoryのread-only操作へ限定しました。
 - 新しいproject policyからruleset markerと登録時のruleset確認optionを削除しました。旧exact true-marker schemaはcompatibility inputとしてだけ読み取ります。local doctorは有料のGitHub branch settingを確認済みとは表示しません。
 - Phase 4 smokeの`upload-discovery`失敗は、global App metadataのrepository IDとsmoke repositoryの不一致が原因でした。project policyへrepository IDを限定し、既存旧schema policyだけはlegacy fallbackを維持します。
 - operator/smoke手順へhost-only bounded REST `GH_CONFIG_DIR=... gh api repos/OWNER/REPOSITORY --jq .id` inventory、partial-state recovery gate、retry直前のfresh approvalを追加しました。GraphQL `gh repo view --json id`のnode IDはnumeric repository IDとして使いません。登録recoveryはfresh approval後に一度だけ実行し、後続のnegative gate失敗後は再試行していません。
-- Phase 4 private smokeではruleset inventoryがHTTP 403のupgrade-or-public制限となり、unrelated-history force pushが受理されてdisposable remote branchが変更されました。runtime内の最終OID check前に停止し、別のbounded host observationで変更を確認しました。retry、復元、PR、Issue、cleanup、releaseは実施していません。
+- Phase 4 private smokeではruleset inventoryがHTTP 403のupgrade-or-public制限となり、修正前のunrelated-history force pushが受理されてdisposable remote branchが変更されました。このFAILを保持したうえで、修正版の実host gateは新しいbranchへの通常更新とunrelated-history更新をともに拒否し、remote不変を確認しました。Issue list/viewとstale-client cleanupも最終再実行でPASSしました。
 
 ### Security boundaries
 
 - repository IDはproject policyからexactly one repositoryのtoken発行にだけ使い、broker audit、container output、container mountへ追加しません。doctorはlocal stateだけを検査し、remote App selection、permission、GitHub branch setting、networkを証明しません。
+- family Issue create/commentは開発repository brokerと権限を共有しない将来Phaseへ延期します。外向き通信のdomain allowlistも未実装で、既知の`WARN network-policy`を維持します。
 
 ## [0.3.0] - 2026-08-28
 
@@ -96,6 +103,7 @@
 
 通常のlocal image buildは既定で各agent CLIの`latest`を解決します。このbaselineは`v0.1.0`のCI再現用固定値であり、runtime dependencyを恒久固定するものではありません。
 
+[0.4.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.4.0
 [0.3.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.3.0
 [0.2.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.1.0
