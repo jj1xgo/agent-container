@@ -836,6 +836,45 @@ class Phase4DocumentationTest(unittest.TestCase):
         ):
             self.assertIn(required, smoke)
 
+    def test_phase4_smoke_records_issue_and_stale_client_gates(self) -> None:
+        smoke = (ROOT / "docs/phase4-stabilization-smoke-test.md").read_text(
+            encoding="utf-8"
+        )
+        for required in (
+            "古いimageにはIssue subcommandが存在せず",
+            "sandbox内からbroker socketへ接続する前に拒否",
+            "audit line countは37のまま",
+            "runtime `d704531d03f52b1b`",
+            "issue_list_success=true",
+            "issue_view_1_success=true",
+            "issue_view_2_success=true",
+            "open_issue_present=true",
+            "closed_issue_excluded_from_list=true",
+            "pull_request_excluded_from_list=true",
+            "open_issue_fixed_schema_valid=true",
+            "closed_issue_fixed_schema_valid=true",
+            "open_body_sentinel_present=true",
+            "closed_body_sentinel_present=true",
+            "excluded_field_sentinel_absent=true",
+            "pull_request_sentinel_absent=true",
+            "audit line countが37から40へ",
+            "Issue data gateの最終再実行はPASS",
+            "runtime artifactsは消失",
+            "stale clientは拒否",
+            "runtime_artifacts_removed=true",
+            "stale_client_denied=true",
+            "stale_stdout_empty=true",
+            "stale_stderr_fixed=true",
+            "audit_unchanged=true",
+            "stale_temp_removed=true",
+            "stdoutは空",
+            "`error: GitHub broker request failed`",
+            "audit line countは40のまま",
+            "exact `$stale_tmp` directoryだけを削除",
+            "Cleanup/stale client gateはPASS",
+        ):
+            self.assertIn(required, smoke)
+
     def test_tracked_operational_docs_do_not_advertise_obsolete_id_lookup(
         self,
     ) -> None:
@@ -979,17 +1018,25 @@ class Phase4DocumentationTest(unittest.TestCase):
                 "PASS: 修正前FAILを保持し、修正版再検証PASS。fast-forward／unrelated-history更新を拒否しremote不変",
                 "2026-08-29",
             ),
+            (
+                "Issue data gate",
+                "list/view/body fixed schema; Pull Request除外; excluded sentinel absent",
+                "PASS: latest image and approved broker socket access; 3 operations `ok`",
+                "2026-08-29",
+            ),
+            (
+                "Cleanup/stale client",
+                "runtime artifacts removed and stale client denied",
+                "PASS: artifacts absent; stale request denied; fixed empty/error output; audit unchanged",
+                "2026-08-29",
+            ),
         )
         for check, expected, observed, date in expected_rows:
             self.assertIn(
                 f"| {check} | {expected} | {observed} | {date} |",
                 smoke,
             )
-        for check in (
-            "Issue data gate",
-            "Cleanup/stale client",
-            "Release gate",
-        ):
+        for check in ("Release gate",):
             self.assertRegex(smoke, rf"\| {check} \| [^\n]+ \| not run \|")
         for required in (
             "upload-discovery",

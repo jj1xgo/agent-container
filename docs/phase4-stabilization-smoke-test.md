@@ -278,12 +278,18 @@ scope整合の文書変更と必要なtest変更がmainへmerge済みであり�
 
 続く承認済みbounded read-only確認では、最初の比較に使ったlocal remote-tracking refが存在しなかったため`remote_branch_unchanged=false`は非診断結果として扱った。local branchの親がsubject `test: Phase 4 create-only creation`の初回作成commitであることをnetworkなしで確認してから、別承認による一度だけのqueryでremoteは初回作成commitのままと確認した。最後のquery後はaudit line countが37で、同じruntimeの`git-upload-pack`が`ok`だった。OID、pack、raw response、credentialは表示せず、retry、fallback、復元、cleanupは実施していない。
 
+Issue data gateの最初の実行環境では、古いimageにはIssue subcommandが存在せず、3操作はlocal CLIで終了した。最新imageのbuildと`agent-github issue --help` probe後の実行でも、通常sandbox内からbroker socketへ接続する前に拒否され、いずれもaudit line countは37のままだった。これらをGitHubまたはbrokerの失敗として扱わず、原因を切り分けて各停止後に新しい承認を得た。
+
+最新imageを使い、project専用socketへの接続だけを承認済みsandbox外実行とした最終再実行では、runtime `d704531d03f52b1b` で`issue-list`、Issue #1 view、Issue #2 viewが成功した。bounded結果は`issue_list_success=true`、`issue_view_1_success=true`、`issue_view_2_success=true`、`open_issue_present=true`、`closed_issue_excluded_from_list=true`、`pull_request_excluded_from_list=true`、`open_issue_fixed_schema_valid=true`、`closed_issue_fixed_schema_valid=true`、`open_body_sentinel_present=true`、`closed_body_sentinel_present=true`、`excluded_field_sentinel_absent=true`、`pull_request_sentinel_absent=true`だった。3件のauditはすべて`ok`で、audit line countが37から40へ増えた。Issue data gateの最終再実行はPASSとする。
+
+同じruntime中にhost側stale clientをcapability本文へ触れず準備し、runtimeの正常終了後にbroker socketとcapabilityのruntime artifactsは消失し、stale clientは拒否された。bounded結果は`runtime_artifacts_removed=true`、`stale_client_denied=true`、`stale_stdout_empty=true`、`stale_stderr_fixed=true`、`audit_unchanged=true`、`stale_temp_removed=true`だった。stdoutは空、stderrは固定`error: GitHub broker request failed`、audit line countは40のままだった。検証後はallowlistして事前検証したexact `$stale_tmp` directoryだけを削除した。Cleanup/stale client gateはPASSとする。
+
 | check | expected | observed | date |
 | --- | --- | --- | --- |
 | Scope reconciliation | initial design, README, and operator guide agree | PASS | 2026-08-29 |
 | Fixture repository | private exact repository and fixtures; ruleset inventory | FAIL/PARTIAL: HTTP 403 upgrade-or-public | 2026-08-29 |
 | Project registration and local doctor | one approved registration; manifest preserved; smoke Codex/Claude and production doctor | PASS | 2026-08-29 |
 | Git/PR gate | new branch succeeds; existing branch/protected/delete/tag updates denied | PASS: 修正前FAILを保持し、修正版再検証PASS。fast-forward／unrelated-history更新を拒否しremote不変 | 2026-08-29 |
-| Issue data gate | list/view/body fixed schema; Pull Request除外; excluded sentinel absent | not run | — |
-| Cleanup/stale client | runtime artifacts removed and stale client denied | not run | — |
+| Issue data gate | list/view/body fixed schema; Pull Request除外; excluded sentinel absent | PASS: latest image and approved broker socket access; 3 operations `ok` | 2026-08-29 |
+| Cleanup/stale client | runtime artifacts removed and stale client denied | PASS: artifacts absent; stale request denied; fixed empty/error output; audit unchanged | 2026-08-29 |
 | Release gate | tests, review, CI, changelog, final approval, v0.4.0 | not run | — |
