@@ -104,6 +104,30 @@ class RemoteHelperTest(unittest.TestCase):
             + b"0002",
         )
 
+    def test_runs_connect_upload_pack_exchange_for_git_2_53(self) -> None:
+        transport = FakeTransport()
+        request = pkt(b"command=ls-refs\n") + b"0000"
+        stdin = BytesIO(b"capabilities\nconnect git-upload-pack\n" + request)
+        stdout = BytesIO()
+
+        result = run_remote_helper(
+            ["origin", "agent-broker://jj1xgo/agent-container"],
+            {"AGENT_BROKER_REPOSITORY": "jj1xgo/agent-container"},
+            transport,
+            stdin,
+            stdout,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(transport.requests, [request])
+        self.assertEqual(
+            stdout.getvalue(),
+            b"connect\nstateless-connect\n\n\n"
+            + transport.discover()
+            + pkt(b"response\n")
+            + b"0002",
+        )
+
     def test_runs_one_receive_pack_exchange(self) -> None:
         transport = FakeReceiveTransport()
         push = b"commands-and-pack"
@@ -131,7 +155,7 @@ class RemoteHelperTest(unittest.TestCase):
         repository = Repository.parse("jj1xgo/agent-container")
         for body in (
             b"list\n",
-            b"capabilities\nconnect git-upload-pack\n",
+            b"capabilities\nconnect git-archive\n",
             b"capabilities\nstateless-connect git-receive-pack\n",
         ):
             with self.subTest(body=body):
