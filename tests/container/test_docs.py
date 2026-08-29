@@ -1,5 +1,7 @@
 from pathlib import Path
+import json
 import re
+import shlex
 import stat
 import unittest
 
@@ -30,13 +32,53 @@ LINT_INSTALL_STEP = '''      - name: Install lint dependency
 LINT_RUN_STEP = '''      - name: Run Ruff lint
         run: bin/lint
 '''
-BROAD_CONTAINER_CONTEXT_COPY = re.compile(
-    r'(?im)^[ \t]*(?:COPY|ADD)(?:[ \t]+--[^ \t\r\n]+)*[ \t]+'
-    r'(?:\.(?:[ \t]|$)|\[[ \t]*"\."[ \t]*,)'
-)
 README_LINT_SHARED_CONTRACT = (
     "Codex、Claude Code、local developer、CIは同じ`bin/lint` wrapperを使います。"
 )
+
+
+def _logical_containerfile_instructions(body: str) -> tuple[str, ...]:
+    instructions = []
+    current = ""
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not current and (not stripped or stripped.startswith("#")):
+            continue
+        continued = stripped.endswith("\\")
+        part = stripped[:-1].rstrip() if continued else stripped
+        current = f"{current} {part}".strip()
+        if not continued:
+            instructions.append(current)
+            current = ""
+    if current:
+        instructions.append(current)
+    return tuple(instructions)
+
+
+def _has_broad_container_context_copy(body: str) -> bool:
+    for instruction in _logical_containerfile_instructions(body):
+        match = re.fullmatch(r"(?is)(?:COPY|ADD)\s+(.+)", instruction)
+        if match is None:
+            continue
+        payload = match.group(1).strip()
+        while payload.startswith("--"):
+            _, separator, payload = payload.partition(" ")
+            if not separator:
+                payload = ""
+                break
+            payload = payload.lstrip()
+        try:
+            if payload.startswith("["):
+                values = json.loads(payload)
+                sources = values[:-1] if isinstance(values, list) else []
+            else:
+                values = shlex.split(payload)
+                sources = values[:-1]
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if any(source in {".", "./"} for source in sources):
+            return True
+    return False
 README_LINT_BEHAVIOR_CONTRACT = (
     "`bin/lint`は`src`と`tests`のcheck-onlyで、formatやauto-fixを行わず、"
     "実行中にnetwork accessを必要としません。"
@@ -81,19 +123,26 @@ class RuffLintToolingTest(unittest.TestCase):
         containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
         self.assertNotIn("requirements-lint.txt", containerfile)
         self.assertNotIn("ruff", containerfile.lower())
-        self.assertIsNone(BROAD_CONTAINER_CONTEXT_COPY.search(containerfile))
+        self.assertFalse(_has_broad_container_context_copy(containerfile))
 
     def test_broad_context_copy_guard_rejects_shell_and_json_forms(self) -> None:
         for instruction in (
             "COPY . /opt/app",
+            "COPY ./ /opt/app",
             "ADD . /opt/app",
+            "ADD ./ /opt/app",
             "COPY --chown=agent:agent . /opt/app",
             'COPY [".", "/opt/app"]',
+            'COPY ["./", "/opt/app"]',
             'ADD [".", "/opt/app"]',
+            'ADD ["./", "/opt/app"]',
+            "COPY \\\n  . \\\n  /opt/app",
+            "ADD --chown=agent:agent \\\n  ./ \\\n  /opt/app",
+            'COPY \\\n  ["./", "/opt/app"]',
         ):
             with self.subTest(instruction=instruction):
-                self.assertIsNotNone(
-                    BROAD_CONTAINER_CONTEXT_COPY.search(instruction), instruction
+                self.assertTrue(
+                    _has_broad_container_context_copy(instruction), instruction
                 )
 
     def test_broad_context_copy_guard_allows_current_explicit_sources(self) -> None:
@@ -104,7 +153,7 @@ class RuffLintToolingTest(unittest.TestCase):
             if line.startswith(("COPY ", "ADD "))
         )
         self.assertTrue(current_copy_lines)
-        self.assertIsNone(BROAD_CONTAINER_CONTEXT_COPY.search(current_copy_lines))
+        self.assertFalse(_has_broad_container_context_copy(current_copy_lines))
 
     def test_readme_documents_the_shared_lint_contract(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -552,3 +601,164 @@ class Phase4DocumentationTest(unittest.TestCase):
             "Release gate",
         ):
             self.assertRegex(smoke, rf"\| {check} \| [^\n]+ \| not run \|")
+
+    def test_repository_id_lookup_is_non_recording_and_approval_gated(self) -> None:
+        documents = (
+            ROOT / "docs/superpowers/plans/2026-08-29-project-scoped-github-repository-binding.md",
+            ROOT / "README.md",
+            ROOT / "docs/phase3-github-broker.md",
+            ROOT / "docs/phase4-stabilization-smoke-test.md",
+        )
+        for path in documents:
+            body = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.name):
+                for required in (
+                    "set +x",
+                    'GH_CONFIG_DIR="$AGENT_CONTAINER_HOME/gh"',
+                    "smoke_repository_id=$(",
+                    'test "$smoke_repository_id" -gt 0',
+                    "smoke_repository_id_valid=true",
+                    "# STOP: fresh approval required before registration.",
+                    '--github-repository-id "$smoke_repository_id"',
+                    "unset smoke_repository_id",
+                ):
+                    self.assertIn(required, body)
+
+                tracing_off = body.index("set +x")
+                lookup = body.index("gh repo view", tracing_off)
+                marker = body.index("smoke_repository_id_valid=true", lookup)
+                stop = body.index(
+                    "# STOP: fresh approval required before registration.", marker
+                )
+                registration = body.index(
+                    '--github-repository-id "$smoke_repository_id"', stop
+                )
+                unset = body.index("unset smoke_repository_id", registration)
+                self.assertLess(tracing_off, lookup)
+                self.assertLess(lookup, marker)
+                self.assertLess(marker, stop)
+                self.assertLess(stop, registration)
+                self.assertLess(registration, unset)
+                self.assertNotIn("set -x", body[registration:unset])
+                self.assertIn("fresh approval", body[stop:registration])
+
+                lookup_block = next(
+                    block
+                    for block in re.findall(
+                        r"```(?:bash|sh)\n(.*?)```", body, flags=re.DOTALL
+                    )
+                    if "gh repo view" in block
+                )
+                self.assertIn("smoke_repository_id=$(", lookup_block)
+                self.assertLess(
+                    lookup_block.index("set +x"),
+                    lookup_block.index("smoke_repository_id=$("),
+                )
+                self.assertLess(
+                    lookup_block.index('GH_CONFIG_DIR="$AGENT_CONTAINER_HOME/gh"'),
+                    lookup_block.index("gh repo view"),
+                )
+                self.assertNotIn("project add", lookup_block)
+                self.assertNotIn('echo "$smoke_repository_id"', lookup_block)
+                self.assertNotRegex(
+                    lookup_block,
+                    r"printf[^\n]*\$smoke_repository_id",
+                )
+                registration_block = next(
+                    block
+                    for block in re.findall(
+                        r"```(?:bash|sh)\n(.*?)```", body, flags=re.DOTALL
+                    )
+                    if '--github-repository-id "$smoke_repository_id"' in block
+                )
+                self.assertNotEqual(lookup_block, registration_block)
+                self.assertNotIn("gh repo view", registration_block)
+
+    def test_recovery_inventory_uses_reviewed_code_before_approval(self) -> None:
+        documents = (
+            ROOT / "docs/superpowers/plans/2026-08-29-project-scoped-github-repository-binding.md",
+            ROOT / "docs/phase4-stabilization-smoke-test.md",
+        )
+        for path in documents:
+            body = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.name):
+                for required in (
+                    "bin/agentctl build >/dev/null",
+                    "agentctl --version >/dev/null",
+                    "agent-github --help >/dev/null",
+                    "reviewed_candidate_valid=true",
+                    "partial_state_filesystem_valid=true",
+                    "load_broker_policy",
+                    "policy.repository_id is not None",
+                    "legacy_policy_valid=true",
+                    "fixture_manifest_valid=true",
+                    '"repository": "jj1xgo/agent-container-smoke"',
+                    '"default_branch": "main"',
+                    '"open_issue"',
+                    '"closed_issue"',
+                    '"pull_request"',
+                    "phase4-open-body-sentinel",
+                    "phase4-closed-body-sentinel",
+                    "phase4-excluded-field-sentinel",
+                    "phase4-pr-exclusion-sentinel",
+                ):
+                    self.assertIn(required, body)
+                build = body.index("bin/agentctl build")
+                candidate = body.index("reviewed_candidate_valid=true", build)
+                filesystem = body.index(
+                    "partial_state_filesystem_valid=true", candidate
+                )
+                policy = body.index("load_broker_policy", build)
+                manifest = body.index("fixture_manifest_valid=true", policy)
+                lookup = body.index("smoke_repository_id=$(", manifest)
+                stop = body.index(
+                    "# STOP: fresh approval required before registration.", lookup
+                )
+                registration = body.index(
+                    '--github-repository-id "$smoke_repository_id"', stop
+                )
+                self.assertLess(build, candidate)
+                self.assertLess(candidate, filesystem)
+                self.assertLess(filesystem, policy)
+                self.assertLess(policy, manifest)
+                self.assertLess(manifest, lookup)
+                self.assertLess(lookup, stop)
+                self.assertLess(stop, registration)
+                self.assertNotIn("print(payload)", body[policy:stop])
+                self.assertNotIn("print(policy)", body[policy:stop])
+                self.assertNotRegex(body[policy:stop], r"(?m)^\s*cat\s+")
+                validation_block = next(
+                    block
+                    for block in re.findall(
+                        r"```bash\n(.*?)```", body, flags=re.DOTALL
+                    )
+                    if "load_broker_policy" in block
+                )
+                self.assertEqual(
+                    re.findall(r'print\("([a-z_]+=true)"\)', validation_block),
+                    ["legacy_policy_valid=true", "fixture_manifest_valid=true"],
+                )
+
+    def test_shared_app_selection_and_production_doctor_are_required(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        operator = (ROOT / "docs/phase3-github-broker.md").read_text(
+            encoding="utf-8"
+        )
+        smoke = (ROOT / "docs/phase4-stabilization-smoke-test.md").read_text(
+            encoding="utf-8"
+        )
+        for body in (readme, operator, smoke):
+            self.assertIn("production and smoke selected repositories", body)
+            self.assertIn("Do not deselect the production repository", body)
+            self.assertIn(
+                "each installation token narrows to exactly one project repository ID",
+                body,
+            )
+        self.assertNotIn("このexact repositoryだけを選択", smoke)
+        for body in (operator, smoke):
+            for command in (
+                "bin/agentctl doctor agent-container-smoke --github-broker",
+                "bin/agentctl doctor agent-container-smoke --agent claude --github-broker",
+                "bin/agentctl doctor agent-container --github-broker",
+            ):
+                self.assertIn(command, body)

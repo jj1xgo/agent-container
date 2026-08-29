@@ -305,7 +305,7 @@ class BrokerPolicyUpgradeTest(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o755)
             self.assertEqual(list(path.parent.glob(".github-broker.json.*")), [])
 
-    def test_rejects_wrong_owner_without_changing_bytes(self) -> None:
+    def test_rejects_wrong_parent_owner_without_changing_bytes(self) -> None:
         existing = self._policy()
         requested = self._policy(repository_id=123)
         with TemporaryDirectory() as temp:
@@ -318,6 +318,91 @@ class BrokerPolicyUpgradeTest(unittest.TestCase):
                 return_value=os.getuid() + 1,
             ):
                 with self.assertRaises(PermissionError):
+                    upgrade_legacy_broker_policy(path, existing, requested)
+
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(list(path.parent.glob(".github-broker.json.*")), [])
+
+    def test_rejects_wrong_policy_file_owner_without_changing_bytes(self) -> None:
+        existing = self._policy()
+        requested = self._policy(repository_id=123)
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "github-broker.json"
+            self._write_policy(path, existing)
+            original = path.read_bytes()
+            real_fstat = os.fstat
+
+            def wrong_regular_file_owner(descriptor):
+                result = real_fstat(descriptor)
+                if not stat.S_ISREG(result.st_mode):
+                    return result
+                values = list(result)
+                values[4] = os.getuid() + 1
+                return os.stat_result(values)
+
+            with mock.patch.object(
+                github_broker_runtime.os,
+                "fstat",
+                side_effect=wrong_regular_file_owner,
+            ):
+                with self.assertRaises(PermissionError):
+                    upgrade_legacy_broker_policy(path, existing, requested)
+
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(list(path.parent.glob(".github-broker.json.*")), [])
+
+    def test_write_failure_cleans_temp_and_preserves_original_bytes(self) -> None:
+        existing = self._policy()
+        requested = self._policy(repository_id=123)
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "github-broker.json"
+            self._write_policy(path, existing)
+            original = path.read_bytes()
+
+            with mock.patch.object(
+                github_broker_runtime,
+                "_write_all",
+                side_effect=OSError("injected write failure"),
+            ):
+                with self.assertRaises(OSError):
+                    upgrade_legacy_broker_policy(path, existing, requested)
+
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(list(path.parent.glob(".github-broker.json.*")), [])
+
+    def test_file_fsync_failure_cleans_temp_and_preserves_original_bytes(self) -> None:
+        existing = self._policy()
+        requested = self._policy(repository_id=123)
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "github-broker.json"
+            self._write_policy(path, existing)
+            original = path.read_bytes()
+
+            with mock.patch.object(
+                github_broker_runtime.os,
+                "fsync",
+                side_effect=OSError("injected fsync failure"),
+            ):
+                with self.assertRaises(OSError):
+                    upgrade_legacy_broker_policy(path, existing, requested)
+
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(list(path.parent.glob(".github-broker.json.*")), [])
+
+    def test_replace_failure_cleans_temp_and_preserves_original_bytes(self) -> None:
+        existing = self._policy()
+        requested = self._policy(repository_id=123)
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "github-broker.json"
+            self._write_policy(path, existing)
+            original = path.read_bytes()
+
+            with mock.patch.object(
+                github_broker_runtime.os,
+                "replace",
+                side_effect=OSError("injected replace failure"),
+            ):
+                with self.assertRaises(OSError):
                     upgrade_legacy_broker_policy(path, existing, requested)
 
             self.assertEqual(path.read_bytes(), original)

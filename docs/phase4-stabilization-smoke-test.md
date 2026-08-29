@@ -14,7 +14,7 @@
 
 credential本文を表示しない。記録するのは固定schemaの結果、boolean、exit status、operation名、repository slug、PR番号などsecret-free metadataだけとする。host `gh` administrationによるfixture準備はcontainer broker operationsと別の承認・記録対象であり、失敗した外部操作を自動再実行しない。
 
-repository bindingはproject-scopedで、新規登録には`--github-repository-id`を必須とする。旧schema policyのlegacy global fallbackは既存project互換性だけのために残る。local doctorはremote App selectionを証明しない。
+repository bindingはproject-scopedで、新規登録には`--github-repository-id`を必須とする。旧schema policyのlegacy global fallbackは既存project互換性だけのために残る。shared installationはproduction and smoke selected repositoriesの両方を維持する。Do not deselect the production repository。each installation token narrows to exactly one project repository IDであり、local doctorはremote App selectionを証明しない。
 
 ## 1. Scope reconciliation
 
@@ -23,6 +23,17 @@ repository bindingはproject-scopedで、新規登録には`--github-repository-
 - domain allowlist／egress controlはPhase 4に含めず、既知WARNとして独立した将来設計へ延期されていることを確認する。
 
 ## 2. Fixture repository inventory
+
+### Reviewed candidateの再buildと確認
+
+partial stateを読む前に、review済みcommitを含むhost checkoutでcandidateを再buildし、image内のversionと固定CLI entrypointを確認する。どれか一つでも失敗したら自動retryしない。
+
+```bash
+bin/agentctl build >/dev/null
+podman run --rm localhost/agent-container:dev agentctl --version >/dev/null
+podman run --rm localhost/agent-container:dev agent-github --help >/dev/null
+printf '%s\n' 'reviewed_candidate_valid=true'
+```
 
 ### 観測済みの初回失敗
 
@@ -34,7 +45,7 @@ repository bindingはproject-scopedで、新規登録には`--github-repository-
 
 - `main`は初期READMEだけを持つ。open Issueは固定title、body、label、milestoneを持ち、closed Issueはviewのstateとbody確認に使う。
 - open Pull RequestはIssue listから除外される固定sentinelを持つ。Issue／PR番号と期待値はhost側の`$AGENT_CONTAINER_HOME/projects/agent-container-smoke/smoke-fixtures.json`へ、ownerが実行userのmode `0600`通常fileとして記録し、containerへmountしない。
-- GitHub Appは`Only select repositories`でこのexact repositoryだけを選択し、Metadata read、Contents write、Pull requests write、Checks read、Issues readだけを付与する。全branch rulesetはforce-pushを禁止しbypassを持たない。
+- GitHub Appは`Only select repositories`でproduction repositoryを選択したまま、このexact smoke repositoryも選択し、Metadata read、Contents write、Pull requests write、Checks read、Issues readだけを付与する。全branch rulesetはforce-pushを禁止しbypassを持たない。
 
 通常の新規登録では、同じproject ID、workspace、handover directory、broker project recordが存在するcollisionをread-onlyで確認する。いずれかが存在する場合は停止し、既存stateを削除、上書き、再利用、別repositoryへ再割当てしない。
 
@@ -62,24 +73,116 @@ test ! -e "$AGENT_CONTAINER_HOME/projects/agent-container-smoke/project.json" ||
 test ! -L "$AGENT_CONTAINER_HOME/projects/agent-container-smoke/project.json" || exit 1
 test ! -e "$AGENT_CONTAINER_HOME/workspaces/agent-container-smoke" || exit 1
 test ! -L "$AGENT_CONTAINER_HOME/workspaces/agent-container-smoke" || exit 1
+printf '%s\n' 'partial_state_filesystem_valid=true'
+```
 
-GITHUB_REPOSITORY_ID="$(
-  gh repo view jj1xgo/agent-container-smoke --json databaseId --jq .databaseId
-)"
-case "$GITHUB_REPOSITORY_ID" in
+次にreview済みcodeのstrict loaderでlegacy policyを検証し、fixture manifestをexact schema、repository、default branch、positive Issue／PR integers、expected sentinelsまで検証する。bodyやIDは表示せずboolean markerだけを出す。
+
+```bash
+AGENT_CONTAINER_HOME="$AGENT_CONTAINER_HOME" PYTHONPATH=src python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+from agent_container.github_broker_policy import BrokerPolicy
+from agent_container.github_broker_runtime import load_broker_policy
+from agent_container.state import ProjectRecord, Repository
+
+
+def unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate fixture key")
+        value[key] = item
+    return value
+
+
+root = Path(os.environ["AGENT_CONTAINER_HOME"])
+project_dir = root / "projects/agent-container-smoke"
+repository = Repository.parse("jj1xgo/agent-container-smoke")
+record = ProjectRecord(repository, Path("/unused"))
+policy = load_broker_policy(
+    project_dir / "github-broker.json", record, "agent-container-smoke"
+)
+expected_policy = BrokerPolicy.create(
+    project_id="agent-container-smoke",
+    repository="jj1xgo/agent-container-smoke",
+    default_branch="main",
+    protected_branches=("main",),
+)
+if policy.repository_id is not None or policy != expected_policy:
+    raise ValueError("legacy policy mismatch")
+print("legacy_policy_valid=true")
+
+payload = json.loads(
+    (project_dir / "smoke-fixtures.json").read_bytes(),
+    object_pairs_hook=unique_object,
+)
+expected_static = {
+    "repository": "jj1xgo/agent-container-smoke",
+    "default_branch": "main",
+    "open_body_sentinel": "phase4-open-body-sentinel",
+    "closed_body_sentinel": "phase4-closed-body-sentinel",
+    "excluded_field_sentinel": "phase4-excluded-field-sentinel",
+    "pull_request_sentinel": "phase4-pr-exclusion-sentinel",
+}
+expected_keys = set(expected_static) | {
+    "open_issue",
+    "closed_issue",
+    "pull_request",
+}
+if not isinstance(payload, dict) or set(payload) != expected_keys:
+    raise ValueError("fixture schema mismatch")
+if any(payload[key] != value for key, value in expected_static.items()):
+    raise ValueError("fixture identity mismatch")
+numbers = tuple(payload[key] for key in ("open_issue", "closed_issue", "pull_request"))
+if any(
+    isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 2_147_483_647
+    for value in numbers
+) or len(set(numbers)) != 3:
+    raise ValueError("fixture number mismatch")
+print("fixture_manifest_valid=true")
+PY
+```
+
+repository ID lookupもread-onlyだが、値がtranscriptへ出ないようtracingを先に無効化し、専用`GH_CONFIG_DIR`から変数へ直接取り込む。
+
+```bash
+set +x
+smoke_repository_id=$(
+  GH_CONFIG_DIR="$AGENT_CONTAINER_HOME/gh" \
+    gh repo view jj1xgo/agent-container-smoke \
+      --json databaseId --jq .databaseId
+)
+case "$smoke_repository_id" in
   ''|*[!0-9]*) exit 1 ;;
 esac
-test "$GITHUB_REPOSITORY_ID" -gt 0 || exit 1
+test "$smoke_repository_id" -gt 0
+printf '%s\n' 'smoke_repository_id_valid=true'
+# STOP: fresh approval required before registration.
+```
 
-bin/agentctl project add jj1xgo/agent-container-smoke \
+ここで必ず停止する。filesystem／policy／manifest／ID validityのboolean evidenceを示し、exact repository、project ID、legacy policy atomic upgrade、broker clone、project metadata作成、sibling manifest保持だけを対象とするfresh approvalを得る。fixture、production repository、App selection、ruleset、releaseのmutationは含めない。
+
+### Fresh approval後の一度だけの登録
+
+承認後だけ次の別blockを一度実行する。失敗時も先にIDをunsetしてから停止し、自動retryしない。shell tracingはIDのunset後まで再開しない。
+
+```bash
+if ! bin/agentctl project add jj1xgo/agent-container-smoke \
   --project agent-container-smoke \
   --handover-root "$AGENT_HANDOVER_ROOT" \
   --github-broker \
-  --github-repository-id "$GITHUB_REPOSITORY_ID" \
+  --github-repository-id "$smoke_repository_id" \
   --default-branch main \
   --protected-branch main \
-  --confirm-force-push-ruleset
-unset GITHUB_REPOSITORY_ID
+  --confirm-force-push-ruleset; then
+  unset smoke_repository_id
+  exit 1
+fi
+unset smoke_repository_id
+# shell tracing may resume only after the ID is unset
 ```
 
 `gh repo view ... --json databaseId --jq .databaseId`はexact repositoryだけのbounded host inventoryである。取得IDはCLIへ明示的に渡すが、broker audit、container output、container mountへ書かない。このcommandと登録retryは同じ承認ではなく、登録retryには実行直前のfresh approvalが必要である。
@@ -89,9 +192,9 @@ unset GITHUB_REPOSITORY_ID
 rootless Podmanとrebuild済みimageを確認し、project metadata、workspace origin、broker policyがexact repositoryと一致することを確認する。
 
 ```bash
-bin/agentctl doctor PROJECT --github-broker
-bin/agentctl doctor PROJECT --agent claude --github-broker
-bin/agentctl run PROJECT --github-broker
+bin/agentctl doctor agent-container-smoke --github-broker
+bin/agentctl doctor agent-container-smoke --agent claude --github-broker
+bin/agentctl doctor agent-container --github-broker
 ```
 
 doctorのPASSはlocal App metadata、private key boundary、project policyだけを意味し、remote App selection、GitHub installation、permission、repository identity、ruleset、network到達性の確認ではない。explicit policyでは`project repository binding valid`、旧schemaでは`legacy global repository binding valid`と区別するがnumeric IDは表示しない。runtime内で`GH_CONFIG_DIR`、`GITHUB_TOKEN`、`GH_TOKEN`、host Git credential store、SSH agent、hostの`.config/gh`、App private key、`app.json`が利用不能であり、project別socketとephemeral capabilityだけがread-only mountされることを値を表示せず確認する。

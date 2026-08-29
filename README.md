@@ -194,21 +194,44 @@ Phase 3のbroker modeでは、GitHub App private keyとinstallation tokenをhost
 
 このbrokerは`agent-container`自身のrepositoryだけでなく、`agent-container`が管理する他のprojectでも同じ仕組みを再実装せずに利用できます。broker用の設定やcredentialは対象repositoryにcommitせず、GitHub側のApp installationとhost側の`agent-container`管理領域に置きます。新しいrepositoryで利用するときは、そのrepositoryへのGitHub App installationとbrokerを有効にしたproject登録を個別に行います。
 
-GitHub Appのselected repository installation、最小permission、全branch force-push禁止ruleset、private stateを準備します。新規broker projectはhostで`gh repo view OWNER/REPOSITORY --json databaseId --jq .databaseId`を使って対象IDをinventoryし、`--github-repository-id`へ明示的に渡すproject-scoped bindingを使います。IDはbroker auditやcontainer output／mountへ書きません。既存の旧schema policyだけはlegacy global fallbackを維持します。
+GitHub Appのselected repository installation、最小permission、全branch force-push禁止ruleset、private stateを準備します。shared installationはproduction and smoke selected repositoriesの両方を維持します。Do not deselect the production repository。each installation token narrows to exactly one project repository IDなので、App identityを共有してもtokenはprojectごとのexact repositoryだけに限定されます。既存の旧schema policyだけはlegacy global fallbackを維持します。
+
+smoke recoveryでrepository IDをinventoryするときは、shell tracingを先に無効化し、agent-container専用GitHub CLI stateだけで値を変数へ取り込みます。値は表示せず、boolean markerを出した時点で停止します。
 
 ```bash
-bin/agentctl project add OWNER/REPOSITORY \
-  --handover-root "$HANDOVER_ROOT" \
-  --github-broker \
-  --github-repository-id POSITIVE_INTEGER \
-  --protected-branch main \
-  --confirm-force-push-ruleset
-
-bin/agentctl doctor REPOSITORY --github-broker
-bin/agentctl run REPOSITORY --github-broker
+set +x
+smoke_repository_id=$(
+  GH_CONFIG_DIR="$AGENT_CONTAINER_HOME/gh" \
+    gh repo view jj1xgo/agent-container-smoke \
+      --json databaseId --jq .databaseId
+)
+case "$smoke_repository_id" in
+  ''|*[!0-9]*) exit 1 ;;
+esac
+test "$smoke_repository_id" -gt 0
+printf '%s\n' 'smoke_repository_id_valid=true'
+# STOP: fresh approval required before registration.
 ```
 
-fixture準備などのhost `gh` administrationはcontainer broker operationsとは別の承認・記録対象です。broker failureはhost `gh`、専用`gh` credential、environment token、SSH agent、host credential helperへのfallbackを決して起動しません。設定と実host検証の全手順は[Phase 3 GitHub App broker運用ガイド](docs/phase3-github-broker.md)を参照してください。
+fresh approvalはexact smoke repository、project ID、legacy policyのatomic upgrade、broker clone、project metadata作成、sibling manifest保持を対象にします。承認後だけ、別blockで一度登録します。
+
+```bash
+if ! bin/agentctl project add jj1xgo/agent-container-smoke \
+  --project agent-container-smoke \
+  --handover-root "$HANDOVER_ROOT" \
+  --github-broker \
+  --github-repository-id "$smoke_repository_id" \
+  --default-branch main \
+  --protected-branch main \
+  --confirm-force-push-ruleset; then
+  unset smoke_repository_id
+  exit 1
+fi
+unset smoke_repository_id
+# shell tracing may resume only after the ID is unset
+```
+
+IDはproject policyへ保存しますが、docs、broker audit、container output／mountへ書きません。fixture準備などのhost `gh` administrationはcontainer broker operationsとは別の承認・記録対象です。broker failureはhost `gh`、専用`gh` credential、environment token、SSH agent、host credential helperへのfallbackを決して起動しません。設定と実host検証の全手順は[Phase 3 GitHub App broker運用ガイド](docs/phase3-github-broker.md)を参照してください。
 
 ## 開発時のlint
 

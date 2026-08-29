@@ -527,9 +527,10 @@ most five focused fix rounds, rerunning affected tests after every round.
 From the host checkout containing the reviewed commits:
 
 ```bash
-bin/agentctl build
-podman run --rm localhost/agent-container:dev agentctl --version
+bin/agentctl build >/dev/null
+podman run --rm localhost/agent-container:dev agentctl --version >/dev/null
 podman run --rm localhost/agent-container:dev agent-github --help >/dev/null
+printf '%s\n' 'reviewed_candidate_valid=true'
 ```
 
 Stop on any failure. Do not retry automatically.
@@ -543,19 +544,117 @@ reviewed code and confirm exact repository/default/protected/ruleset fields and
 legacy `repository_id is None`. Validate the manifest exact keys and fixture
 numbers without printing its body.
 
+```bash
+test -d "$AGENT_CONTAINER_HOME/projects/agent-container-smoke"
+test ! -L "$AGENT_CONTAINER_HOME/projects/agent-container-smoke"
+test "$(stat -c '%a:%u' "$AGENT_CONTAINER_HOME/projects/agent-container-smoke")" = "700:$(id -u)"
+test -f "$AGENT_CONTAINER_HOME/projects/agent-container-smoke/github-broker.json"
+test ! -L "$AGENT_CONTAINER_HOME/projects/agent-container-smoke/github-broker.json"
+test "$(stat -c '%a:%u' "$AGENT_CONTAINER_HOME/projects/agent-container-smoke/github-broker.json")" = "600:$(id -u)"
+test -f "$AGENT_CONTAINER_HOME/projects/agent-container-smoke/smoke-fixtures.json"
+test ! -L "$AGENT_CONTAINER_HOME/projects/agent-container-smoke/smoke-fixtures.json"
+test "$(stat -c '%a:%u' "$AGENT_CONTAINER_HOME/projects/agent-container-smoke/smoke-fixtures.json")" = "600:$(id -u)"
+test -d "$AGENT_HANDOVER_ROOT/agent-container-smoke"
+test ! -L "$AGENT_HANDOVER_ROOT/agent-container-smoke"
+test "$(stat -c '%a:%u' "$AGENT_HANDOVER_ROOT/agent-container-smoke")" = "700:$(id -u)"
+test ! -e "$AGENT_CONTAINER_HOME/projects/agent-container-smoke/project.json"
+test ! -L "$AGENT_CONTAINER_HOME/projects/agent-container-smoke/project.json"
+test ! -e "$AGENT_CONTAINER_HOME/workspaces/agent-container-smoke"
+test ! -L "$AGENT_CONTAINER_HOME/workspaces/agent-container-smoke"
+printf '%s\n' 'partial_state_filesystem_valid=true'
+```
+
+Use the reviewed loader for the policy and an exact duplicate-rejecting JSON
+check for the fixture. Print only boolean markers:
+
+```bash
+AGENT_CONTAINER_HOME="$AGENT_CONTAINER_HOME" PYTHONPATH=src python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+from agent_container.github_broker_policy import BrokerPolicy
+from agent_container.github_broker_runtime import load_broker_policy
+from agent_container.state import ProjectRecord, Repository
+
+
+def unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate fixture key")
+        value[key] = item
+    return value
+
+
+root = Path(os.environ["AGENT_CONTAINER_HOME"])
+project_dir = root / "projects/agent-container-smoke"
+repository = Repository.parse("jj1xgo/agent-container-smoke")
+record = ProjectRecord(repository, Path("/unused"))
+policy = load_broker_policy(
+    project_dir / "github-broker.json", record, "agent-container-smoke"
+)
+expected_policy = BrokerPolicy.create(
+    project_id="agent-container-smoke",
+    repository="jj1xgo/agent-container-smoke",
+    default_branch="main",
+    protected_branches=("main",),
+)
+if policy.repository_id is not None or policy != expected_policy:
+    raise ValueError("legacy policy mismatch")
+print("legacy_policy_valid=true")
+
+payload = json.loads(
+    (project_dir / "smoke-fixtures.json").read_bytes(),
+    object_pairs_hook=unique_object,
+)
+expected_static = {
+    "repository": "jj1xgo/agent-container-smoke",
+    "default_branch": "main",
+    "open_body_sentinel": "phase4-open-body-sentinel",
+    "closed_body_sentinel": "phase4-closed-body-sentinel",
+    "excluded_field_sentinel": "phase4-excluded-field-sentinel",
+    "pull_request_sentinel": "phase4-pr-exclusion-sentinel",
+}
+expected_keys = set(expected_static) | {
+    "open_issue",
+    "closed_issue",
+    "pull_request",
+}
+if not isinstance(payload, dict) or set(payload) != expected_keys:
+    raise ValueError("fixture schema mismatch")
+if any(payload[key] != value for key, value in expected_static.items()):
+    raise ValueError("fixture identity mismatch")
+numbers = tuple(payload[key] for key in ("open_issue", "closed_issue", "pull_request"))
+if any(
+    isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 2_147_483_647
+    for value in numbers
+) or len(set(numbers)) != 3:
+    raise ValueError("fixture number mismatch")
+print("fixture_manifest_valid=true")
+PY
+```
+
 - [ ] **Step 3: Resolve the repository ID without recording it**
 
 ```bash
+set +x
 smoke_repository_id=$(
   GH_CONFIG_DIR="$AGENT_CONTAINER_HOME/gh" \
     gh repo view jj1xgo/agent-container-smoke \
       --json databaseId --jq .databaseId
 )
+case "$smoke_repository_id" in
+  ''|*[!0-9]*) exit 1 ;;
+esac
 test "$smoke_repository_id" -gt 0
+printf '%s\n' 'smoke_repository_id_valid=true'
+# STOP: fresh approval required before registration.
 ```
 
-Print only `smoke_repository_id_valid=true`; do not add the value to docs,
-audit, handover, or command transcripts.
+Do not add the value to docs, audit, handover, or command transcripts. Remain
+stopped after the boolean marker; repository lookup approval does not authorize
+registration.
 
 - [ ] **Step 4: Obtain fresh recovery approval**
 
@@ -564,27 +663,37 @@ clone, project metadata creation, and existing sibling manifest preservation.
 State that no fixture, production repository, App setting, ruleset, or release
 mutation is included.
 
+The shared installation must retain production and smoke selected repositories.
+Do not deselect the production repository. each installation token narrows to
+exactly one project repository ID.
+
 - [ ] **Step 5: Resume registration once**
 
 ```bash
-bin/agentctl project add jj1xgo/agent-container-smoke \
+if ! bin/agentctl project add jj1xgo/agent-container-smoke \
   --project agent-container-smoke \
   --handover-root "$AGENT_HANDOVER_ROOT" \
   --github-broker \
   --github-repository-id "$smoke_repository_id" \
   --default-branch main \
   --protected-branch main \
-  --confirm-force-push-ruleset
+  --confirm-force-push-ruleset; then
+  unset smoke_repository_id
+  exit 1
+fi
+unset smoke_repository_id
+# shell tracing may resume only after the ID is unset
 ```
 
 On failure, stop and inspect only fixed stderr plus allowlisted audit
 `{timestamp,project,repository,operation,status,stage}`. Do not retry.
 
-- [ ] **Step 6: Verify registration and both doctors**
+- [ ] **Step 6: Verify registration and smoke/production doctors**
 
 ```bash
 bin/agentctl doctor agent-container-smoke --github-broker
 bin/agentctl doctor agent-container-smoke --agent claude --github-broker
+bin/agentctl doctor agent-container --github-broker
 ```
 
 Require exact HTTPS origin, bound-policy doctor detail, required checks PASS,

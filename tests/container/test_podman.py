@@ -24,6 +24,7 @@ from agent_container.podman import podman_stats_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
+from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.state import Repository
 from agent_container.state import StateLayout
 
@@ -361,6 +362,49 @@ class PodmanCommandTest(unittest.TestCase):
         )
         self.assertNotIn("/state/gh", joined)
         self.assertNotIn("gh auth git-credential", joined)
+
+    def test_bound_repository_id_is_absent_from_container_argv_and_mounts(self) -> None:
+        repository_id = 987_654_321
+        policy = BrokerPolicy.create(
+            project_id="agent-container",
+            repository="jj1xgo/agent-container",
+            repository_id=repository_id,
+            default_branch="main",
+            protected_branches=("main",),
+            require_repository_id=True,
+        )
+        layout = StateLayout(Path("/state"), policy.project_id)
+        broker = BrokerRuntimeMount(Path("/state/runtime/one"), policy.repository)
+        self.assertEqual(policy.repository_id, repository_id)
+        self.assertEqual(set(vars(broker)), {"run_dir", "repository"})
+        self.assertNotIn(str(repository_id), repr(broker))
+        specs = (
+            clone_project_spec(layout, policy.repository, IMAGE, broker),
+            run_codex_spec(
+                layout,
+                Path("/vault/handovers/agent-container"),
+                IMAGE,
+                os.getuid(),
+                os.getgid(),
+                broker,
+            ),
+            run_claude_spec(
+                layout,
+                Path("/vault/handovers/agent-container"),
+                IMAGE,
+                os.getuid(),
+                os.getgid(),
+                HANDOVER_BROKER,
+                broker,
+            ),
+        )
+
+        for spec in specs:
+            with self.subTest(command=spec.argv[-1]):
+                rendered = " ".join(spec.argv)
+                self.assertNotIn(str(repository_id), rendered)
+                self.assertNotIn("repository_id", rendered)
+                self.assertNotIn("repository-id", rendered)
 
     def test_runtime_can_replace_gh_mount_with_broker_runtime(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")

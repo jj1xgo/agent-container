@@ -24,7 +24,7 @@ broker modeで許可する操作は次だけです。
 
 ## GitHub Appの準備
 
-GitHub Appは`Only select repositories`で対象repositoryだけへinstallします。App permissionは次に限定します。
+GitHub Appは`Only select repositories`でproductionとsmokeの対象repositoriesだけへinstallします。shared installationはproduction and smoke selected repositoriesの両方を保持します。Do not deselect the production repository。each installation token narrows to exactly one project repository IDであり、project policyがtokenごとのexact repositoryを決定します。App permissionは次に限定します。
 
 | Permission | Level |
 | --- | --- |
@@ -79,33 +79,55 @@ private key、App JWT、installation tokenは表示しません。installation t
 
 ## Broker modeでprojectを登録する
 
-handover directoryを先に作り、rulesetをGitHub上で確認した後に登録します。hostの認証済み`gh`でexact repositoryだけをqueryし、返された正のdecimal IDを表示せず変数へ保持します。
+handover directoryを先に作り、rulesetをGitHub上で確認します。hostのagent-container専用`gh` stateでexact smoke repositoryだけをqueryします。shell tracingを先に無効化し、返された正のdecimal IDは表示せず変数へ保持します。
 
 ```bash
 export HANDOVER_ROOT="$HOME/handovers"
-mkdir -p "$HANDOVER_ROOT/REPOSITORY"
+test -d "$HANDOVER_ROOT/agent-container-smoke"
 
-GITHUB_REPOSITORY_ID="$(
-  gh repo view OWNER/REPOSITORY --json databaseId --jq .databaseId
-)"
-case "$GITHUB_REPOSITORY_ID" in
+set +x
+smoke_repository_id=$(
+  GH_CONFIG_DIR="$AGENT_CONTAINER_HOME/gh" \
+    gh repo view jj1xgo/agent-container-smoke \
+      --json databaseId --jq .databaseId
+)
+case "$smoke_repository_id" in
   ''|*[!0-9]*) exit 1 ;;
 esac
-test "$GITHUB_REPOSITORY_ID" -gt 0 || exit 1
+test "$smoke_repository_id" -gt 0
+printf '%s\n' 'smoke_repository_id_valid=true'
+# STOP: fresh approval required before registration.
+```
 
-bin/agentctl project add OWNER/REPOSITORY \
+ここで停止し、exact repository、project ID、legacy policy atomic upgrade、broker clone、project metadata作成、既存sibling manifest保持を示してfresh approvalを取得します。App selection、fixture、ruleset、production repository、releaseのmutationは含めません。承認後だけ次の別blockを一度実行します。
+
+```bash
+if ! bin/agentctl project add jj1xgo/agent-container-smoke \
+  --project agent-container-smoke \
   --handover-root "$HANDOVER_ROOT" \
   --github-broker \
-  --github-repository-id "$GITHUB_REPOSITORY_ID" \
+  --github-repository-id "$smoke_repository_id" \
   --default-branch main \
   --protected-branch main \
-  --confirm-force-push-ruleset
-unset GITHUB_REPOSITORY_ID
+  --confirm-force-push-ruleset; then
+  unset smoke_repository_id
+  exit 1
+fi
+unset smoke_repository_id
+# shell tracing may resume only after the ID is unset
 ```
 
 `--github-repository-id`は`--github-broker`専用で、新規broker projectでは必須です。IDはprojectのmode `0600` policyへ保存しますが、broker audit、container output、container mountへ書きません。`--confirm-force-push-ruleset`は実際に全branch force-push禁止rulesetを確認した場合だけ指定します。default branchは必ずprotected branchになります。`master`など他の保護対象があれば`--protected-branch`を繰り返します。
 
 登録時のcloneはbroker経由です。broker起動、App state、policy、token発行、GitHub transportのどれかが失敗した場合、cloneやproject record作成を行わず、legacy `gh`へfallbackしません。
+
+recovery成功後はsmoke projectのCodex／Claude Codeとproduction projectの互換性をすべて確認します。
+
+```bash
+bin/agentctl doctor agent-container-smoke --github-broker
+bin/agentctl doctor agent-container-smoke --agent claude --github-broker
+bin/agentctl doctor agent-container --github-broker
+```
 
 ## Doctorとrun
 
