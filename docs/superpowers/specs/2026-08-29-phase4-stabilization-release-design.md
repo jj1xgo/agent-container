@@ -96,7 +96,8 @@ broker失敗時にlegacy `gh` credential、environment token、SSH agent、host 
 
 - cloneとfetchが成功する。
 - 一意なwork branchへの通常pushが成功する。
-- protected branch、delete、stale lease、non-fast-forward、non-head ref、cross-repository操作が拒否される。
+- protected branch、delete、non-fast-forward、non-head ref、cross-repository操作が拒否される。
+- stale leaseは自動testを必須証拠とする。advertisement後・RPC前のremote更新をcredential非露出のまま決定論的に同期できる方法を先にspikeし、成立した場合だけ実hostで実行する。race依存の並行pushは使わず、決定論的な方法が成立しなければ`PARTIAL`として理由と受容判断を記録する。
 - negative操作はbrokerが送信前に拒否できるcaseを優先する。GitHubへ到達させる必要があるcaseもtest repository内だけで実行する。
 - PR create／view／checksが成功し、merge、release、generic API interfaceが存在しない。
 
