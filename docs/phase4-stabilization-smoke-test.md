@@ -22,11 +22,27 @@ credential本文を表示しない。記録するのは固定schemaの結果、b
 
 ## 2. Fixture repository inventory
 
-既定のprivate repositoryは`jj1xgo/agent-container-smoke`とする。作成、GitHub App installationへの追加、fixture Issue／label／milestone／Pull Requestの準備はそれぞれ実行直前の利用者承認を必要とし、repositoryを自動削除しない。
+既定のprivate repositoryは`jj1xgo/agent-container-smoke`とする。作成、GitHub App installationへの追加、fixture Issue／label／milestone／Pull Requestの準備はそれぞれ実行直前の利用者承認を必要とし、repositoryを自動削除しない。fixture projectのhandover directory作成とbroker project登録も、exact repository、project ID、cloneによる外部状態、既存stateを再利用しないことを示したhost承認を実行直前に得る。
 
 - `main`は初期READMEだけを持つ。open Issueは固定title、body、label、milestoneを持ち、closed Issueはviewのstateとbody確認に使う。
 - open Pull RequestはIssue listから除外される固定sentinelを持つ。Issue／PR番号と期待値はhost側の`$AGENT_CONTAINER_HOME/projects/agent-container-smoke/smoke-fixtures.json`へ、ownerが実行userのmode `0600`通常fileとして記録し、containerへmountしない。
 - GitHub Appは`Only select repositories`でこのexact repositoryだけを選択し、Metadata read、Contents write、Pull requests write、Checks read、Issues readだけを付与する。全branch rulesetはforce-pushを禁止しbypassを持たない。
+
+登録前に、同じproject ID、workspace、handover directory、broker project recordが存在するcollisionをread-onlyで確認する。いずれかが存在する場合は停止し、既存stateを削除、上書き、再利用、別repositoryへ再割当てしない。collisionがないことと直前のhost承認を確認した後だけ、fixture projectのhandover directoryを準備して登録する。
+
+```bash
+export AGENT_HANDOVER_ROOT="$HOME/handovers"
+test ! -e "$AGENT_HANDOVER_ROOT/agent-container-smoke" || exit 1
+install -d -m 0700 "$AGENT_HANDOVER_ROOT/agent-container-smoke"
+
+bin/agentctl project add jj1xgo/agent-container-smoke \
+  --project agent-container-smoke \
+  --handover-root "$AGENT_HANDOVER_ROOT" \
+  --github-broker \
+  --default-branch main \
+  --protected-branch main \
+  --confirm-force-push-ruleset
+```
 
 ## 3. Local doctor and credential non-exposure
 
@@ -42,7 +58,7 @@ doctorのPASSはlocal App metadata、private key boundary、project policyだけ
 
 ## 4. Git/PR gate
 
-mainへ直接pushしない。正の操作は一意なwork branchだけで行い、通常pushとPR createはそれぞれ直前の利用者承認を得る。
+mainへ直接pushしない。正の操作は一意なwork branchだけで行う。`git push`の直前に、exact repositoryと`test/github-broker-smoke-UNIQUE`だけを対象とするhost承認を得る。`agent-github pr create`の直前にも、同じrepository・branch・smoke PRだけを対象とする別の外部状態承認を得る。
 
 ```bash
 git fetch origin
@@ -61,6 +77,14 @@ agent-github pr checks PR_NUMBER
 ```
 
 clone/fetch、通常push、PR create/view/checksがbounded JSONで成功することを確認する。protected branch、delete、non-head ref、cross-repository、non-fast-forward操作はtest repository内で拒否されることを確認する。stale leaseは決定論的に同期できる方法が先に成立した場合だけ実hostで確認し、race依存の並行pushは使わない。merge、release、generic API interfaceは存在しない。smoke PRはmergeしない。
+
+gate完了後、smoke PRをcloseし、対応する一意な`test/github-broker-smoke-UNIQUE` branchだけを削除する場合は、broker操作と混同しないhost `gh` administrationとして、PR番号、repository、branchを示した別の実行直前host承認を得る。固定fixture Issue、Pull Request、`main`、他branchは変更・削除しない。
+
+```bash
+gh pr close PR_NUMBER \
+  --repo jj1xgo/agent-container-smoke \
+  --delete-branch
+```
 
 ## 5. Issue data gate
 

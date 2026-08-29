@@ -180,7 +180,7 @@ CPU、メモリ、ディスク容量、コンテナ稼働時間はCodexの会話
 1. 既存の認証、global設定、plugins、hooks、project固有設定を分類する。
 2. 秘密情報を除外し、必要なものだけagent-container専用領域へcopyする。
 3. まず1リポジトリでCodexを試す。
-4. clone、編集、テスト、push、PR、family Issue操作を個別に検証する。
+4. clone、編集、テスト、push、PR、選択中repositoryのread-only Issue list/viewを個別に検証する。family Issue create/commentは2026-08-29に将来Phaseのfamily専用設計へ延期しており、この移行の受け入れ操作には含めない。
 5. Claude Codeの基本実行を同じworkspaceモデルで検証する。
 6. 問題がなければ対象リポジトリを増やす。
 
@@ -208,7 +208,7 @@ CPU、メモリ、ディスク容量、コンテナ稼働時間はCodexの会話
 - 専用CODEX_HOMEとproject state
 - GitHubからのisolated clone
 - 作業ブランチ、test、push、PR
-- 外部MCP経由のfamily read/Issue操作
+- 選択中repositoryのread-only Issue list/view
 - handover Skill、SessionStart hook、推奨statusline
 
 ### Phase 2: Claude Code基本対応
@@ -235,7 +235,7 @@ CPU、メモリ、ディスク容量、コンテナ稼働時間はCodexの会話
 - ホストの実`~/.codex`、`~/.claude`、開発workspaceをread-writeマウントしない
 - project Aの履歴・cache・設定をproject Bから通常参照できない
 - 自分の検証用repositoryで作業ブランチをpushし、PRを作成できる
-- family用credentialをモデルcontextへ出さず、許可されたread/Issue操作だけを実行できる
+- 選択中repositoryのIssue list/view broker credentialをモデルcontextへ出さず、read-only固定操作だけを実行できる。family Issue create/commentは将来Phaseのfamily専用設計まで提供しない。
 - `main`直接push、force-push、merge、release、削除が初期標準フローに含まれない
 - Codexを再起動して同じ会話をresumeできる
 - 別セッションが最新handoverを発見し、必要な本文を読める
