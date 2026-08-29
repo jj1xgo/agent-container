@@ -447,7 +447,21 @@ git push origin "HEAD:refs/tags/phase4-broker-smoke-denied-$run_id"
 
 Expected: protected main, delete, and non-head ref each fail before mutation. Capture exit code and allowlisted audit `{timestamp,operation,status,stage,ref}` only. Stop immediately if any forbidden mutation succeeds; do not attempt automatic restoration.
 
-- [ ] **Step 6: Verify create-only denial on the advertised branch**
+- [ ] **Step 6: Verify ordinary descendant fast-forward denial**
+
+Advance the local branch by one descendant commit, then attempt one ordinary
+push without `--force`:
+
+```bash
+git commit --allow-empty -m "test: Phase 4 create-only fast-forward denial"
+git push origin "$smoke_branch"
+```
+
+Expected: the broker rejects this advertised-branch fast-forward before the
+GitHub receive-pack RPC, the remote smoke branch remains unchanged, and audit
+records `git-receive-pack` as denied without object IDs or commit content.
+
+- [ ] **Step 7: Verify unrelated-history non-fast-forward denial**
 
 Create an unrelated commit object without changing the checkout, then attempt one forced update of only the disposable smoke branch:
 
@@ -457,15 +471,20 @@ unrelated_oid=$(printf '%s\n' 'test: unrelated Phase 4 history' | git commit-tre
 git push --force origin "$unrelated_oid:refs/heads/$smoke_branch"
 ```
 
-Expected after the create-only correction: the broker rejects this advertised-branch update before the GitHub receive-pack RPC, whether it is fast-forward or non-fast-forward; the remote smoke branch remains unchanged and audit records `git-receive-pack` as denied without commit content. Do not print object contents or pack data.
+Expected after the create-only correction: the broker rejects this distinct
+unrelated-history non-fast-forward update before the GitHub receive-pack RPC;
+the remote smoke branch remains unchanged and audit records
+`git-receive-pack` as denied without object IDs or commit content. Together
+with Step 6, this separately verifies both update shapes. Do not print object
+contents or pack data.
 
-- [ ] **Step 7: Spike deterministic stale-lease synchronization**
+- [ ] **Step 8: Spike deterministic stale-lease synchronization**
 
 The feasibility question is: can the existing helper be paused after receive-pack advertisement and before its RPC while a host-admin update advances only the disposable smoke branch, without copying or displaying capability data? Inspect the current helper and broker protocol, and propose one synchronization point that requires no production backdoor. Obtain separate approval before the host-admin ref update.
 
 If a deterministic method exists, execute it once and require the broker's advertised-old-OID gate to deny the stale request. If no deterministic method exists without a production test hook or timing race, do not simulate success: retain the automated stale-lease tests as mandatory evidence and record the real-host row `PARTIAL` with that reason.
 
-- [ ] **Step 8: Create and inspect the smoke PR**
+- [ ] **Step 9: Create and inspect the smoke PR**
 
 ```bash
 pr_json=$(agent-github pr create \

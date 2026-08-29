@@ -4,7 +4,7 @@
 
 **Goal:** Bind each GitHub broker project to its own positive repository ID while sharing one host-private App identity, preserving existing single-repository projects and safely resuming the interrupted Phase 4 smoke registration.
 
-**Architecture:** Extend the host-only project broker policy with an optional validated repository ID. New projects persist an explicit ID; legacy policies fall back to the global App metadata ID. At runtime, combine the global client/installation/private key with the project policy ID before requesting the existing exact-one-repository token. Allow one narrowly defined atomic upgrade only for clone-before-metadata interrupted state.
+**Architecture:** Extend the host-only project broker policy with an optional validated repository ID. New projects persist an explicit ID; legacy global-binding policies fall back to the global App metadata ID, while legacy project-bound policies retain their validated project ID. At runtime, combine the global client/installation/private key with the effective policy ID before requesting the existing exact-one-repository token. Allow one narrowly defined atomic legacy-global upgrade only for clone-before-metadata interrupted state.
 
 **Tech Stack:** Python 3.11+ standard library, `argparse`, immutable dataclasses, JSON files with owner/mode/symlink validation, `unittest`, rootless Podman, GitHub App installation tokens.
 
@@ -100,21 +100,27 @@ raise the same generic error if it is absent while required.
 
 - [ ] **Step 4: Add failing strict loader/writer tests**
 
-In `test_github_broker_runtime.py`, cover both exact schemas:
+In `test_github_broker_runtime.py`, cover all three exact schemas:
 
 ```python
-legacy = {
+legacy_global = {
     "repository": "jj1xgo/agent-container",
     "default_branch": "main",
     "protected_branches": ["main"],
     "ruleset_confirmed": True,
 }
-bound = legacy | {"repository_id": 123}
+legacy_bound = legacy_global | {"repository_id": 123}
+current_bound = {
+    key: value
+    for key, value in legacy_bound.items()
+    if key != "ruleset_confirmed"
+}
 ```
 
-Assert legacy loads with `repository_id is None`, bound loads with `123`, and
-new writes include exactly the four bound keys without `ruleset_confirmed`.
-Add subtests rejecting
+Assert the legacy global-binding four-key schema loads with
+`repository_id is None`, the legacy project-bound five-key schema and current
+marker-free four-key schema load with `123`, and new writes include exactly
+the current four keys without `ruleset_confirmed`. Add subtests rejecting
 `repository_id` values `True`, `0`, `-1`, and `"123"`, plus one unknown-key
 case.
 
@@ -124,15 +130,18 @@ case.
 PYTHONPATH=src python3 -m unittest tests.container.test_github_broker_runtime.BrokerRuntimePolicyTest -v
 ```
 
-Expected: bound schema is rejected or the ID is not preserved.
+Expected: at least one accepted schema is rejected, the ID is not preserved,
+or the writer still emits the legacy marker.
 
-- [ ] **Step 6: Implement dual-schema loading and bound serialization**
+- [ ] **Step 6: Implement three-schema loading and current-only serialization**
 
-Make `load_broker_policy` accept only the exact legacy key set or the exact
-bound key set. Pass the optional ID into `BrokerPolicy.create`. Make
-`write_broker_policy` refuse `policy.repository_id is None` and serialize the
-five-key bound schema. Preserve `O_EXCL`, `O_NOFOLLOW`, mode `0600`, `fsync`,
-and ASCII JSON behavior.
+Accept only those three exact schemas. For either legacy schema, require an
+exact true marker and never copy it into `BrokerPolicy`. Pass the optional ID
+into `BrokerPolicy.create`. Make `write_broker_policy` refuse
+`policy.repository_id is None` and serialize the marker-free four-key bound
+schema. Interrupted legacy-global upgrades use that same encoder, adding the
+validated ID while removing the marker. Preserve `O_EXCL`, `O_NOFOLLOW`, mode
+`0600`, `fsync`, and ASCII JSON behavior.
 
 - [ ] **Step 7: Run focused tests and confirm GREEN**
 

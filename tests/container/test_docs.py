@@ -672,6 +672,54 @@ class Phase4DocumentationTest(unittest.TestCase):
         )
         self.assertNotIn("ruleset_confirmed", policy)
 
+    def test_linked_policy_docs_preserve_three_schema_compatibility(self) -> None:
+        design = (
+            ROOT
+            / "docs/superpowers/specs/2026-08-29-project-scoped-github-repository-binding-design.md"
+        ).read_text(encoding="utf-8")
+        plan = (
+            ROOT
+            / "docs/superpowers/plans/2026-08-29-project-scoped-github-repository-binding.md"
+        ).read_text(encoding="utf-8")
+
+        for body in (design, plan):
+            self.assertIn("legacy global-binding four-key schema", body)
+            self.assertIn("legacy project-bound five-key schema", body)
+            self.assertIn("marker-free four-key schema", body)
+        self.assertRegex(design, r"removes\s+the legacy marker")
+        self.assertIn("Accept only those three exact schemas", plan)
+        self.assertRegex(
+            plan,
+            r"serialize\s+the marker-free four-key bound\s+schema",
+        )
+        self.assertNotIn("serialize the five-key bound schema", plan)
+
+    def test_phase4_plan_runs_distinct_fast_forward_and_nff_denials(self) -> None:
+        plan = (
+            ROOT
+            / "docs/superpowers/plans/2026-08-29-phase4-stabilization-release.md"
+        ).read_text(encoding="utf-8")
+        gate = plan.split(
+            "### Task 5: Execute Git and Pull Request broker gates", 1
+        )[1]
+        fast_forward_commit = gate.index(
+            'git commit --allow-empty -m "test: Phase 4 create-only fast-forward denial"'
+        )
+        fast_forward_push = gate.index(
+            'git push origin "$smoke_branch"', fast_forward_commit
+        )
+        unrelated_commit = gate.index("unrelated_oid=$(", fast_forward_push)
+        unrelated_push = gate.index(
+            'git push --force origin "$unrelated_oid:refs/heads/$smoke_branch"',
+            unrelated_commit,
+        )
+
+        self.assertLess(fast_forward_commit, fast_forward_push)
+        self.assertLess(fast_forward_push, unrelated_commit)
+        self.assertLess(unrelated_commit, unrelated_push)
+        self.assertIn("ordinary descendant fast-forward denial", gate)
+        self.assertIn("unrelated-history non-fast-forward update", gate)
+
     def test_normative_docs_require_create_only_broker_branches(self) -> None:
         documents = (
             ROOT / "README.md",

@@ -106,12 +106,21 @@ The numeric value above is illustrative only. Runtime validation requires a
 positive non-boolean integer and rejects unknown fields, duplicates, symlinks,
 wrong ownership, or modes other than `0600`.
 
-Legacy policies with the exact old field set, including an exact
-`"ruleset_confirmed": true` marker, remain readable. For them only, runtime
-token construction falls back to the global App metadata repository ID. The
-marker is compatibility input only and does not enable, configure, or weaken
-push enforcement. Newly written policies always contain `repository_id` and
-never contain a ruleset marker; the CLI never creates another legacy policy.
+The decoder accepts only three exact schemas:
+
+- the current marker-free four-key schema shown above;
+- the legacy global-binding four-key schema containing `repository`,
+  `default_branch`, `protected_branches`, and an exact
+  `"ruleset_confirmed": true` marker; and
+- the legacy project-bound five-key schema containing the current four keys
+  plus that exact true marker.
+
+The legacy global-binding schema falls back to the global App metadata
+repository ID. The legacy project-bound schema uses its own validated ID. In
+both cases the marker is compatibility input only and does not enable,
+configure, or weaken push enforcement. Newly written policies always use the
+current marker-free four-key schema; the CLI never creates another legacy
+policy.
 
 The local `doctor` distinguishes an explicit project binding from a legacy
 global fallback. It does not claim to verify remote App selection, permission,
@@ -129,21 +138,27 @@ The failed smoke registration left a mode `0700` project directory, a mode
 and a mode `0700` handover directory. It did not create `project.json` or a
 workspace.
 
-`project add` may upgrade an existing legacy policy during registration only
-when all of these conditions hold:
+`project add` may resume an interrupted registration from any accepted exact
+schema only when all of these conditions hold. The atomic rewrite applies only
+to the legacy global-binding shape; an exact current or legacy project-bound
+policy may continue without a rewrite:
 
 1. `--github-repository-id` is explicitly supplied.
-2. The existing policy's repository, default branch, protected branches, and
-   exact legacy true marker match the compatibility schema.
+2. The existing policy is one of the accepted exact schemas; repository,
+   default branch, protected branches, and any present repository ID match the
+   requested values, and a legacy marker is exactly true.
 3. `project.json` and the project workspace are both absent and are not
    symlinks.
 4. The existing policy is a current-user-owned regular non-symlink file at
    mode `0600`.
 
-The upgrade adds only the validated repository ID. It uses a same-directory
-temporary regular file, `fsync`, mode `0600`, and atomic replacement after all
-checks pass. Existing sibling files, including `smoke-fixtures.json`, remain
-unchanged.
+The interrupted legacy-global upgrade writes the complete current
+marker-free four-key schema: it adds the validated repository ID and removes
+the legacy marker. It uses a same-directory temporary regular file, `fsync`,
+mode `0600`, and atomic replacement after all checks pass. Existing sibling
+files, including `smoke-fixtures.json`, remain unchanged. A legacy
+project-bound policy remains readable without automatic filesystem mutation,
+but every later policy write uses the current marker-free schema.
 
 If any condition fails, registration stops without changing the policy. An
 explicit ID that differs from an already project-bound policy is always an
