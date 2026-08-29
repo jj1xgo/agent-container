@@ -4,7 +4,9 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest import mock
 
+from agent_container.github_app import GitHubAppMetadata
 from agent_container.github_broker_runtime import UploadPackBrokerRuntime
+from agent_container.github_broker_runtime import broker_token_metadata
 from agent_container.github_broker_runtime import load_broker_policy
 from agent_container.github_broker_runtime import write_broker_policy
 from agent_container.github_broker_policy import BrokerPolicy
@@ -155,6 +157,77 @@ class BrokerRuntimePolicyTest(unittest.TestCase):
 
 
 class BrokerRuntimeConstructionTest(unittest.TestCase):
+    def test_composes_bound_repository_id_without_mutating_app_metadata(self) -> None:
+        app = GitHubAppMetadata(
+            client_id="Iv1abcdefghijk",
+            installation_id=11,
+            repository_id=22,
+            private_key=Path("/private-key.pem"),
+        )
+        bound = BrokerPolicy.create(
+            project_id="smoke",
+            repository="jj1xgo/agent-container-smoke",
+            repository_id=33,
+            default_branch="main",
+            protected_branches=("main",),
+        )
+
+        composed = broker_token_metadata(app, bound)
+
+        self.assertEqual(composed.repository_id, 33)
+        self.assertEqual(app.repository_id, 22)
+
+    def test_composes_legacy_policy_with_global_repository_id(self) -> None:
+        app = GitHubAppMetadata(
+            client_id="Iv1abcdefghijk",
+            installation_id=11,
+            repository_id=22,
+            private_key=Path("/private-key.pem"),
+        )
+        legacy = BrokerPolicy.create(
+            project_id="production",
+            repository="jj1xgo/agent-container",
+            default_branch="main",
+            protected_branches=("main",),
+        )
+
+        composed = broker_token_metadata(app, legacy)
+
+        self.assertEqual(composed.repository_id, 22)
+
+    def test_composes_two_projects_with_separate_repository_ids(self) -> None:
+        app = GitHubAppMetadata(
+            client_id="Iv1abcdefghijk",
+            installation_id=11,
+            repository_id=22,
+            private_key=Path("/private-key.pem"),
+        )
+        policies = (
+            BrokerPolicy.create(
+                project_id="smoke",
+                repository="jj1xgo/agent-container-smoke",
+                repository_id=33,
+                default_branch="main",
+                protected_branches=("main",),
+            ),
+            BrokerPolicy.create(
+                project_id="staging",
+                repository="jj1xgo/agent-container-staging",
+                repository_id=44,
+                default_branch="main",
+                protected_branches=("main",),
+            ),
+        )
+
+        first, second = (broker_token_metadata(app, policy) for policy in policies)
+
+        self.assertEqual(first.repository_id, 33)
+        self.assertEqual(second.repository_id, 44)
+        for metadata in (first, second):
+            self.assertEqual(metadata.client_id, app.client_id)
+            self.assertEqual(metadata.installation_id, app.installation_id)
+            self.assertEqual(metadata.private_key, app.private_key)
+
     @mock.patch("agent_container.github_broker_runtime.GitHubIssueTransport")
     @mock.patch("agent_container.github_broker_runtime.GitHubPullRequestTransport")
     @mock.patch("agent_container.github_broker_runtime.GitHubReceivePackTransport")
@@ -178,8 +251,19 @@ class BrokerRuntimeConstructionTest(unittest.TestCase):
         record = ProjectRecord(
             Repository.parse("jj1xgo/agent-container"), Path("/handovers")
         )
-        policy = object()
-        metadata = object()
+        policy = BrokerPolicy.create(
+            project_id="agent-container",
+            repository="jj1xgo/agent-container",
+            repository_id=33,
+            default_branch="main",
+            protected_branches=("main",),
+        )
+        metadata = GitHubAppMetadata(
+            client_id="Iv1abcdefghijk",
+            installation_id=11,
+            repository_id=22,
+            private_key=Path("/private-key.pem"),
+        )
         tokens = object()
         load_policy.return_value = policy
         load_metadata.return_value = metadata
@@ -191,4 +275,12 @@ class BrokerRuntimeConstructionTest(unittest.TestCase):
         pr_transport.assert_called_once_with(policy, tokens)
         upload_transport.assert_called_once_with(record.repository, tokens)
         receive_transport.assert_called_once_with(record.repository, tokens)
+        token_provider.assert_called_once_with(
+            GitHubAppMetadata(
+                client_id="Iv1abcdefghijk",
+                installation_id=11,
+                repository_id=33,
+                private_key=Path("/private-key.pem"),
+            )
+        )
         self.assertIs(runtime.issue_transport, issue_transport.return_value)

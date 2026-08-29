@@ -1,5 +1,5 @@
 from contextlib import AbstractContextManager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
@@ -23,6 +23,17 @@ from agent_container.state import ensure_private_file
 
 class GitHubBrokerRuntimeError(Exception):
     pass
+
+
+def broker_token_metadata(
+    app: GitHubAppMetadata, policy: BrokerPolicy
+) -> GitHubAppMetadata:
+    repository_id = (
+        app.repository_id
+        if policy.repository_id is None
+        else policy.repository_id
+    )
+    return replace(app, repository_id=repository_id)
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -123,7 +134,7 @@ class UploadPackBrokerRuntime(AbstractContextManager[BrokerRuntimeMount]):
             layout.github_broker_root / "private-key.pem",
         )
         session = BrokerSession.create(layout.root, policy)
-        tokens = InstallationTokenProvider(metadata)
+        tokens = InstallationTokenProvider(broker_token_metadata(metadata, policy))
         return cls(
             session,
             GitHubUploadPackTransport(record.repository, tokens),
