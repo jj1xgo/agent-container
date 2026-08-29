@@ -79,6 +79,12 @@ def validate_issue_number(value: int) -> int:
     return value
 
 
+def validate_repository_id(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("GitHub repository ID is invalid")
+    return value
+
+
 def validate_pr_title(value: str) -> str:
     return _validate_text(
         value,
@@ -103,6 +109,7 @@ def validate_pr_body(value: str) -> str:
 class BrokerPolicy:
     project_id: str
     repository: Repository
+    repository_id: int | None
     default_branch: str
     protected_branches: frozenset[str]
 
@@ -112,11 +119,18 @@ class BrokerPolicy:
         *,
         project_id: str,
         repository: str,
+        repository_id: int | None = None,
         default_branch: str,
         protected_branches: Iterable[str],
+        require_repository_id: bool = False,
     ) -> "BrokerPolicy":
         validated_project = validate_project_id(project_id)
         validated_repository = Repository.parse(repository)
+        if repository_id is None:
+            if require_repository_id:
+                raise ValueError("GitHub repository ID is invalid")
+        else:
+            repository_id = validate_repository_id(repository_id)
         validated_default = _validate_branch(default_branch)
         branches = tuple(_validate_branch(branch) for branch in protected_branches)
         if len(set(branches)) != len(branches):
@@ -127,6 +141,7 @@ class BrokerPolicy:
         return cls(
             project_id=validated_project,
             repository=validated_repository,
+            repository_id=repository_id,
             default_branch=validated_default,
             protected_branches=protected,
         )

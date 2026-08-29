@@ -42,12 +42,14 @@ def load_broker_policy(path: Path, record: ProjectRecord, project_id: str) -> Br
         )
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise ValueError("GitHub broker policy is invalid") from None
-    if not isinstance(payload, dict) or set(payload) != {
+    legacy_keys = {
         "repository",
         "default_branch",
         "protected_branches",
         "ruleset_confirmed",
-    }:
+    }
+    bound_keys = legacy_keys | {"repository_id"}
+    if not isinstance(payload, dict) or set(payload) not in (legacy_keys, bound_keys):
         raise ValueError("GitHub broker policy is invalid")
     if payload["repository"] != record.repository.slug:
         raise ValueError("GitHub broker policy repository does not match project")
@@ -63,15 +65,20 @@ def load_broker_policy(path: Path, record: ProjectRecord, project_id: str) -> Br
     return BrokerPolicy.create(
         project_id=project_id,
         repository=record.repository.slug,
+        repository_id=payload.get("repository_id"),
         default_branch=payload["default_branch"],
         protected_branches=protected,
+        require_repository_id=set(payload) == bound_keys,
     )
 
 
 def write_broker_policy(path: Path, policy: BrokerPolicy) -> None:
+    if policy.repository_id is None:
+        raise ValueError("GitHub repository ID is invalid")
     body = json.dumps(
         {
             "repository": policy.repository.slug,
+            "repository_id": policy.repository_id,
             "default_branch": policy.default_branch,
             "protected_branches": sorted(policy.protected_branches),
             "ruleset_confirmed": True,
