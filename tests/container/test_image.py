@@ -309,6 +309,7 @@ class ContainerImageContractTest(unittest.TestCase):
                 "ls-files",
                 "--",
                 "Containerfile",
+                "requirements-lint.txt",
                 "src",
                 "profiles/codex",
                 "container/bin",
