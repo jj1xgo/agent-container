@@ -236,7 +236,7 @@ IDはproject policyへ保存しますが、docs、broker audit、container outpu
 
 ## 開発時のlint
 
-Codex、Claude Code、local developer、CIは同じ`bin/lint` wrapperを使います。標準agent imageにはpinned Ruffとpipが入っているため、agent runtimeではそのまま実行できます。
+Codex、Claude Code、local developer、CIは同じ`bin/lint` wrapperを使います。標準agent imageにはpinned Ruff、pip、ripgrep (`rg`)が入っているため、agent runtimeではlintと高速なcode検索をそのまま実行できます。
 
 ```bash
 bin/lint

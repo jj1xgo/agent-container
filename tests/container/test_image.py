@@ -128,6 +128,7 @@ class ContainerImageContractTest(unittest.TestCase):
                 "libatomic1",
                 "python3",
                 "python3-pip",
+                "ripgrep",
                 "socat",
                 "xz-utils",
             }
@@ -152,6 +153,10 @@ class ContainerImageContractTest(unittest.TestCase):
         )
         self.assertIn(
             'test "$(podman run --rm "$BASE_IMAGE" python3 -m ruff --version)" = "ruff 0.16.4"',
+            workflow,
+        )
+        self.assertIn(
+            'podman run --rm "$BASE_IMAGE" rg --version',
             workflow,
         )
 
