@@ -1,5 +1,7 @@
 # Phase 2 Claude Code 運用ガイド
 
+Phase 2当時のunrestricted runtime networkはhistorical WARNです。egress policy未設定時には現在も該当し、opt-in allowlist有効時は通常runtimeだけが`--network=none`になります。
+
 Phase 2では、既存のrootless Podmanとproject別workspaceを維持したまま、CodexとClaude Codeを同じimageから選択して実行します。設計上の境界は[Phase 2設計](superpowers/specs/2026-08-23-phase-2-claude-code-design.md)を参照してください。
 
 ## 開始前: 前提条件とnetwork WARN

@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+PYTHONPATH=/opt/agent-container/src \
+    exec python3 -P -m agent_container.egress_runtime "$@"

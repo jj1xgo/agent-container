@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import threading
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -14,6 +15,10 @@ import agent_container.handover_broker_client as handover_broker_client
 from agent_container import __version__
 from agent_container.agentctl import main
 from agent_container.agentctl import parser
+from agent_container.egress_policy import enable_egress_policy
+from agent_container.egress_policy import load_egress_policy
+from agent_container.egress_broker_runtime import EgressRuntimeMount
+from agent_container.egress_broker_runtime import EgressBrokerRuntimeError
 from agent_container.handover_broker_runtime import HandoverBrokerRuntimeError
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
 from agent_container.podman import CommandSpec
@@ -38,12 +43,15 @@ def successful_podman_result(spec):
 
 
 class _TrackingBrokerContext:
-    def __init__(self, name, mount, events, on_enter=None, enter_error=None):
+    def __init__(
+        self, name, mount, events, on_enter=None, enter_error=None, exit_error=None
+    ):
         self.name = name
         self.mount = mount
         self.events = events
         self.on_enter = on_enter
         self.enter_error = enter_error
+        self.exit_error = exit_error
         self.active = False
 
     def __enter__(self):
@@ -58,6 +66,11 @@ class _TrackingBrokerContext:
     def __exit__(self, *_):
         self.events.append(f"{self.name}-exit")
         self.active = False
+        if self.exit_error is not None:
+            raise self.exit_error
+
+    def wait_failed(self, _timeout):
+        return False
 
 
 class AgentCtlBuildAuthTest(unittest.TestCase):
@@ -1736,6 +1749,140 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         ).write(root / "projects/agent-container/project.json")
         return root, handover_project
 
+    def test_doctor_classifies_valid_and_invalid_egress_policy(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            policy_path = root / "projects/agent-container/egress.json"
+            enable_egress_policy(policy_path)
+            output = StringIO()
+
+            result = main(
+                ["doctor", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=self._successful_doctor_runner,
+                git_remote_reader=lambda path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                stdout=output,
+            )
+
+            self.assertEqual(result, 0)
+            self.assertIn(
+                "PASS  network-policy: outbound HTTPS uses the project domain allowlist",
+                output.getvalue(),
+            )
+
+            policy_path.write_text("{malformed", encoding="utf-8")
+            policy_path.chmod(0o600)
+            output = StringIO()
+            result = main(
+                ["doctor", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=self._successful_doctor_runner,
+                git_remote_reader=lambda path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                stdout=output,
+            )
+            self.assertEqual(result, 1)
+            self.assertIn("FAIL  network-policy: state validation failed", output.getvalue())
+
+    def test_doctor_enabled_egress_requires_managed_adapter_self_check(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            enable_egress_policy(root / "projects/agent-container/egress.json")
+            calls = []
+            output = StringIO()
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-2:] == ("agent-egress-runtime", "--self-check"):
+                    return subprocess.CompletedProcess(spec.argv, 1)
+                return self._successful_doctor_runner(spec)
+
+            result = main(
+                ["doctor", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda _path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                stdout=output,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertIn(
+                "FAIL  network-policy: managed egress adapter self-check failed",
+                output.getvalue(),
+            )
+            probes = [
+                spec
+                for spec in calls
+                if spec.argv[-2:] == ("agent-egress-runtime", "--self-check")
+            ]
+            self.assertEqual(len(probes), 1)
+
+    def test_run_rejects_present_invalid_egress_policy_before_podman(self) -> None:
+        cases = ("malformed", "unsafe-mode", "symlink", "unsupported")
+        for case in cases:
+            with self.subTest(case=case), TemporaryDirectory() as temp:
+                root, _ = self._runtime_state(temp)
+                policy_path = root / "projects/agent-container/egress.json"
+                if case == "symlink":
+                    target = Path(temp) / "policy.json"
+                    target.write_text(
+                        '{"version":1,"mode":"allowlist","additional_domains":[]}\n',
+                        encoding="ascii",
+                    )
+                    target.chmod(0o600)
+                    policy_path.symlink_to(target)
+                else:
+                    content = {
+                        "malformed": "{malformed",
+                        "unsafe-mode": (
+                            '{"version":1,"mode":"allowlist",'
+                            '"additional_domains":[]}\n'
+                        ),
+                        "unsupported": (
+                            '{"version":2,"mode":"allowlist",'
+                            '"additional_domains":[]}\n'
+                        ),
+                    }[case]
+                    policy_path.write_text(content, encoding="ascii")
+                    policy_path.chmod(0o644 if case == "unsafe-mode" else 0o600)
+
+                self._assert_run_refused(root)
+
+    def test_run_enabled_egress_probe_failure_prevents_runtime_spec(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            enable_egress_policy(root / "projects/agent-container/egress.json")
+            built = []
+
+            def runner(spec):
+                if spec.argv[-2:] == ("agent-egress-runtime", "--self-check"):
+                    return subprocess.CompletedProcess(spec.argv, 1)
+                return self._successful_doctor_runner(spec)
+
+            def builder(*args, **kwargs):
+                built.append((args, kwargs))
+                raise AssertionError("runtime spec must not be built")
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda _path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                runtime_spec_builder=builder,
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(built, [])
+
     def _assert_run_refused(
         self,
         root: Path,
@@ -1994,17 +2141,206 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertNotIn("src=" + str(root / "gh"), runtime)
             self.assertNotIn("gh auth git-credential", runtime)
 
+    def test_run_enabled_egress_enters_gateway_before_building_runtime_spec(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            enable_egress_policy(root / "projects/agent-container/egress.json")
+            events = []
+            mount = EgressRuntimeMount(
+                root / "egress-broker/r/session", "agent-container", "codex"
+            )
+            context = _TrackingBrokerContext("egress", mount, events)
+
+            def runner(spec):
+                if spec.argv[-2:] == ("agent-egress-runtime", "--self-check"):
+                    events.append("probe")
+                elif spec.argv == ("runtime", "codex"):
+                    events.append("runtime")
+                return successful_podman_result(spec)
+
+            def builder(*args):
+                events.append("builder")
+                self.assertTrue(context.active)
+                self.assertIs(args[-1], mount)
+                return CommandSpec(("runtime", "codex"), {})
+
+            with patch(
+                "agent_container.agentctl.EgressBrokerRuntime.create",
+                return_value=context,
+            ) as create:
+                result = main(
+                    ["run", "agent-container"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda _path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    runtime_spec_builder=builder,
+                    stdout=StringIO(),
+                )
+
+            self.assertEqual(result, 0)
+            create.assert_called_once()
+            self.assertEqual(
+                events,
+                ["probe", "egress-enter", "builder", "runtime", "egress-exit"],
+            )
+
+    def test_run_egress_gateway_enter_failure_never_builds_or_runs_runtime(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            enable_egress_policy(root / "projects/agent-container/egress.json")
+            context = _TrackingBrokerContext(
+                "egress",
+                EgressRuntimeMount(
+                    root / "egress-broker/r/session", "agent-container", "codex"
+                ),
+                [],
+                enter_error=EgressBrokerRuntimeError("SECRET-MARKER"),
+            )
+            runtime_specs = []
+            with patch(
+                "agent_container.agentctl.EgressBrokerRuntime.create",
+                return_value=context,
+            ):
+                result = main(
+                    ["run", "agent-container"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: runtime_specs.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda _path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    runtime_spec_builder=lambda *_args: (_ for _ in ()).throw(
+                        AssertionError("runtime spec must not be built")
+                    ),
+                    stdout=StringIO(),
+                    stderr=StringIO(),
+                )
+            self.assertEqual(result, 1)
+            self.assertFalse(any(spec.argv[:1] == ("runtime",) for spec in runtime_specs))
+
+    def test_run_egress_cleanup_failure_is_nonzero_without_network_fallback(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            enable_egress_policy(root / "projects/agent-container/egress.json")
+            context = _TrackingBrokerContext(
+                "egress",
+                EgressRuntimeMount(
+                    root / "egress-broker/r/session", "agent-container", "codex"
+                ),
+                [],
+                exit_error=EgressBrokerRuntimeError("SECRET-MARKER"),
+            )
+            runtime_calls = []
+
+            def runner(spec):
+                if spec.argv == ("runtime", "codex"):
+                    runtime_calls.append(spec)
+                return successful_podman_result(spec)
+
+            with patch(
+                "agent_container.agentctl.EgressBrokerRuntime.create",
+                return_value=context,
+            ):
+                result = main(
+                    ["run", "agent-container"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda _path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    runtime_spec_builder=lambda *_args: CommandSpec(
+                        ("runtime", "codex"), {}
+                    ),
+                    stdout=StringIO(),
+                    stderr=StringIO(),
+                )
+            self.assertEqual(result, 1)
+            self.assertEqual(len(runtime_calls), 1)
+
+    def test_gateway_death_stops_the_named_blocking_runtime(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            enable_egress_policy(root / "projects/agent-container/egress.json")
+            mount = EgressRuntimeMount(
+                root / "egress-broker/r/session", "agent-container", "codex"
+            )
+
+            class FailedGateway:
+                def __enter__(self):
+                    return mount
+
+                def __exit__(self, *_args):
+                    return None
+
+                def wait_failed(self, timeout):
+                    return True
+
+            stop_specs = []
+            runtime_released = threading.Event()
+            runtime_finished = threading.Event()
+
+            def runner(spec):
+                if spec.argv == ("runtime", "codex"):
+                    runtime_released.wait(2)
+                    runtime_finished.set()
+                if spec.argv[:2] == ("podman", "stop"):
+                    stop_specs.append(spec)
+                    if len(stop_specs) == 1:
+                        raise subprocess.CalledProcessError(1, spec.argv)
+                    runtime_released.set()
+                return successful_podman_result(spec)
+
+            with patch(
+                "agent_container.agentctl.EgressBrokerRuntime.create",
+                return_value=FailedGateway(),
+            ):
+                result = main(
+                    ["run", "agent-container"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda _path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    runtime_spec_builder=lambda *_args: CommandSpec(
+                        ("runtime", "codex"), {}
+                    ),
+                    stdout=StringIO(),
+                    stderr=StringIO(),
+                )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(len(stop_specs), 2)
+            self.assertTrue(runtime_finished.is_set())
+            self.assertEqual(
+                stop_specs[0].argv[:4],
+                ("podman", "stop", "--ignore", "--time=2"),
+            )
+
     def test_run_enters_only_selected_brokers_and_passes_independent_mounts(self) -> None:
         combinations = (
-            ("codex", False),
-            ("codex", True),
-            ("claude", False),
-            ("claude", True),
+            ("codex", False, False),
+            ("codex", True, False),
+            ("claude", False, False),
+            ("claude", True, False),
+            ("codex", False, True),
+            ("codex", True, True),
+            ("claude", False, True),
+            ("claude", True, True),
         )
-        for agent, github_enabled in combinations:
-            with self.subTest(agent=agent, github_enabled=github_enabled):
+        for agent, github_enabled, egress_enabled in combinations:
+            with self.subTest(
+                agent=agent,
+                github_enabled=github_enabled,
+                egress_enabled=egress_enabled,
+            ):
                 with TemporaryDirectory() as temp:
                     root, handover_project = self._runtime_state(temp)
+                    if egress_enabled:
+                        enable_egress_policy(
+                            root / "projects/agent-container/egress.json"
+                        )
                     events = []
                     github_mount = BrokerRuntimeMount(
                         root / "github-broker/run/session",
@@ -2024,6 +2360,14 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                             (root / "projects/agent-container/claude-config").is_dir()
                         ),
                     )
+                    egress_mount = EgressRuntimeMount(
+                        root / "egress-broker/r/session",
+                        "agent-container",
+                        agent,
+                    )
+                    egress_context = _TrackingBrokerContext(
+                        "egress", egress_mount, events
+                    )
                     builder_calls = []
 
                     def runner(spec):
@@ -2042,6 +2386,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                         builder_calls.append(args)
                         self.assertEqual(github_context.active, github_enabled)
                         self.assertEqual(handover_context.active, agent == "claude")
+                        self.assertEqual(egress_context.active, egress_enabled)
                         return CommandSpec(("runtime", agent), {})
 
                     original_read = agentctl._read_runtime_project
@@ -2066,6 +2411,10 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                             "agent_container.agentctl.HandoverBrokerRuntime.create",
                             return_value=handover_context,
                         ) as create_handover,
+                        patch(
+                            "agent_container.agentctl.EgressBrokerRuntime.create",
+                            return_value=egress_context,
+                        ) as create_egress,
                     ):
                         result = main(
                             argv,
@@ -2093,16 +2442,28 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                         self.assertIs(args[5], handover_mount)
                         create_handover.assert_called_once()
                     else:
-                        self.assertEqual(len(args), 6 if github_enabled else 5)
+                        self.assertEqual(
+                            len(args),
+                            5 + int(github_enabled or egress_enabled) + int(egress_enabled),
+                        )
                         create_handover.assert_not_called()
                     if github_enabled:
-                        self.assertIs(args[-1], github_mount)
+                        self.assertIs(
+                            args[-2] if egress_enabled else args[-1], github_mount
+                        )
                         create_github.assert_called_once()
                     else:
                         create_github.assert_not_called()
+                    if egress_enabled:
+                        self.assertIs(args[-1], egress_mount)
+                        create_egress.assert_called_once()
+                    else:
+                        create_egress.assert_not_called()
                     expected = ["metadata"]
                     if agent == "claude":
                         expected.append("policy")
+                    if egress_enabled:
+                        expected.append("egress-enter")
                     if github_enabled:
                         expected.append("github-enter")
                     if agent == "claude":
@@ -2112,6 +2473,8 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                         expected.append("handover-exit")
                     if github_enabled:
                         expected.append("github-exit")
+                    if egress_enabled:
+                        expected.append("egress-exit")
                     self.assertEqual(events, expected)
 
     def test_run_handover_broker_enter_failure_never_builds_or_runs_runtime(self) -> None:
@@ -2867,7 +3230,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertIn("PASS  gh-hosts: present, mode 0600", rendered)
             self.assertIn("PASS  workspace-origin: exact HTTPS origin", rendered)
             self.assertIn(
-                "WARN  network-policy: outbound network is not domain-restricted in Phase 2",
+                "WARN  network-policy: outbound network is not domain-restricted",
                 rendered,
             )
             self._assert_private_values_absent(
@@ -4031,6 +4394,22 @@ class AgentCtlMigrationTest(unittest.TestCase):
 
 
 class AgentCtlParserTest(unittest.TestCase):
+    def test_configure_egress_requires_exactly_one_action(self) -> None:
+        enabled = parser().parse_args(
+            ["project", "configure-egress", "demo", "--enable"]
+        )
+        self.assertTrue(enabled.enable)
+        self.assertEqual(enabled.project, "demo")
+        with self.assertRaises(SystemExit):
+            parser().parse_args(["project", "configure-egress", "demo"])
+        with self.assertRaises(SystemExit):
+            parser().parse_args(
+                [
+                    "project", "configure-egress", "demo", "--enable",
+                    "--disable",
+                ]
+            )
+
     def test_version_reports_project_version(self) -> None:
         stdout = StringIO()
 
@@ -4094,6 +4473,80 @@ class AgentCtlParserTest(unittest.TestCase):
                 ]
             )
 
+
+class AgentCtlEgressConfigurationTest(unittest.TestCase):
+    def _state(self, temp: str) -> tuple[Path, dict[str, str]]:
+        root = Path(temp) / "state"
+        project = root / "projects/demo"
+        project.mkdir(parents=True, mode=0o700)
+        root.chmod(0o700)
+        (root / "projects").chmod(0o700)
+        handovers = Path(temp) / "handovers"
+        handovers.mkdir()
+        ProjectRecord(
+            Repository.parse("owner/repository"), handovers.resolve()
+        ).write(project / "project.json")
+        return root, {"AGENT_CONTAINER_HOME": str(root)}
+
+    def _run(self, environment: dict[str, str], *action: str):
+        calls = []
+        stdout = StringIO()
+        stderr = StringIO()
+        result = main(
+            ["project", "configure-egress", "demo", *action],
+            environment=environment,
+            runner=lambda spec: calls.append(spec),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        return result, stdout.getvalue(), stderr.getvalue(), calls
+
+    def test_enable_add_remove_disable_without_podman_or_private_output(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._state(temp)
+            policy_path = root / "projects/demo/egress.json"
+
+            result, output, error, calls = self._run(environment, "--enable")
+            self.assertEqual((result, error, calls), (0, "", []))
+            self.assertEqual(load_egress_policy(policy_path).additional_domains, ())
+
+            result, output, error, calls = self._run(
+                environment, "--add-domain", "pypi.org"
+            )
+            self.assertEqual((result, error, calls), (0, "", []))
+            self.assertEqual(
+                load_egress_policy(policy_path).additional_domains, ("pypi.org",)
+            )
+            self.assertNotIn("pypi.org", output)
+            self.assertNotIn(str(root), output)
+
+            result, _, error, calls = self._run(
+                environment, "--remove-domain", "pypi.org"
+            )
+            self.assertEqual((result, error, calls), (0, "", []))
+            self.assertEqual(load_egress_policy(policy_path).additional_domains, ())
+
+            result, output, error, calls = self._run(environment, "--disable")
+            self.assertEqual((result, error, calls), (0, "", []))
+            self.assertFalse(policy_path.exists())
+            self.assertIn("unrestricted outbound networking", output)
+
+    def test_invalid_domain_preserves_policy_and_never_calls_podman(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._state(temp)
+            self._run(environment, "--enable")
+            policy_path = root / "projects/demo/egress.json"
+            before = policy_path.read_bytes()
+
+            result, output, error, calls = self._run(
+                environment, "--add-domain", "https://example.com"
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(output, "")
+            self.assertEqual(calls, [])
+            self.assertEqual(policy_path.read_bytes(), before)
+            self.assertNotIn(str(root), error)
 
 if __name__ == "__main__":
     unittest.main()

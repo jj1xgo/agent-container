@@ -8,7 +8,7 @@
 - ホストの`~/.codex をmountしません`。Codex認証は状態rootの`shared-auth/codex/auth.json`だけを用途限定で扱います。
 - GitHub CLIの認証（`gh`）は事前に専用状態directoryへ準備します。GitHub認証の更新やscope変更は通常runの外で行います。
 - credential本文、device code、token、`auth.json`の内容を画面、ログ、handover、issue、PRへ表示しません。
-- Phase 1では`外向き通信はドメイン制限されていません`。OpenAI、GitHub、package取得を使える通常のrootless Podman networkであり、domain allowlist済みとは主張しません。
+- Phase 1の`外向き通信はドメイン制限されていません`はhistorical WARNです。egress policy未設定時には現在も該当しますが、opt-in allowlist有効時の通常runtimeは`--network=none`とprivate gatewayで制限されます。
 
 状態rootは既定で`${XDG_DATA_HOME:-~/.local/share}/agent-container`です。初回は、用途を明示するため次の例のように設定します。
 

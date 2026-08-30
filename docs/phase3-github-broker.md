@@ -1,5 +1,7 @@
 # Phase 3 GitHub App broker 運用ガイド
 
+Phase 3当時の通常runtime networkに対する警告はhistorical WARNです。opt-in egress allowlistはcontainer runtimeだけを制限し、host側GitHub broker通信のscopeは変更しません。
+
 Phase 3では、GitHub credentialをcontainerへ渡さず、project限定のclone/fetch、新しい作業branchの作成push、Pull Request作成・閲覧・checks確認、Issue一覧・詳細のreadをhost側broker経由で提供します。現在は明示的な`--github-broker` opt-inです。brokerに失敗してもlegacy `gh` credentialへfallbackしません。
 
 repository bindingはproject-scopedです。global App stateはclient ID、installation ID、private keyを共有し、新規policyはprojectごとのrepository IDを保持します。旧schema policyだけは既存動作を保つlegacy global fallbackを使います。local inventoryやdoctorはremote App selectionを証明しません。
