@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+import ctypes
+import errno
 import json
 import os
 from pathlib import Path
@@ -156,20 +158,6 @@ def _without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _read_private_json(path: Path, maximum_bytes: int) -> dict[str, Any]:
-    try:
-        payload = json.loads(
-            _read_private_bytes(path, maximum_bytes).decode("utf-8"),
-            object_pairs_hook=_without_duplicate_keys,
-            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-        raise ValueError("family binding is invalid") from None
-    if not isinstance(payload, dict):
-        raise ValueError("family binding is invalid")
-    return payload
-
-
 def _exact_text(value: object) -> str:
     if type(value) is not str:
         raise ValueError("family binding is invalid")
@@ -273,6 +261,32 @@ def _unlink_owned(parent_descriptor: int, name: str, expected: os.stat_result) -
         os.unlink(name, dir_fd=parent_descriptor)
 
 
+def _rename_exchange(parent_descriptor: int, source: str, destination: str) -> None:
+    renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+    if renameat2 is None:
+        raise RuntimeError("atomic family binding replacement is unavailable")
+    renameat2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    if renameat2(
+        parent_descriptor,
+        os.fsencode(source),
+        parent_descriptor,
+        os.fsencode(destination),
+        2,
+    ) == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP}:
+        raise RuntimeError("atomic family binding replacement is unavailable")
+    raise OSError(error_number, "atomic family binding replacement failed")
+
+
 def write_family_binding(path: Path, binding: FamilyBinding) -> None:
     body = _encode_binding(binding)
     parent_descriptor = _open_private_parent(path)
@@ -320,13 +334,13 @@ def write_family_binding(path: Path, binding: FamilyBinding) -> None:
             if not _same_inode(original, current):
                 raise ValueError("family binding file changed")
             os.fsync(parent_descriptor)
-            os.replace(
-                temporary,
-                path.name,
-                src_dir_fd=parent_descriptor,
-                dst_dir_fd=parent_descriptor,
-            )
+            _rename_exchange(parent_descriptor, temporary, path.name)
+            replaced = _entry_stat(parent_descriptor, temporary)
+            if not _same_inode(original, replaced):
+                _rename_exchange(parent_descriptor, temporary, path.name)
+                raise ValueError("family binding file changed")
             published = True
+            _unlink_owned(parent_descriptor, temporary, original)
         os.fsync(parent_descriptor)
     finally:
         if descriptor is not None:

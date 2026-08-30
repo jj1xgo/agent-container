@@ -194,6 +194,84 @@ class FamilyBindingTest(unittest.TestCase):
                 self.assertEqual(self.path.read_bytes(), before)
                 self.assertEqual(list(self.parent.glob(".binding.json.*")), [])
 
+    def test_write_reports_post_publication_fsync_failure_with_new_binding_cleaned_up(self) -> None:
+        existing = FamilyBinding(Repository("family", "existing"), 9)
+        write_family_binding(self.path, existing)
+        real_fsync = os.fsync
+        calls = 0
+
+        def fail_post_publication_fsync(descriptor: int) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise OSError("injected post-publication fsync failure")
+            real_fsync(descriptor)
+
+        with patch(
+            "agent_container.family_state.os.fsync",
+            side_effect=fail_post_publication_fsync,
+        ):
+            with self.assertRaises(OSError):
+                write_family_binding(self.path, self.binding)
+
+        self.assertEqual(load_family_binding(self.path), self.binding)
+        self.assertEqual(list(self.parent.glob(".binding.json.*")), [])
+
+    def test_create_reports_each_fsync_failure_with_defined_published_state(self) -> None:
+        real_fsync = os.fsync
+        for failure_after, published in ((1, False), (2, True)):
+            with self.subTest(failure_after=failure_after):
+                calls = 0
+
+                def fail_fsync(descriptor: int) -> None:
+                    nonlocal calls
+                    calls += 1
+                    if calls == failure_after:
+                        raise OSError("injected fsync failure")
+                    real_fsync(descriptor)
+
+                with patch(
+                    "agent_container.family_state.os.fsync", side_effect=fail_fsync
+                ):
+                    with self.assertRaises(OSError):
+                        write_family_binding(self.path, self.binding)
+
+                self.assertEqual(self.path.exists(), published)
+                if published:
+                    self.assertEqual(load_family_binding(self.path), self.binding)
+                    self.path.unlink()
+                self.assertEqual(list(self.parent.glob(".binding.json.*")), [])
+
+    def test_write_does_not_overwrite_a_binding_swapped_before_publication(self) -> None:
+        write_family_binding(self.path, FamilyBinding(Repository("family", "old"), 1))
+        concurrent = FamilyBinding(Repository("family", "concurrent"), 2)
+        replacement = self.parent / ".concurrent-replacement"
+        replacement.write_text(
+            json.dumps(
+                {"repository": concurrent.repository.slug, "repository_id": 2}
+            ),
+            encoding="ascii",
+        )
+        replacement.chmod(0o600)
+        real_fsync = os.fsync
+        calls = 0
+
+        def swap_after_final_check(descriptor: int) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                os.replace(replacement, self.path)
+            real_fsync(descriptor)
+
+        with patch(
+            "agent_container.family_state.os.fsync", side_effect=swap_after_final_check
+        ):
+            with self.assertRaises(ValueError):
+                write_family_binding(self.path, self.binding)
+
+        self.assertEqual(load_family_binding(self.path), concurrent)
+        self.assertEqual(list(self.parent.glob(".binding.json.*")), [])
+
     def test_write_rejects_binding_replaced_during_observed_update(self) -> None:
         write_family_binding(self.path, FamilyBinding(Repository("family", "old"), 1))
         real_stat = os.stat
