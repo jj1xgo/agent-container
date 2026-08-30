@@ -1,5 +1,6 @@
 **
 !Containerfile
+!requirements-lint.txt
 !src/
 !src/**
 !profiles/

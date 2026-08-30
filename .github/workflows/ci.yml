@@ -101,6 +101,8 @@ jobs:
           podman run --rm "$BASE_IMAGE" codex --version
           podman run --rm "$BASE_IMAGE" codex --approve-for-me --help >/dev/null
           podman run --rm "$BASE_IMAGE" claude --version
+          podman run --rm "$BASE_IMAGE" python3 -m pip --version
+          test "$(podman run --rm "$BASE_IMAGE" python3 -m ruff --version)" = "ruff 0.16.4"
           expected="$(PYTHONPATH=src python3 -c 'import agent_container; print(agent_container.__version__)')"
           test "$(podman run --rm "$BASE_IMAGE" python3 -m agent_container.agentctl --version)" = "agentctl $expected"
 

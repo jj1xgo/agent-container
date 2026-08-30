@@ -213,10 +213,15 @@ class RuffLintToolingTest(unittest.TestCase):
         for test_index in test_indexes:
             self.assertLess(lint_index, test_index)
 
-    def test_production_image_does_not_include_ruff_tooling(self) -> None:
+    def test_production_image_installs_pinned_ruff_tooling(self) -> None:
         containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
-        self.assertNotIn("requirements-lint.txt", containerfile)
-        self.assertNotIn("ruff", containerfile.lower())
+        self.assertIn("python3-pip", containerfile)
+        self.assertIn("COPY requirements-lint.txt /opt/agent-container/", containerfile)
+        self.assertIn(
+            "python3 -m pip install --disable-pip-version-check --no-deps",
+            containerfile,
+        )
+        self.assertIn("-r /opt/agent-container/requirements-lint.txt", containerfile)
         self.assertFalse(_has_broad_container_context_copy(containerfile))
 
     def test_broad_context_copy_guard_rejects_shell_and_json_forms(self) -> None:
