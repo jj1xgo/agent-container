@@ -14,6 +14,13 @@ from typing import Mapping
 from typing import TextIO
 
 from agent_container import __version__
+from agent_container.egress_policy import add_egress_domain
+from agent_container.egress_policy import disable_egress_policy
+from agent_container.egress_policy import EgressPolicy
+from agent_container.egress_policy import enable_egress_policy
+from agent_container.egress_policy import load_egress_policy
+from agent_container.egress_policy import remove_egress_domain
+from agent_container.egress_policy import validate_domain
 from agent_container.claude_auth import discard_staged_token
 from agent_container.claude_auth import install_claude_token
 from agent_container.claude_auth import quarantine_legacy_claude_state
@@ -159,6 +166,13 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument("--protected-branch", action="append", default=[])
     update_profile = project_subcommands.add_parser("update-profile")
     update_profile.add_argument("project")
+    configure_egress = project_subcommands.add_parser("configure-egress")
+    configure_egress.add_argument("project")
+    egress_actions = configure_egress.add_mutually_exclusive_group(required=True)
+    egress_actions.add_argument("--enable", action="store_true")
+    egress_actions.add_argument("--add-domain")
+    egress_actions.add_argument("--remove-domain")
+    egress_actions.add_argument("--disable", action="store_true")
     superpowers = subcommands.add_parser("superpowers")
     superpowers_subcommands = superpowers.add_subparsers(
         dest="superpowers_command", required=True
@@ -540,7 +554,7 @@ def _runtime_preflight(
     git_remote_reader: Callable[[Path], str],
     identity_reader: Callable[[], tuple[int, int]],
     github_broker: bool = False,
-) -> tuple[StateLayout, ProjectRecord, Path, int, int]:
+) -> tuple[StateLayout, ProjectRecord, Path, int, int, EgressPolicy | None]:
     layout = StateLayout.from_environment(project_id, environment)
     _ensure_exact_state_root(layout, environment)
     for directory in _common_runtime_state_directories(
@@ -561,8 +575,15 @@ def _runtime_preflight(
     handover_project = handover_root / layout.project_id
     if agent == "claude":
         validate_claude_handover_project(layout, handover_project)
+    egress_policy = _load_optional_egress_policy(layout.egress_policy_file)
     uid, gid = _validated_process_identity(identity_reader)
-    return layout, record, handover_project, uid, gid
+    return layout, record, handover_project, uid, gid, egress_policy
+
+
+def _load_optional_egress_policy(path: Path) -> EgressPolicy | None:
+    if not path.exists() and not path.is_symlink():
+        return None
+    return load_egress_policy(path)
 
 
 def read_process_identity() -> tuple[int, int]:
@@ -1189,13 +1210,23 @@ def _doctor(
                 )
             )
 
-    checks.append(
-        CheckResult(
-            "WARN",
-            "network-policy",
-            "outbound network is not domain-restricted in Phase 2",
+    try:
+        egress_policy = _load_optional_egress_policy(layout.egress_policy_file)
+        checks.append(
+            CheckResult(
+                "WARN" if egress_policy is None else "PASS",
+                "network-policy",
+                (
+                    "outbound network is not domain-restricted"
+                    if egress_policy is None
+                    else "outbound HTTPS uses the project domain allowlist"
+                ),
+            )
         )
-    )
+    except (ValueError, OSError) as error:
+        checks.append(
+            CheckResult("FAIL", "network-policy", _check_failure_detail(error))
+        )
     return checks
 
 
@@ -1236,6 +1267,12 @@ def main(
                 raise ValueError("GitHub broker options require --github-broker")
         elif arguments.command == "project" and arguments.project_command == "update-profile":
             validate_project_id(arguments.project)
+        elif arguments.command == "project" and arguments.project_command == "configure-egress":
+            validate_project_id(arguments.project)
+            if arguments.add_domain is not None:
+                validate_domain(arguments.add_domain)
+            if arguments.remove_domain is not None:
+                validate_domain(arguments.remove_domain)
         elif arguments.command == "superpowers":
             if bool(arguments.project) == bool(arguments.all_projects):
                 raise ValueError("choose one project or --all-projects")
@@ -1354,6 +1391,29 @@ def main(
                 file=stdout,
             )
             return 0
+        if arguments.command == "project" and arguments.project_command == "configure-egress":
+            layout = StateLayout.from_environment(arguments.project, environment)
+            _ensure_exact_state_root(layout, environment)
+            for directory in (layout.root, layout.project_dir.parent, layout.project_dir):
+                ensure_private_directory(directory)
+            _read_runtime_project(layout.project_file)
+            if arguments.enable:
+                enable_egress_policy(layout.egress_policy_file)
+                detail = "enabled"
+            elif arguments.add_domain is not None:
+                add_egress_domain(layout.egress_policy_file, arguments.add_domain)
+                detail = "updated"
+            elif arguments.remove_domain is not None:
+                remove_egress_domain(layout.egress_policy_file, arguments.remove_domain)
+                detail = "updated"
+            else:
+                disable_egress_policy(layout.egress_policy_file)
+                detail = "disabled; the next runtime has unrestricted outbound networking"
+            print(
+                f"Project egress policy {detail}: {layout.project_id}",
+                file=stdout,
+            )
+            return 0
         if arguments.command == "superpowers" and arguments.superpowers_command == "update":
             _podman_preflight(runner, image_required=arguments.image)
             if arguments.all_projects:
@@ -1427,7 +1487,7 @@ def main(
                 print(agent + "\t" + "\t".join(fields), file=stdout)
             return 0
         if arguments.command == "run":
-            layout, record, handover_project, uid, gid = _runtime_preflight(
+            layout, record, handover_project, uid, gid, _egress_policy = _runtime_preflight(
                 arguments.project,
                 arguments.agent,
                 environment,
