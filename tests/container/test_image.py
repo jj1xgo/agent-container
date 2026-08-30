@@ -138,6 +138,7 @@ class ContainerImageContractTest(unittest.TestCase):
     def test_image_installs_the_pinned_runtime_linter(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
         requirement = (ROOT / "requirements-lint.txt").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
         self.assertEqual(requirement, "ruff==0.16.4\n")
         self.assertIn("COPY requirements-lint.txt /opt/agent-container/", body)
@@ -146,6 +147,13 @@ class ContainerImageContractTest(unittest.TestCase):
             body,
         )
         self.assertIn("-r /opt/agent-container/requirements-lint.txt", body)
+        self.assertIn(
+            'podman run --rm "$BASE_IMAGE" python3 -m pip --version', workflow
+        )
+        self.assertIn(
+            'test "$(podman run --rm "$BASE_IMAGE" python3 -m ruff --version)" = "ruff 0.16.4"',
+            workflow,
+        )
 
     def test_image_bootstraps_ca_then_uses_https_for_debian_packages(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
@@ -253,6 +261,7 @@ class ContainerImageContractTest(unittest.TestCase):
             [
                 "**",
                 "!Containerfile",
+                "!requirements-lint.txt",
                 "!src/",
                 "!src/**",
                 "!profiles/",
