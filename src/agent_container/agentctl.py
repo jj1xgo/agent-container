@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Callable
 from typing import Mapping
@@ -21,6 +22,9 @@ from agent_container.egress_policy import enable_egress_policy
 from agent_container.egress_policy import load_egress_policy
 from agent_container.egress_policy import remove_egress_domain
 from agent_container.egress_policy import validate_domain
+from agent_container.egress_broker_runtime import EgressBrokerRuntime
+from agent_container.egress_broker_runtime import EgressBrokerRuntimeError
+from agent_container.egress_broker_runtime import EgressRuntimeMount
 from agent_container.claude_auth import discard_staged_token
 from agent_container.claude_auth import install_claude_token
 from agent_container.claude_auth import quarantine_legacy_claude_state
@@ -52,6 +56,8 @@ from agent_container.podman import claude_token_status_spec
 from agent_container.podman import claude_policy_status_spec
 from agent_container.podman import handover_broker_client_status_spec
 from agent_container.podman import egress_adapter_status_spec
+from agent_container.podman import egress_runtime_stop_spec
+from agent_container.podman import egress_runtime_kill_spec
 from agent_container.podman import claude_superpowers_spec
 from agent_container.podman import claude_superpowers_marketplace_spec
 from agent_container.podman import codex_superpowers_install_spec
@@ -69,6 +75,7 @@ from agent_container.podman import project_node_version_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.podman import run_command
+from agent_container.podman import run_command_supervised
 from agent_container.podman import validate_claude_handover_project
 from agent_container.profile import seed_codex_home
 from agent_container.profile import update_codex_handover_profile
@@ -1249,6 +1256,47 @@ def _doctor(
     return checks
 
 
+def _run_with_egress_supervision(
+    runner: Callable[[CommandSpec], subprocess.CompletedProcess],
+    spec: CommandSpec,
+    gateway: EgressBrokerRuntime,
+    mount: EgressRuntimeMount,
+) -> subprocess.CompletedProcess:
+    results: list[subprocess.CompletedProcess] = []
+    errors: list[BaseException] = []
+
+    def execute() -> None:
+        try:
+            results.append(runner(spec))
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=execute, name="podman-egress-runtime", daemon=True)
+    worker.start()
+    while worker.is_alive():
+        if gateway.wait_failed(0.1):
+            stop_deadline = time.monotonic() + 5
+            while worker.is_alive() and time.monotonic() < stop_deadline:
+                try:
+                    runner(egress_runtime_stop_spec(mount))
+                except (OSError, subprocess.CalledProcessError):
+                    pass
+                worker.join(0.1)
+            while worker.is_alive():
+                try:
+                    runner(egress_runtime_kill_spec(mount))
+                except (OSError, subprocess.CalledProcessError):
+                    pass
+                worker.join(0.1)
+            raise EgressBrokerRuntimeError("egress gateway failed")
+    worker.join()
+    if errors:
+        raise errors[0]
+    if len(results) != 1:
+        raise EgressBrokerRuntimeError("egress runtime supervision failed")
+    return results[0]
+
+
 def main(
     argv: list[str] | None = None,
     environment: Mapping[str, str] | None = None,
@@ -1537,6 +1585,18 @@ def main(
             if runtime_spec_builder is not None:
                 builders = {**builders, "codex": runtime_spec_builder}
             with ExitStack() as stack:
+                egress_runtime = (
+                    EgressBrokerRuntime.create(
+                        layout, arguments.agent, egress_policy
+                    )
+                    if egress_policy is not None
+                    else None
+                )
+                egress_mount = (
+                    stack.enter_context(egress_runtime)
+                    if egress_runtime is not None
+                    else None
+                )
                 github_mount = (
                     stack.enter_context(
                         UploadPackBrokerRuntime.create(layout, record)
@@ -1553,29 +1613,47 @@ def main(
                 )
                 if arguments.agent == "claude":
                     assert handover_mount is not None
-                    spec = builders[arguments.agent](
+                    builder_args = [
                         layout,
                         handover_project,
                         resolution.image,
                         uid,
                         gid,
                         handover_mount,
-                        *(() if github_mount is None else (github_mount,)),
-                    )
+                    ]
+                    if github_mount is not None or egress_mount is not None:
+                        builder_args.append(github_mount)
+                    if egress_mount is not None:
+                        builder_args.append(egress_mount)
+                    spec = builders[arguments.agent](*builder_args)
                 else:
-                    spec = builders[arguments.agent](
+                    builder_args = [
                         layout,
                         handover_project,
                         resolution.image,
                         uid,
                         gid,
-                        *(() if github_mount is None else (github_mount,)),
-                    )
+                    ]
+                    if github_mount is not None or egress_mount is not None:
+                        builder_args.append(github_mount)
+                    if egress_mount is not None:
+                        builder_args.append(egress_mount)
+                    spec = builders[arguments.agent](*builder_args)
                 print(
                     f"Starting {arguments.agent.title()} for project: {layout.project_id}",
                     file=stdout,
                 )
-                _require_success(runner(spec), spec)
+                if egress_runtime is not None and egress_mount is not None:
+                    completed = (
+                        run_command_supervised(spec, egress_runtime, egress_mount)
+                        if runner is run_command
+                        else _run_with_egress_supervision(
+                            runner, spec, egress_runtime, egress_mount
+                        )
+                    )
+                else:
+                    completed = runner(spec)
+                _require_success(completed, spec)
             return 0
         if arguments.command == "doctor":
             checks = _doctor(
@@ -1627,6 +1705,9 @@ def main(
         return 1
     except HandoverBrokerRuntimeError:
         print("error: handover broker failed", file=stderr)
+        return 1
+    except EgressBrokerRuntimeError:
+        print("error: egress gateway failed", file=stderr)
         return 1
     except (ValueError, PermissionError, FileNotFoundError) as error:
         print(f"error: {error}", file=stderr)

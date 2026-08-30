@@ -43,6 +43,8 @@ class FakeListener:
 class FakeSession:
     def __init__(self, listener: FakeListener) -> None:
         self.run_dir = Path("/private/runtime")
+        self.project_id = "demo"
+        self.agent = "codex"
         self.listener = listener
         self.backlogs = []
         self.deactivate_calls = 0
@@ -134,7 +136,7 @@ class EgressBrokerRuntimeTest(unittest.TestCase):
         return EgressRequest(**(baseline | changes))  # type: ignore[arg-type]
 
     def test_mount_exposes_only_runtime_socket_and_capability(self) -> None:
-        mount = EgressRuntimeMount(Path("/private/runtime"))
+        mount = EgressRuntimeMount(Path("/private/runtime"), "demo", "codex")
         self.assertEqual(mount.socket_path, Path("/private/runtime/broker.sock"))
         self.assertEqual(mount.capability_path, Path("/private/runtime/capability"))
 
@@ -157,7 +159,10 @@ class EgressBrokerRuntimeTest(unittest.TestCase):
         runtime = EgressBrokerRuntime(session)  # type: ignore[arg-type]
 
         with runtime as mount:
-            self.assertEqual(mount, EgressRuntimeMount(session.run_dir))
+            self.assertEqual(
+                mount,
+                EgressRuntimeMount(session.run_dir, session.project_id, session.agent),
+            )
             self.assertEqual(session.backlogs, [32])
             self.assertEqual(listener.timeout, 0.2)
             self.assertIsNotNone(runtime._thread)
@@ -355,6 +360,7 @@ class EgressBrokerRuntimeTest(unittest.TestCase):
                 with mock.patch.object(runtime, "_handle_client", side_effect=fail):
                     runtime.__enter__()
                     self.assertTrue(handled.wait(1))
+                    self.assertEqual(runtime.wait_failed(0.1), fatal)
                     if fatal:
                         with self.assertRaises(EgressBrokerRuntimeError) as raised:
                             runtime.__exit__(None, None, None)

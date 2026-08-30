@@ -1,9 +1,13 @@
 from pathlib import Path
 import os
+import signal
+import subprocess
 import unittest
+from unittest import mock
 
 from agent_container.podman import auth_codex_spec
 from agent_container.podman import BrokerRuntimeMount
+from agent_container.podman import CommandSpec
 from agent_container.podman import codex_login_status_spec
 from agent_container.podman import build_image_spec
 from agent_container.podman import build_project_image_spec
@@ -24,7 +28,10 @@ from agent_container.podman import podman_running_agent_containers_spec
 from agent_container.podman import podman_stats_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
+from agent_container.podman import run_command_supervised
+from agent_container.egress_broker_runtime import EgressBrokerRuntimeError
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
+from agent_container.egress_broker_runtime import EgressRuntimeMount
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.state import Repository
 from agent_container.state import StateLayout
@@ -36,6 +43,284 @@ HANDOVER_BROKER = HandoverRuntimeMount(Path("/state/handover-broker/one"))
 
 
 class PodmanCommandTest(unittest.TestCase):
+    def test_supervised_process_stops_named_container_when_cli_cannot_be_reaped(
+        self,
+    ) -> None:
+        class Process:
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                return None
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired(("podman", "run"), timeout)
+
+        egress = EgressRuntimeMount(
+            Path("/state/egress/codex"), "agent-container", "codex"
+        )
+        cleanup_result = subprocess.CompletedProcess(("podman", "stop"), 0)
+        gateway = mock.Mock()
+        gateway.wait_failed.return_value = True
+        spec = CommandSpec(("podman", "run", "image"), {})
+        with mock.patch(
+            "agent_container.podman.subprocess.Popen", return_value=Process()
+        ), mock.patch(
+            "agent_container.podman.subprocess.run", return_value=cleanup_result
+        ) as cleanup, self.assertRaises(EgressBrokerRuntimeError):
+            run_command_supervised(spec, gateway, egress)
+
+        self.assertEqual(cleanup.call_count, 1)
+        self.assertEqual(
+            cleanup.call_args.args[0],
+            ("podman", "stop", "--ignore", "--time=2", egress.container_name),
+        )
+
+    def test_supervised_process_kills_named_container_after_cli_timeout(self) -> None:
+        class Process:
+            def __init__(self) -> None:
+                self.returncode = None
+                self.wait_count = 0
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                self.returncode = -signal.SIGKILL
+
+            def wait(self, timeout=None):
+                self.wait_count += 1
+                if self.wait_count == 1:
+                    raise subprocess.TimeoutExpired(("podman", "run"), timeout)
+                return self.returncode
+
+        egress = EgressRuntimeMount(
+            Path("/state/egress/codex"), "agent-container", "codex"
+        )
+        process = Process()
+        gateway = mock.Mock()
+        gateway.wait_failed.return_value = True
+        stop_timeout = subprocess.TimeoutExpired(
+            ("podman", "stop", egress.container_name), 5
+        )
+        kill_result = subprocess.CompletedProcess(
+            ("podman", "kill", egress.container_name), 0
+        )
+        spec = CommandSpec(("podman", "run", "image"), {})
+        with mock.patch(
+            "agent_container.podman.subprocess.Popen", return_value=process
+        ), mock.patch(
+            "agent_container.podman.subprocess.run",
+            side_effect=(stop_timeout, kill_result),
+        ) as cleanup, self.assertRaises(EgressBrokerRuntimeError):
+            run_command_supervised(spec, gateway, egress)
+
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+        self.assertEqual(
+            [call.args[0] for call in cleanup.call_args_list],
+            [
+                ("podman", "stop", "--ignore", "--time=2", egress.container_name),
+                ("podman", "kill", "--signal=KILL", egress.container_name),
+            ],
+        )
+        self.assertTrue(all(call.kwargs["timeout"] == 5 for call in cleanup.call_args_list))
+
+    def test_supervised_process_reaps_child_before_returning_from_sigterm(self) -> None:
+        class Process:
+            def __init__(self) -> None:
+                self.returncode = None
+                self.terminated = False
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                self.terminated = True
+                self.returncode = -signal.SIGTERM
+
+            def kill(self):
+                self.returncode = -signal.SIGKILL
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        handlers = {}
+        restored = []
+
+        def install_handler(signum, handler):
+            if callable(handler):
+                handlers[signum] = handler
+            else:
+                restored.append((signum, handler))
+
+        def interrupt(_timeout):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+            return False
+
+        process = Process()
+        gateway = mock.Mock()
+        gateway.wait_failed.side_effect = interrupt
+        spec = CommandSpec(("podman", "run", "image"), {})
+        with mock.patch(
+            "agent_container.podman.subprocess.Popen", return_value=process
+        ), mock.patch(
+            "agent_container.podman.subprocess.run",
+            return_value=subprocess.CompletedProcess(("podman", "stop"), 0),
+        ), mock.patch(
+            "agent_container.podman.signal.getsignal", return_value=signal.SIG_DFL
+        ), mock.patch(
+            "agent_container.podman.signal.signal", side_effect=install_handler
+        ), self.assertRaises(EgressBrokerRuntimeError):
+            run_command_supervised(
+                spec,
+                gateway,
+                EgressRuntimeMount(
+                    Path("/state/egress/codex"), "agent-container", "codex"
+                ),
+            )
+
+        self.assertTrue(process.terminated)
+        self.assertIsNotNone(process.returncode)
+        self.assertEqual(
+            restored,
+            [
+                (signal.SIGINT, signal.SIG_DFL),
+                (signal.SIGTERM, signal.SIG_DFL),
+                (signal.SIGHUP, signal.SIG_DFL),
+            ],
+        )
+
+    def test_supervised_process_is_reaped_on_gateway_failure_and_interrupt(self) -> None:
+        class Process:
+            def __init__(self) -> None:
+                self.returncode = None
+                self.terminated = False
+                self.killed = False
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                self.terminated = True
+                self.returncode = -15
+
+            def kill(self):
+                self.killed = True
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        spec = CommandSpec(("podman", "run", "image"), {})
+        for failure in (True, KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__):
+                process = Process()
+                gateway = mock.Mock()
+                if isinstance(failure, BaseException):
+                    gateway.wait_failed.side_effect = failure
+                    expected = KeyboardInterrupt
+                else:
+                    gateway.wait_failed.return_value = True
+                    expected = EgressBrokerRuntimeError
+                with mock.patch(
+                    "agent_container.podman.subprocess.Popen", return_value=process
+                ), mock.patch(
+                    "agent_container.podman.subprocess.run",
+                    return_value=subprocess.CompletedProcess(("podman", "stop"), 0),
+                ), self.assertRaises(expected):
+                    run_command_supervised(
+                        spec,
+                        gateway,
+                        EgressRuntimeMount(
+                            Path("/state/egress/codex"), "agent-container", "codex"
+                        ),
+                    )
+                self.assertTrue(process.terminated)
+                self.assertIsNotNone(process.returncode)
+
+    def test_enabled_runtime_wraps_both_agents_with_fixed_egress_contract(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        handover = Path("/vault/handovers/agent-container")
+        for agent in ("codex", "claude"):
+            with self.subTest(agent=agent):
+                egress = EgressRuntimeMount(
+                    Path(f"/state/egress/{agent}"), "agent-container", agent
+                )
+                if agent == "codex":
+                    spec = run_codex_spec(
+                        layout,
+                        handover,
+                        IMAGE,
+                        os.getuid(),
+                        os.getgid(),
+                        egress=egress,
+                    )
+                else:
+                    spec = run_claude_spec(
+                        layout,
+                        handover,
+                        IMAGE,
+                        os.getuid(),
+                        os.getgid(),
+                        HANDOVER_BROKER,
+                        egress=egress,
+                    )
+                self.assertEqual(spec.argv.count("--network=none"), 1)
+                self.assertEqual(
+                    sum(argument.startswith("--name=agent-egress-") for argument in spec.argv),
+                    1,
+                )
+                joined = " ".join(spec.argv)
+                self.assertIn(
+                    f"src=/state/egress/{agent},dst=/run/agent-egress,ro=true",
+                    joined,
+                )
+                for variable, value in (
+                    ("AGENT_EGRESS_SOCKET", "/run/agent-egress/broker.sock"),
+                    ("AGENT_EGRESS_CAPABILITY", "/run/agent-egress/capability"),
+                    ("AGENT_EGRESS_AGENT", agent),
+                    ("HTTPS_PROXY", "http://127.0.0.1:17843"),
+                    ("https_proxy", "http://127.0.0.1:17843"),
+                    ("HTTP_PROXY", "http://127.0.0.1:17843"),
+                    ("http_proxy", "http://127.0.0.1:17843"),
+                    ("NO_PROXY", "localhost,127.0.0.1,::1"),
+                    ("no_proxy", "localhost,127.0.0.1,::1"),
+                ):
+                    self.assertEqual(spec.argv.count(f"{variable}={value}"), 1)
+                image_index = spec.argv.index(IMAGE)
+                self.assertEqual(
+                    spec.argv[image_index + 1 : image_index + 3],
+                    ("agent-egress-runtime", "--"),
+                )
+                original = "codex" if agent == "codex" else "python3"
+                self.assertEqual(spec.argv[image_index + 3], original)
+
+    def test_egress_mount_rejects_relative_or_wrong_project_agent(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        handover = Path("/vault/handovers/agent-container")
+        for egress in (
+            EgressRuntimeMount(Path("relative"), "agent-container", "codex"),
+            EgressRuntimeMount(Path("/state/egress"), "other", "codex"),
+            EgressRuntimeMount(Path("/state/egress"), "agent-container", "claude"),
+        ):
+            with self.subTest(egress=egress), self.assertRaises(ValueError):
+                run_codex_spec(
+                    layout,
+                    handover,
+                    IMAGE,
+                    os.getuid(),
+                    os.getgid(),
+                    egress=egress,
+                )
+
     def test_egress_adapter_probe_is_hardened_noninteractive_and_mount_free(self) -> None:
         spec = egress_adapter_status_spec("example/image:current")
         self.assertEqual(

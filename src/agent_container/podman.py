@@ -2,9 +2,13 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
+from agent_container.egress_broker_runtime import EgressBrokerRuntime
+from agent_container.egress_broker_runtime import EgressBrokerRuntimeError
+from agent_container.egress_broker_runtime import EgressRuntimeMount
 from agent_container.state import Repository
 from agent_container.state import StateLayout
 from agent_container.state import validate_project_id
@@ -32,6 +36,7 @@ _CLAUDE_RUNTIME_HOME_TMPFS_MOUNT = (
 )
 _BROKER_RUNTIME_PATH = "/run/agent-broker"
 _HANDOVER_BROKER_RUNTIME_PATH = "/run/agent-handover"
+_EGRESS_RUNTIME_PATH = "/run/agent-egress"
 _CONTAINER_ID = re.compile(r"^[0-9a-f]{12,64}$")
 _RESOURCE_AGENTS = frozenset({"codex", "claude"})
 _RESOURCE_STATS_FORMAT = (
@@ -110,6 +115,52 @@ def _runtime_monitor_args(layout: StateLayout, agent: str) -> list[str]:
         "--label",
         f"io.agent-container.agent={agent}",
     ]
+
+
+def _egress_args(
+    layout: StateLayout, agent: str, egress: EgressRuntimeMount
+) -> list[str]:
+    if (
+        not egress.run_dir.is_absolute()
+        or egress.project_id != layout.project_id
+        or egress.agent != agent
+    ):
+        raise ValueError("egress runtime mount does not match agent runtime")
+    proxy = "http://127.0.0.1:17843"
+    arguments = [
+        f"--name={egress.container_name}",
+        "--network=none",
+        "--mount",
+        _mount(egress.run_dir, _EGRESS_RUNTIME_PATH, True),
+        "--env",
+        f"AGENT_EGRESS_SOCKET={_EGRESS_RUNTIME_PATH}/broker.sock",
+        "--env",
+        f"AGENT_EGRESS_CAPABILITY={_EGRESS_RUNTIME_PATH}/capability",
+        "--env",
+        f"AGENT_EGRESS_AGENT={agent}",
+    ]
+    for name, value in (
+        ("HTTPS_PROXY", proxy),
+        ("https_proxy", proxy),
+        ("HTTP_PROXY", proxy),
+        ("http_proxy", proxy),
+        ("NO_PROXY", "localhost,127.0.0.1,::1"),
+        ("no_proxy", "localhost,127.0.0.1,::1"),
+    ):
+        arguments += ["--env", f"{name}={value}"]
+    return arguments
+
+
+def egress_runtime_stop_spec(egress: EgressRuntimeMount) -> CommandSpec:
+    return CommandSpec(
+        ("podman", "stop", "--ignore", "--time=2", egress.container_name), {}
+    )
+
+
+def egress_runtime_kill_spec(egress: EgressRuntimeMount) -> CommandSpec:
+    return CommandSpec(
+        ("podman", "kill", "--signal=KILL", egress.container_name), {}
+    )
 
 
 def _git_environment_args(
@@ -508,6 +559,7 @@ def run_codex_spec(
     uid: int,
     gid: int,
     broker: BrokerRuntimeMount | None = None,
+    egress: EgressRuntimeMount | None = None,
 ) -> CommandSpec:
     if uid != os.getuid() or gid != os.getgid():
         raise ValueError("runtime uid and gid must match the current user")
@@ -526,10 +578,12 @@ def run_codex_spec(
         mounts.insert(-1, (layout.gh_dir, "/home/agent/.config/gh", True))
     for source, target, read_only in mounts:
         argv += ["--mount", _mount(source, target, read_only)]
+    if egress is not None:
+        argv += _egress_args(layout, "codex", egress)
+    argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image]
+    if egress is not None:
+        argv += ["agent-egress-runtime", "--"]
     argv += [
-        "--env",
-        f"AGENT_PROJECT_ID={layout.project_id}",
-        image,
         "codex",
         "--approve-for-me",
         "-c",
@@ -546,6 +600,7 @@ def run_claude_spec(
     gid: int,
     handover_broker: HandoverRuntimeMount,
     broker: BrokerRuntimeMount | None = None,
+    egress: EgressRuntimeMount | None = None,
 ) -> CommandSpec:
     if uid != os.getuid() or gid != os.getgid():
         raise ValueError("runtime uid and gid must match the current user")
@@ -573,7 +628,11 @@ def run_claude_spec(
         argv += ["--mount", _mount(source, target, read_only)]
     argv += ["--env", "CLAUDE_CONFIG_DIR=/home/agent/.claude"]
     argv += ["--env", "AGENT_HANDOVER_ROOT=/handovers"]
+    if egress is not None:
+        argv += _egress_args(layout, "claude", egress)
     argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image]
+    if egress is not None:
+        argv += ["agent-egress-runtime", "--"]
     argv += _CLAUDE_LAUNCHER_PREFIX
     return CommandSpec(tuple(argv), {})
 
@@ -606,3 +665,100 @@ def run_command(
         check=check,
         capture_output=capture_output,
     )
+
+
+def run_command_supervised(
+    spec: CommandSpec,
+    gateway: EgressBrokerRuntime,
+    egress: EgressRuntimeMount,
+) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment.update(spec.environment)
+    interrupted: list[int] = []
+
+    def handle_signal(signum, _frame) -> None:
+        interrupted.append(signum)
+
+    watched_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    previous_handlers = {
+        signum: signal.getsignal(signum) for signum in watched_signals
+    }
+    for signum in watched_signals:
+        signal.signal(signum, handle_signal)
+    process = None
+    gateway_failed = False
+    failure: BaseException | None = None
+    try:
+        process = subprocess.Popen(spec.argv, env=environment, text=True)
+        while process.poll() is None and not interrupted:
+            if gateway.wait_failed(0.1):
+                gateway_failed = True
+                break
+    except BaseException as error:
+        failure = error
+    finally:
+        for signum in watched_signals:
+            signal.signal(signum, previous_handlers[signum])
+
+    if process is None:
+        assert failure is not None
+        raise failure
+    if gateway_failed or interrupted or failure is not None:
+        _reap_process(process)
+        _stop_egress_container(egress)
+        if isinstance(failure, KeyboardInterrupt):
+            raise failure
+        raise EgressBrokerRuntimeError("egress gateway failed")
+    try:
+        returncode = process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        _reap_process(process)
+        _stop_egress_container(egress)
+        raise EgressBrokerRuntimeError("egress gateway failed") from None
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, spec.argv)
+    return subprocess.CompletedProcess(spec.argv, returncode)
+
+
+def _reap_process(process: subprocess.Popen[str]) -> None:
+    try:
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=5)
+        return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        process.kill()
+        process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _stop_egress_container(egress: EgressRuntimeMount) -> None:
+    stop = egress_runtime_stop_spec(egress)
+    try:
+        completed = subprocess.run(
+            stop.argv,
+            env={**os.environ, **stop.environment},
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        completed = None
+    if completed is not None and completed.returncode == 0:
+        return
+    kill = egress_runtime_kill_spec(egress)
+    try:
+        completed = subprocess.run(
+            kill.argv,
+            env={**os.environ, **kill.environment},
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise EgressBrokerRuntimeError("egress runtime cleanup failed") from error
+    if completed.returncode != 0:
+        raise EgressBrokerRuntimeError("egress runtime cleanup failed")

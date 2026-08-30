@@ -1,5 +1,6 @@
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
+import hashlib
 from pathlib import Path
 import socket
 import struct
@@ -35,6 +36,8 @@ class EgressBrokerRuntimeError(Exception):
 @dataclass(frozen=True)
 class EgressRuntimeMount:
     run_dir: Path
+    project_id: str
+    agent: str
 
     @property
     def socket_path(self) -> Path:
@@ -44,6 +47,11 @@ class EgressRuntimeMount:
     def capability_path(self) -> Path:
         return self.run_dir / "capability"
 
+    @property
+    def container_name(self) -> str:
+        label = hashlib.sha256(str(self.run_dir).encode("utf-8")).hexdigest()[:16]
+        return f"agent-egress-{label}"
+
 
 @dataclass
 class EgressBrokerRuntime(AbstractContextManager[EgressRuntimeMount]):
@@ -52,6 +60,7 @@ class EgressBrokerRuntime(AbstractContextManager[EgressRuntimeMount]):
     _thread: threading.Thread | None = field(default=None, init=False)
     _listener: socket.socket | None = field(default=None, init=False, repr=False)
     _error: BaseException | None = field(default=None, init=False, repr=False)
+    _failed: threading.Event = field(default_factory=threading.Event, init=False)
     _exited: bool = field(default=False, init=False, repr=False)
     _limit_lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False
@@ -138,7 +147,9 @@ class EgressBrokerRuntime(AbstractContextManager[EgressRuntimeMount]):
                 cleanup_complete = True
             self._exited = cleanup_complete
             raise EgressBrokerRuntimeError("egress broker failed to start") from None
-        return EgressRuntimeMount(self.session.run_dir)
+        return EgressRuntimeMount(
+            self.session.run_dir, self.session.project_id, self.session.agent
+        )
 
     def _serve(self, listener: socket.socket) -> None:
         try:
@@ -154,6 +165,7 @@ class EgressBrokerRuntime(AbstractContextManager[EgressRuntimeMount]):
                 self._start_worker(client)
         except BaseException as error:
             self._error = error
+            self._failed.set()
 
     def _start_worker(self, client: socket.socket) -> None:
         thread = threading.Thread(
@@ -179,11 +191,15 @@ class EgressBrokerRuntime(AbstractContextManager[EgressRuntimeMount]):
             pass
         except BaseException as error:
             self._error = error
+            self._failed.set()
             self._stop.set()
         finally:
             client.close()
             with self._worker_lock:
                 self._workers.discard(threading.current_thread())
+
+    def wait_failed(self, timeout: float) -> bool:
+        return self._failed.wait(timeout)
 
     def _write_response(
         self, stream: BinaryIO, status: str, code: str
