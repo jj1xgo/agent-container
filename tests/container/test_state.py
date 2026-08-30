@@ -90,6 +90,32 @@ class StateValidationTest(unittest.TestCase):
             layout.egress_broker_audit_file,
             Path("/state/egress-broker/audit/events.jsonl"),
         )
+        self.assertEqual(layout.family_root, Path("/state/family"))
+        self.assertEqual(layout.family_app_file, Path("/state/family/app.json"))
+        self.assertEqual(
+            layout.family_private_key_file,
+            Path("/state/family/private-key.pem"),
+        )
+        self.assertEqual(
+            layout.family_project_dir,
+            Path("/state/family/projects/agent-container"),
+        )
+        self.assertEqual(
+            layout.family_binding_file,
+            Path("/state/family/projects/agent-container/binding.json"),
+        )
+        self.assertEqual(
+            layout.family_pending_dir,
+            Path("/state/family/projects/agent-container/pending"),
+        )
+        self.assertEqual(
+            layout.family_audit_file,
+            Path("/state/family/projects/agent-container/audit/events.jsonl"),
+        )
+        self.assertEqual(
+            layout.family_intake_run_root,
+            Path("/state/family/intake/r/1f630d4dd972"),
+        )
 
     def test_claude_oauth_token_accepts_only_safe_single_line_ascii(self) -> None:
         self.assertEqual(validate_claude_oauth_token("x" * 32), "x" * 32)
