@@ -34,6 +34,14 @@ _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 
+class EgressAuthorizationError(ValueError):
+    def __init__(self, stage: str) -> None:
+        if stage not in {"authentication", "policy"}:
+            raise ValueError("egress authorization stage is invalid")
+        self.stage = stage
+        super().__init__("egress broker request is not allowed")
+
+
 def _create_private_file(path: Path, body: str) -> None:
     descriptor = os.open(
         path,
@@ -201,9 +209,9 @@ class EgressBrokerSession:
             if request.sequence != self._expected_sequence:
                 raise ValueError("egress broker request sequence is invalid")
             if request.operation != "connect" or request.port != 443:
-                raise ValueError("egress broker request operation is not allowed")
+                raise EgressAuthorizationError("policy")
             if request.domain not in self._allowed_domains:
-                raise ValueError("egress broker request domain is not allowed")
+                raise EgressAuthorizationError("policy")
             self._expected_sequence += 1
             return request.domain
 
