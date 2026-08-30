@@ -51,6 +51,7 @@ from agent_container.podman import claude_setup_token_spec
 from agent_container.podman import claude_token_status_spec
 from agent_container.podman import claude_policy_status_spec
 from agent_container.podman import handover_broker_client_status_spec
+from agent_container.podman import egress_adapter_status_spec
 from agent_container.podman import claude_superpowers_spec
 from agent_container.podman import claude_superpowers_marketplace_spec
 from agent_container.podman import codex_superpowers_install_spec
@@ -1212,17 +1213,35 @@ def _doctor(
 
     try:
         egress_policy = _load_optional_egress_policy(layout.egress_policy_file)
-        checks.append(
-            CheckResult(
-                "WARN" if egress_policy is None else "PASS",
-                "network-policy",
-                (
-                    "outbound network is not domain-restricted"
-                    if egress_policy is None
-                    else "outbound HTTPS uses the project domain allowlist"
-                ),
+        if egress_policy is None:
+            checks.append(
+                CheckResult(
+                    "WARN",
+                    "network-policy",
+                    "outbound network is not domain-restricted",
+                )
             )
-        )
+        elif runtime_image is None:
+            checks.append(
+                CheckResult(
+                    "FAIL", "network-policy", "managed egress adapter unavailable"
+                )
+            )
+        else:
+            adapter = _doctor_run(
+                runner, egress_adapter_status_spec(runtime_image)
+            )
+            checks.append(
+                CheckResult(
+                    "PASS" if adapter.returncode == 0 else "FAIL",
+                    "network-policy",
+                    (
+                        "outbound HTTPS uses the project domain allowlist"
+                        if adapter.returncode == 0
+                        else "managed egress adapter self-check failed"
+                    ),
+                )
+            )
     except (ValueError, OSError) as error:
         checks.append(
             CheckResult("FAIL", "network-policy", _check_failure_detail(error))
@@ -1487,7 +1506,7 @@ def main(
                 print(agent + "\t" + "\t".join(fields), file=stdout)
             return 0
         if arguments.command == "run":
-            layout, record, handover_project, uid, gid, _egress_policy = _runtime_preflight(
+            layout, record, handover_project, uid, gid, egress_policy = _runtime_preflight(
                 arguments.project,
                 arguments.agent,
                 environment,
@@ -1503,6 +1522,9 @@ def main(
                 build_missing=True,
                 stdout=stdout,
             )
+            if egress_policy is not None:
+                egress_probe = egress_adapter_status_spec(resolution.image)
+                _require_success(_suppressed_run(runner, egress_probe), egress_probe)
             if arguments.agent == "claude":
                 policy_spec = claude_policy_status_spec(resolution.image)
                 _require_success(_suppressed_run(runner, policy_spec), policy_spec)

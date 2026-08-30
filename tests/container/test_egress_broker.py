@@ -42,7 +42,7 @@ class EgressBrokerSessionTest(unittest.TestCase):
     def test_creates_private_project_scoped_runtime(self) -> None:
         self.assertEqual(stat.S_IMODE(self.session.run_dir.stat().st_mode), 0o700)
         self.assertEqual(
-            stat.S_IMODE(self.session.capability_path.stat().st_mode), 0o600
+            stat.S_IMODE(self.session.capability_path.stat().st_mode), 0o400
         )
         self.assertEqual(self.session.run_dir.parent, self.layout.egress_broker_run_root)
         self.assertLessEqual(len(os.fsencode(self.session.socket_path)), 107)

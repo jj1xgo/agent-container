@@ -1776,6 +1776,41 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertIn("FAIL  network-policy: state validation failed", output.getvalue())
 
+    def test_doctor_enabled_egress_requires_managed_adapter_self_check(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            enable_egress_policy(root / "projects/agent-container/egress.json")
+            calls = []
+            output = StringIO()
+
+            def runner(spec):
+                calls.append(spec)
+                if spec.argv[-2:] == ("agent-egress-runtime", "--self-check"):
+                    return subprocess.CompletedProcess(spec.argv, 1)
+                return self._successful_doctor_runner(spec)
+
+            result = main(
+                ["doctor", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda _path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                stdout=output,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertIn(
+                "FAIL  network-policy: managed egress adapter self-check failed",
+                output.getvalue(),
+            )
+            probes = [
+                spec
+                for spec in calls
+                if spec.argv[-2:] == ("agent-egress-runtime", "--self-check")
+            ]
+            self.assertEqual(len(probes), 1)
+
     def test_run_rejects_present_invalid_egress_policy_before_podman(self) -> None:
         cases = ("malformed", "unsafe-mode", "symlink", "unsupported")
         for case in cases:
@@ -1806,6 +1841,36 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                     policy_path.chmod(0o644 if case == "unsafe-mode" else 0o600)
 
                 self._assert_run_refused(root)
+
+    def test_run_enabled_egress_probe_failure_prevents_runtime_spec(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            enable_egress_policy(root / "projects/agent-container/egress.json")
+            built = []
+
+            def runner(spec):
+                if spec.argv[-2:] == ("agent-egress-runtime", "--self-check"):
+                    return subprocess.CompletedProcess(spec.argv, 1)
+                return self._successful_doctor_runner(spec)
+
+            def builder(*args, **kwargs):
+                built.append((args, kwargs))
+                raise AssertionError("runtime spec must not be built")
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda _path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                runtime_spec_builder=builder,
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(built, [])
 
     def _assert_run_refused(
         self,

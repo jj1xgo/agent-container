@@ -373,6 +373,13 @@ def handover_broker_client_status_spec(image: str) -> CommandSpec:
     return CommandSpec(tuple(argv), {})
 
 
+def egress_adapter_status_spec(image: str) -> CommandSpec:
+    argv = _noninteractive_prefix(os.getuid(), os.getgid())
+    argv += ["--network=none"]
+    argv += [image, "agent-egress-runtime", "--self-check"]
+    return CommandSpec(tuple(argv), {})
+
+
 def auth_codex_spec(layout: StateLayout, image: str) -> CommandSpec:
     argv = _runtime_prefix(os.getuid(), os.getgid())
     argv += ["--mount", _mount(layout.codex_auth_dir, "/home/agent/.codex")]

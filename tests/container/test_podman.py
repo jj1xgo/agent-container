@@ -13,6 +13,7 @@ from agent_container.podman import claude_superpowers_spec
 from agent_container.podman import claude_superpowers_marketplace_spec
 from agent_container.podman import claude_token_status_spec
 from agent_container.podman import cli_version_spec
+from agent_container.podman import egress_adapter_status_spec
 from agent_container.podman import clone_project_spec
 from agent_container.podman import codex_superpowers_install_spec
 from agent_container.podman import codex_superpowers_marketplace_spec
@@ -35,6 +36,29 @@ HANDOVER_BROKER = HandoverRuntimeMount(Path("/state/handover-broker/one"))
 
 
 class PodmanCommandTest(unittest.TestCase):
+    def test_egress_adapter_probe_is_hardened_noninteractive_and_mount_free(self) -> None:
+        spec = egress_adapter_status_spec("example/image:current")
+        self.assertEqual(
+            spec.argv,
+            (
+                "podman",
+                "run",
+                "--rm",
+                "--read-only",
+                "--cap-drop=all",
+                "--security-opt=no-new-privileges",
+                "--userns=keep-id:uid=1000,gid=1000",
+                "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
+                "--network=none",
+                "example/image:current",
+                "agent-egress-runtime",
+                "--self-check",
+            ),
+        )
+        self.assertNotIn("--mount", spec.argv)
+        self.assertNotIn("--env", spec.argv)
+        self.assertEqual(spec.environment, {})
+
     def test_resource_monitor_commands_are_project_and_agent_scoped(self) -> None:
         listed = podman_running_agent_containers_spec("agent-container", "codex")
         self.assertEqual(

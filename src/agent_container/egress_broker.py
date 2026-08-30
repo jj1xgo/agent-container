@@ -46,7 +46,7 @@ def _create_private_file(path: Path, body: str) -> None:
     descriptor = os.open(
         path,
         os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW,
-        0o600,
+        0o400,
     )
     try:
         encoded = body.encode("ascii")

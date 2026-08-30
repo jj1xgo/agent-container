@@ -221,6 +221,14 @@ class ContainerImageContractTest(unittest.TestCase):
             body,
         )
         self.assertIn(
+            "COPY --chmod=0755 container/bin/agent-egress-adapter /usr/local/bin/agent-egress-adapter",
+            body,
+        )
+        self.assertIn(
+            "COPY --chmod=0755 container/bin/agent-egress-runtime /usr/local/bin/agent-egress-runtime",
+            body,
+        )
+        self.assertIn(
             "COPY container/profile.d/10-agent-node.sh /etc/profile.d/10-agent-node.sh",
             body,
         )
@@ -237,6 +245,14 @@ class ContainerImageContractTest(unittest.TestCase):
             codex_wrapper,
         )
         self.assertNotIn("/usr/bin/env node", codex_wrapper)
+
+        for script_name, module in (
+            ("agent-egress-adapter", "agent_container.egress_adapter"),
+            ("agent-egress-runtime", "agent_container.egress_runtime"),
+        ):
+            script = (ROOT / "container/bin" / script_name).read_text(encoding="utf-8")
+            self.assertIn("PYTHONPATH=/opt/agent-container/src", script)
+            self.assertIn(f"python3 -P -m {module}", script)
 
         claude_wrapper = (ROOT / "container/bin/claude").read_text(encoding="utf-8")
         self.assertIn("exec /opt/agent-node/bin/claude", claude_wrapper)
