@@ -127,12 +127,25 @@ class ContainerImageContractTest(unittest.TestCase):
                 "git",
                 "libatomic1",
                 "python3",
+                "python3-pip",
                 "socat",
                 "xz-utils",
             }
             - installed,
             set(),
         )
+
+    def test_image_installs_the_pinned_runtime_linter(self) -> None:
+        body = (ROOT / "Containerfile").read_text(encoding="utf-8")
+        requirement = (ROOT / "requirements-lint.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(requirement, "ruff==0.16.4\n")
+        self.assertIn("COPY requirements-lint.txt /opt/agent-container/", body)
+        self.assertIn(
+            "python3 -m pip install --disable-pip-version-check --no-deps",
+            body,
+        )
+        self.assertIn("-r /opt/agent-container/requirements-lint.txt", body)
 
     def test_image_bootstraps_ca_then_uses_https_for_debian_packages(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")

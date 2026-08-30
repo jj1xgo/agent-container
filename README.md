@@ -236,7 +236,13 @@ IDはproject policyへ保存しますが、docs、broker audit、container outpu
 
 ## 開発時のlint
 
-Codex、Claude Code、local developer、CIは同じ`bin/lint` wrapperを使います。最初にpinned toolをinstallしてから実行してください。
+Codex、Claude Code、local developer、CIは同じ`bin/lint` wrapperを使います。標準agent imageにはpinned Ruffとpipが入っているため、agent runtimeではそのまま実行できます。
+
+```bash
+bin/lint
+```
+
+agent-container image外のhost開発環境では、最初にpinned toolをinstallします。
 
 ```bash
 python3 -m pip install --disable-pip-version-check --no-deps \
