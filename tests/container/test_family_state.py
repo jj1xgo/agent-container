@@ -3,9 +3,11 @@ import os
 from pathlib import Path
 import stat
 from tempfile import TemporaryDirectory
+import threading
 import unittest
 from unittest.mock import patch
 
+import agent_container.family_state as family_state
 from agent_container.family_state import FamilyBinding
 from agent_container.family_state import load_family_binding
 from agent_container.family_state import write_family_binding
@@ -31,6 +33,13 @@ class FamilyBindingTest(unittest.TestCase):
     def _write_private_bytes(self, body: bytes) -> None:
         self.path.write_bytes(body)
         self.path.chmod(0o600)
+
+    def _temporary_siblings(self) -> list[Path]:
+        return [
+            path
+            for path in self.parent.glob(".binding.json.*")
+            if path.name != ".binding.json.lock"
+        ]
 
     def test_round_trips_an_exact_repository_binding(self) -> None:
         write_family_binding(self.path, self.binding)
@@ -141,7 +150,7 @@ class FamilyBindingTest(unittest.TestCase):
                 write_family_binding(self.path, self.binding)
 
         self.assertFalse(self.path.exists())
-        self.assertEqual(list(self.parent.glob(".binding.json.*")), [])
+        self.assertEqual(self._temporary_siblings(), [])
 
     def test_write_replaces_only_a_valid_explicitly_observed_binding(self) -> None:
         existing = FamilyBinding(Repository("family", "existing"), 9)
@@ -192,7 +201,7 @@ class FamilyBindingTest(unittest.TestCase):
                     with self.assertRaises(OSError):
                         write_family_binding(self.path, self.binding)
                 self.assertEqual(self.path.read_bytes(), before)
-                self.assertEqual(list(self.parent.glob(".binding.json.*")), [])
+                self.assertEqual(self._temporary_siblings(), [])
 
     def test_write_reports_post_publication_fsync_failure_with_new_binding_cleaned_up(self) -> None:
         existing = FamilyBinding(Repository("family", "existing"), 9)
@@ -215,7 +224,7 @@ class FamilyBindingTest(unittest.TestCase):
                 write_family_binding(self.path, self.binding)
 
         self.assertEqual(load_family_binding(self.path), self.binding)
-        self.assertEqual(list(self.parent.glob(".binding.json.*")), [])
+        self.assertEqual(self._temporary_siblings(), [])
 
     def test_create_reports_each_fsync_failure_with_defined_published_state(self) -> None:
         real_fsync = os.fsync
@@ -240,7 +249,7 @@ class FamilyBindingTest(unittest.TestCase):
                 if published:
                     self.assertEqual(load_family_binding(self.path), self.binding)
                     self.path.unlink()
-                self.assertEqual(list(self.parent.glob(".binding.json.*")), [])
+                self.assertEqual(self._temporary_siblings(), [])
 
     def test_write_does_not_overwrite_a_binding_swapped_before_publication(self) -> None:
         write_family_binding(self.path, FamilyBinding(Repository("family", "old"), 1))
@@ -270,7 +279,108 @@ class FamilyBindingTest(unittest.TestCase):
                 write_family_binding(self.path, self.binding)
 
         self.assertEqual(load_family_binding(self.path), concurrent)
-        self.assertEqual(list(self.parent.glob(".binding.json.*")), [])
+        self.assertEqual(self._temporary_siblings(), [])
+
+    def test_concurrent_writers_serialize_before_observing_the_binding(self) -> None:
+        write_family_binding(self.path, FamilyBinding(Repository("family", "old"), 1))
+        first = FamilyBinding(Repository("family", "first"), 2)
+        second = FamilyBinding(Repository("family", "second"), 3)
+        observed = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        second_reached_snapshot = threading.Event()
+        failures: list[BaseException] = []
+        real_snapshot = family_state._snapshot
+
+        def pause_first_snapshot(*args: object, **kwargs: object) -> object:
+            result = real_snapshot(*args, **kwargs)
+            if threading.current_thread().name == "first-writer":
+                observed.set()
+                release_first.wait(timeout=5)
+            elif threading.current_thread().name == "second-writer":
+                second_reached_snapshot.set()
+            return result
+
+        def run(binding: FamilyBinding, started: threading.Event | None = None) -> None:
+            try:
+                if started is not None:
+                    started.set()
+                write_family_binding(self.path, binding)
+            except BaseException as error:
+                failures.append(error)
+
+        with patch(
+            "agent_container.family_state._snapshot", side_effect=pause_first_snapshot
+        ):
+            first_thread = threading.Thread(
+                target=run, args=(first,), name="first-writer"
+            )
+            first_thread.start()
+            self.assertTrue(observed.wait(timeout=5))
+            second_thread = threading.Thread(
+                target=run, args=(second, second_started), name="second-writer"
+            )
+            second_thread.start()
+            self.assertTrue(second_started.wait(timeout=5))
+            try:
+                self.assertFalse(second_reached_snapshot.wait(timeout=0.2))
+            finally:
+                release_first.set()
+                first_thread.join(timeout=5)
+                second_thread.join(timeout=5)
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(second_thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(load_family_binding(self.path), second)
+
+    def test_recovery_restores_external_swap_before_a_queued_writer_updates(self) -> None:
+        write_family_binding(self.path, FamilyBinding(Repository("family", "old"), 1))
+        external = FamilyBinding(Repository("family", "external"), 2)
+        queued = FamilyBinding(Repository("family", "queued"), 3)
+        replacement = self.parent / ".external-replacement"
+        replacement.write_text(
+            json.dumps(
+                {"repository": external.repository.slug, "repository_id": 2}
+            ),
+            encoding="ascii",
+        )
+        replacement.chmod(0o600)
+        queued_started = threading.Event()
+        queued_failures: list[BaseException] = []
+
+        def write_queued() -> None:
+            queued_started.set()
+            try:
+                write_family_binding(self.path, queued)
+            except BaseException as error:
+                queued_failures.append(error)
+
+        real_fsync = os.fsync
+        calls = 0
+        queued_thread: threading.Thread | None = None
+
+        def swap_and_queue_writer(descriptor: int) -> None:
+            nonlocal calls, queued_thread
+            calls += 1
+            if calls == 2:
+                os.replace(replacement, self.path)
+                queued_thread = threading.Thread(target=write_queued)
+                queued_thread.start()
+                self.assertTrue(queued_started.wait(timeout=5))
+            real_fsync(descriptor)
+
+        with patch(
+            "agent_container.family_state.os.fsync", side_effect=swap_and_queue_writer
+        ):
+            with self.assertRaises(ValueError):
+                write_family_binding(self.path, self.binding)
+
+        self.assertIsNotNone(queued_thread)
+        queued_thread.join(timeout=5)
+        self.assertFalse(queued_thread.is_alive())
+        self.assertEqual(queued_failures, [])
+        self.assertEqual(load_family_binding(self.path), queued)
 
     def test_write_rejects_binding_replaced_during_observed_update(self) -> None:
         write_family_binding(self.path, FamilyBinding(Repository("family", "old"), 1))

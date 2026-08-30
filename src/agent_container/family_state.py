@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import ctypes
 import errno
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -287,14 +288,45 @@ def _rename_exchange(parent_descriptor: int, source: str, destination: str) -> N
     raise OSError(error_number, "atomic family binding replacement failed")
 
 
+def _open_binding_lock(parent_descriptor: int, binding_name: str) -> int:
+    lock_name = f".{binding_name}.lock"
+    try:
+        descriptor = os.open(
+            lock_name,
+            os.O_RDWR | os.O_CREAT | _NOFOLLOW | _CLOEXEC,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+    except OSError:
+        raise ValueError("family binding lock is invalid") from None
+    try:
+        opened = os.fstat(descriptor)
+        _validate_private_file(opened)
+        current = os.stat(lock_name, dir_fd=parent_descriptor, follow_symlinks=False)
+        _validate_private_file(current)
+        if not _same_inode(opened, current):
+            raise ValueError("family binding lock changed")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        current = os.stat(lock_name, dir_fd=parent_descriptor, follow_symlinks=False)
+        _validate_private_file(current)
+        if not _same_inode(opened, current):
+            raise ValueError("family binding lock changed")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def write_family_binding(path: Path, binding: FamilyBinding) -> None:
     body = _encode_binding(binding)
     parent_descriptor = _open_private_parent(path)
+    lock_descriptor: int | None = None
     temporary: str | None = None
     temporary_stat: os.stat_result | None = None
     published = False
     descriptor: int | None = None
     try:
+        lock_descriptor = _open_binding_lock(parent_descriptor, path.name)
         try:
             _existing_body, original = _snapshot(parent_descriptor, path.name)
         except ValueError as error:
@@ -347,4 +379,6 @@ def write_family_binding(path: Path, binding: FamilyBinding) -> None:
             os.close(descriptor)
         if temporary is not None and temporary_stat is not None and not published:
             _unlink_owned(parent_descriptor, temporary, temporary_stat)
+        if lock_descriptor is not None:
+            os.close(lock_descriptor)
         os.close(parent_descriptor)
