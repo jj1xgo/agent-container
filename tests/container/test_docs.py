@@ -244,6 +244,7 @@ class RuffLintToolingTest(unittest.TestCase):
                     _has_broad_container_context_copy(instruction), instruction
                 )
 
+
     def test_broad_context_copy_guard_allows_current_explicit_sources(self) -> None:
         containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
         current_copy_lines = "\n".join(
@@ -263,6 +264,72 @@ class RuffLintToolingTest(unittest.TestCase):
         mutated = RUFF_CONFIG.replace('"F"]', '"F", "W"]')
         with self.assertRaises(AssertionError):
             self.assertEqual(mutated, RUFF_CONFIG)
+
+
+class EgressDocumentationTest(unittest.TestCase):
+    def test_ci_runs_egress_socket_and_podman_gates_without_soft_failure(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("tests.integration.test_egress_broker_socket", workflow)
+        self.assertIn("tests.integration.test_egress_podman", workflow)
+        self.assertIn('AGENT_CONTAINER_RUN_SOCKET_INTEGRATION: "1"', workflow)
+        self.assertIn('grep -F "ResourceWarning" "$socket_log"', workflow)
+        self.assertIn('AGENT_CONTAINER_RUN_PODMAN_INTEGRATION: "1"', workflow)
+        self.assertIn("AGENT_CONTAINER_INTEGRATION_BASE_IMAGE:", workflow)
+        self.assertNotIn("continue-on-error", workflow)
+
+    def test_operator_and_smoke_guides_define_fail_closed_evidence_contract(
+        self,
+    ) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        operator = (ROOT / "docs/egress-domain-allowlist.md").read_text(
+            encoding="utf-8"
+        )
+        smoke = (ROOT / "docs/egress-domain-allowlist-smoke-test.md").read_text(
+            encoding="utf-8"
+        )
+        combined = "\n".join((readme, operator, smoke))
+        for command in (
+            "agentctl project configure-egress PROJECT --enable",
+            "agentctl project configure-egress PROJECT --add-domain pypi.org",
+            "agentctl doctor PROJECT",
+            "agentctl run PROJECT",
+            "agentctl project configure-egress PROJECT --remove-domain pypi.org",
+            "agentctl project configure-egress PROJECT --disable",
+        ):
+            self.assertIn(command, combined)
+        for contract in (
+            "opt-in",
+            "exact-domain",
+            "0600",
+            "0700",
+            "--network=none",
+            "TLS plaintext",
+            "no fallback",
+            "WARN",
+            "PASS",
+            "PARTIAL",
+            "FAIL",
+            "not run",
+            "build/auth/update",
+            "fresh approval",
+            "shell tracing",
+        ):
+            self.assertIn(contract, combined)
+        self.assertIn("rollback", operator)
+        self.assertIn("local doctor", operator)
+        self.assertIn("token/header/body/TLS/DNS dump", smoke)
+        self.assertIn("env vars/values", smoke)
+        self.assertIn("non-secret environment metadata", smoke)
+        self.assertIn("unobserved PASS", smoke)
+
+    def test_phase_guides_describe_unrestricted_warning_as_historical(self) -> None:
+        for relative in (
+            "docs/phase1-codex-container.md",
+            "docs/phase2-claude-code.md",
+            "docs/phase3-github-broker.md",
+        ):
+            body = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn("historical WARN", body, relative)
 
 
 class Phase1DocumentationTest(unittest.TestCase):

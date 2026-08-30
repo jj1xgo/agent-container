@@ -46,10 +46,22 @@ jobs:
 
       - name: Run broker socket integration tests
         run: |
-          python3 -m unittest \
-            tests.integration.test_github_broker_socket \
-            tests.integration.test_handover_broker_socket \
-            -v
+          socket_log=$(mktemp)
+          trap 'rm -f "$socket_log"' EXIT
+          if python3 -m unittest \
+              tests.integration.test_github_broker_socket \
+              tests.integration.test_handover_broker_socket \
+              tests.integration.test_egress_broker_socket \
+              -v 2>"$socket_log"; then
+            socket_status=0
+          else
+            socket_status=$?
+          fi
+          cat "$socket_log" >&2
+          if grep -F "ResourceWarning" "$socket_log"; then
+            exit 1
+          fi
+          test "$socket_status" -eq 0
         env:
           PYTHONPATH: src
           AGENT_CONTAINER_RUN_SOCKET_INTEGRATION: "1"
@@ -107,8 +119,12 @@ jobs:
           expected="$(PYTHONPATH=src python3 -c 'import agent_container; print(agent_container.__version__)')"
           test "$(podman run --rm "$BASE_IMAGE" python3 -m agent_container.agentctl --version)" = "agentctl $expected"
 
-      - name: Run real Podman integration test
-        run: python3 -m unittest tests.integration.test_project_image_podman -v
+      - name: Run real Podman integration tests
+        run: |
+          python3 -m unittest \
+            tests.integration.test_project_image_podman \
+            tests.integration.test_egress_podman \
+            -v
         env:
           PYTHONPATH: src
           AGENT_CONTAINER_RUN_PODMAN_INTEGRATION: "1"

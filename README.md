@@ -306,9 +306,17 @@ runtimeはrootless Podman、read-only root filesystem、capability削除、`no-n
 - [Phase 3 GitHub App broker operator guide](docs/phase3-github-broker.md)
 - [Phase 3実host smoke test](docs/phase3-github-broker-smoke-test.md)
 - [Phase 3 resource監視・cross-agent review](docs/phase3-resource-review.md)
+- [Runtime egress exact-domain allowlist](docs/egress-domain-allowlist.md)
+- [Runtime egress smoke test](docs/egress-domain-allowlist-smoke-test.md)
 - [設計文書](docs/superpowers/specs/2026-08-22-agent-container-design.md)
 - [Changelog](CHANGELOG.md)
 
 ## License
 
 GNU General Public License v3.0。詳細は[LICENSE](LICENSE)を参照してください。
+
+## Runtime egress allowlist
+
+通常のCodex/Claude runtimeにはproject単位のopt-inなexact-domain allowlistを設定できます。有効時はcontainerを`--network=none`で起動し、許可されたTCP 443のCONNECTだけをprivate host gatewayへ中継します。TLS plaintext、token、header、body、domain、IPはgateway auditへ記録しません。gateway、adapter、policyのどれかが失敗してもno fallbackで、通常networkへ再起動しません。
+
+build/auth/updateとproject登録はこの制限の対象外です。設定、rollback、`WARN`/`PASS`/`PARTIAL`/`FAIL`/`not run`の証拠基準は[運用ガイド](docs/egress-domain-allowlist.md)を参照してください。
