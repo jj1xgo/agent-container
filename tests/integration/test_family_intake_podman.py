@@ -162,13 +162,13 @@ def _start_runtime(runtime: FamilyIntakeRuntime) -> FamilyRuntimeMount:
         cause = error.__context__
         while cause is not None and len(details) < 4:
             traceback = cause.__traceback__
-            while traceback is not None and traceback.tb_next is not None:
+            locations = []
+            while traceback is not None:
+                locations.append(
+                    f"{traceback.tb_frame.f_code.co_name}:{traceback.tb_lineno}"
+                )
                 traceback = traceback.tb_next
-            location = (
-                f"{traceback.tb_frame.f_code.co_name}:{traceback.tb_lineno}"
-                if traceback is not None
-                else "unknown"
-            )
+            location = " -> ".join(locations) if locations else "unknown"
             if isinstance(cause, OSError):
                 summary = f"{type(cause).__name__}(errno={cause.errno})"
             elif isinstance(cause, ValueError):
