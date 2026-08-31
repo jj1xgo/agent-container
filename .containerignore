@@ -3,6 +3,7 @@
 !requirements-lint.txt
 !src/
 !src/**
+src/agent_container/family_state.py
 !profiles/
 !profiles/codex/
 !profiles/codex/**

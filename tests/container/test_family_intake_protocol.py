@@ -120,6 +120,35 @@ class FamilyIntakeProtocolTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             decode_request_frame(frame(payload))
 
+    def test_request_codec_requires_the_exact_validated_draft_payload(self) -> None:
+        valid = self._request().payload
+        invalid_payloads = (
+            {},
+            valid | {"repository": "private/repository"},
+            valid | {"unknown": True},
+            {key: value for key, value in valid.items() if key != "context"},
+            valid | {"title": "invalid\ncontrol"},
+            valid | {"summary": "x" * (2 * 1024 + 1)},
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                request = FamilyIntakeRequest(
+                    1, "issue_create_request", "capability", payload
+                )
+                with self.assertRaises(ValueError):
+                    encode_request_frame(request)
+
+                raw = json.dumps(
+                    {
+                        "version": 1,
+                        "operation": "issue_create_request",
+                        "capability": "capability",
+                        "payload": payload,
+                    }
+                ).encode()
+                with self.assertRaises(ValueError):
+                    decode_request_frame(frame(raw))
+
     def test_rejects_unknown_wrong_version_operation_status_and_trailing_frames(self) -> None:
         request = {
             "version": 1,

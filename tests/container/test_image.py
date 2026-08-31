@@ -305,6 +305,7 @@ class ContainerImageContractTest(unittest.TestCase):
                 "!requirements-lint.txt",
                 "!src/",
                 "!src/**",
+                "src/agent_container/family_state.py",
                 "!profiles/",
                 "!profiles/codex/",
                 "!profiles/codex/**",
@@ -351,6 +352,31 @@ class ContainerImageContractTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertFalse(containerignore_includes(path, patterns))
 
+    def test_effective_image_source_set_excludes_host_only_family_state(self) -> None:
+        patterns = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()
+        source_files = sorted((ROOT / "src/agent_container").glob("*.py"))
+        included = {
+            path.name
+            for path in source_files
+            if containerignore_includes(str(path.relative_to(ROOT)), patterns)
+        }
+
+        self.assertTrue(
+            {
+                "family_intake_client.py",
+                "family_intake_protocol.py",
+                "family_issue.py",
+            }.issubset(included)
+        )
+        self.assertNotIn("family_state.py", included)
+        image_source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in source_files
+            if path.name in included
+        )
+        self.assertNotIn("family_app_file", image_source)
+        self.assertNotIn("family_private_key_file", image_source)
+
     def test_containerignore_includes_every_tracked_copy_input(self) -> None:
         patterns = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()
         tracked = subprocess.run(
@@ -373,4 +399,7 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertTrue(tracked)
         for path in tracked:
             with self.subTest(path=path):
-                self.assertTrue(containerignore_includes(path, patterns))
+                if path == "src/agent_container/family_state.py":
+                    self.assertFalse(containerignore_includes(path, patterns))
+                else:
+                    self.assertTrue(containerignore_includes(path, patterns))

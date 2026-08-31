@@ -221,41 +221,6 @@ class StateLayout:
     def egress_broker_audit_file(self) -> Path:
         return self.egress_broker_root / "audit/events.jsonl"
 
-    @property
-    def family_root(self) -> Path:
-        return self.root / "family"
-
-    @property
-    def family_app_file(self) -> Path:
-        return self.family_root / "app.json"
-
-    @property
-    def family_private_key_file(self) -> Path:
-        return self.family_root / "private-key.pem"
-
-    @property
-    def family_project_dir(self) -> Path:
-        return self.family_root / "projects" / self.project_id
-
-    @property
-    def family_binding_file(self) -> Path:
-        return self.family_project_dir / "binding.json"
-
-    @property
-    def family_pending_dir(self) -> Path:
-        return self.family_project_dir / "pending"
-
-    @property
-    def family_audit_file(self) -> Path:
-        return self.family_project_dir / "audit" / "events.jsonl"
-
-    @property
-    def family_intake_run_root(self) -> Path:
-        return self.family_root / "intake" / "r" / github_broker_project_label(
-            self.project_id
-        )
-
-
 def ensure_private_directory(path: Path, create: bool = False) -> Path:
     if path.is_symlink():
         raise ValueError(f"directory must not be a symlink: {path}")

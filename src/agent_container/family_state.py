@@ -10,14 +10,63 @@ import stat
 from typing import Any
 
 from agent_container.github_broker_policy import validate_repository_id
+from agent_container.state import github_broker_project_label
 from agent_container.state import Repository
 from agent_container.state import ensure_private_directory
 from agent_container.state import ensure_private_file
+from agent_container.state import validate_project_id
 
 
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+
+@dataclass(frozen=True)
+class FamilyStateLayout:
+    """Host-only filesystem layout for family App and pending-request state."""
+
+    root: Path
+    project_id: str
+
+    def __post_init__(self) -> None:
+        if not self.root.is_absolute():
+            raise ValueError("family state root must be absolute")
+        object.__setattr__(self, "project_id", validate_project_id(self.project_id))
+
+    @property
+    def family_root(self) -> Path:
+        return self.root / "family"
+
+    @property
+    def family_app_file(self) -> Path:
+        return self.family_root / "app.json"
+
+    @property
+    def family_private_key_file(self) -> Path:
+        return self.family_root / "private-key.pem"
+
+    @property
+    def family_project_dir(self) -> Path:
+        return self.family_root / "projects" / self.project_id
+
+    @property
+    def family_binding_file(self) -> Path:
+        return self.family_project_dir / "binding.json"
+
+    @property
+    def family_pending_dir(self) -> Path:
+        return self.family_project_dir / "pending"
+
+    @property
+    def family_audit_file(self) -> Path:
+        return self.family_project_dir / "audit" / "events.jsonl"
+
+    @property
+    def family_intake_run_root(self) -> Path:
+        return self.family_root / "intake" / "r" / github_broker_project_label(
+            self.project_id
+        )
 
 
 @dataclass(frozen=True)

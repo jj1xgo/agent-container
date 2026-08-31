@@ -33,6 +33,12 @@ class Duplex:
         self.closed = True
 
 
+class FailingCloseDuplex(Duplex):
+    def close(self) -> None:
+        self.closed = True
+        raise OSError("stream close failed")
+
+
 class FakeSocket:
     def __init__(self, stream: Duplex, *, error: OSError | None = None) -> None:
         self.stream = stream
@@ -164,6 +170,51 @@ class FamilyIntakeClientTest(unittest.TestCase):
                 socket_factory=lambda family, kind: fake_socket,
             )
         self.assertNotIn("private-capability-marker", str(raised.exception))
+        self.assertTrue(fake_socket.closed)
+
+    def test_create_rejects_noncanonical_raw_socket_environment_without_connecting(self) -> None:
+        arguments = [
+            "issue", "create", "--title", "title", "--summary", "summary",
+            "--context", "context", "--acceptance-criterion", "criterion",
+        ]
+        for socket_value in (
+            "relative.sock",
+            "/run//agent-family/intake.sock",
+            "/run/./agent-family/intake.sock",
+            "//run/agent-family/intake.sock",
+            "/run/agent-family/intake.sock/",
+            "/run/agent-family/../intake.sock",
+            "/run/agent-family/\x00intake.sock",
+            "/run/agent-family/\nintake.sock",
+            "/run/agent-family/\x85intake.sock",
+        ):
+            with self.subTest(socket_value=repr(socket_value)):
+                connector = mock.Mock()
+                with self.assertRaises(ValueError):
+                    run_create(
+                        arguments,
+                        environment={
+                            "AGENT_FAMILY_SOCKET": socket_value,
+                            "AGENT_FAMILY_CAPABILITY": "capability",
+                        },
+                        connector=connector,
+                    )
+                connector.assert_not_called()
+
+    def test_connector_closes_socket_when_stream_close_raises(self) -> None:
+        stream = FailingCloseDuplex(
+            encode_response_frame(FamilyIntakeResponse(1, "pending", "request-123", 1))
+        )
+        fake_socket = FakeSocket(stream)
+
+        with self.assertRaisesRegex(OSError, "stream close failed"):
+            connect_family_intake(
+                self._request(),
+                Path("/run/agent-family/intake.sock"),
+                socket_factory=lambda family, kind: fake_socket,
+            )
+
+        self.assertTrue(stream.closed)
         self.assertTrue(fake_socket.closed)
 
     def test_cli_emits_only_pending_receipt_and_fixed_errors_without_private_values(self) -> None:

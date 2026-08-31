@@ -5,6 +5,8 @@ import json
 import struct
 from typing import Any, BinaryIO
 
+from agent_container.family_issue import parse_family_issue_draft
+
 
 PROTOCOL_VERSION = 1
 MAX_REQUEST_BYTES = 16_384
@@ -72,7 +74,14 @@ def _validate_request(request: object) -> FamilyIntakeRequest:
     capability = _validate_text(request.capability)
     if operation != _REQUEST_OPERATION or type(request.payload) is not dict:
         raise ValueError("family intake request schema is invalid")
-    return FamilyIntakeRequest(version, operation, capability, request.payload)
+    draft = parse_family_issue_draft(request.payload)
+    payload = {
+        "title": draft.title,
+        "summary": draft.summary,
+        "context": draft.context,
+        "acceptance_criteria": list(draft.acceptance_criteria),
+    }
+    return FamilyIntakeRequest(version, operation, capability, payload)
 
 
 def _validate_response(response: object) -> FamilyIntakeResponse:

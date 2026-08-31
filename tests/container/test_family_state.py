@@ -9,9 +9,42 @@ from unittest.mock import patch
 
 import agent_container.family_state as family_state
 from agent_container.family_state import FamilyBinding
+from agent_container.family_state import FamilyStateLayout
 from agent_container.family_state import load_family_binding
 from agent_container.family_state import write_family_binding
 from agent_container.state import Repository
+
+
+class FamilyStateLayoutTest(unittest.TestCase):
+    def test_host_only_layout_owns_all_family_app_and_pending_paths(self) -> None:
+        layout = FamilyStateLayout(Path("/state"), "agent-container")
+
+        self.assertEqual(layout.family_root, Path("/state/family"))
+        self.assertEqual(layout.family_app_file, Path("/state/family/app.json"))
+        self.assertEqual(
+            layout.family_private_key_file,
+            Path("/state/family/private-key.pem"),
+        )
+        self.assertEqual(
+            layout.family_project_dir,
+            Path("/state/family/projects/agent-container"),
+        )
+        self.assertEqual(
+            layout.family_binding_file,
+            Path("/state/family/projects/agent-container/binding.json"),
+        )
+        self.assertEqual(
+            layout.family_pending_dir,
+            Path("/state/family/projects/agent-container/pending"),
+        )
+        self.assertEqual(
+            layout.family_audit_file,
+            Path("/state/family/projects/agent-container/audit/events.jsonl"),
+        )
+        self.assertEqual(
+            layout.family_intake_run_root,
+            Path("/state/family/intake/r/1f630d4dd972"),
+        )
 
 
 class FamilyBindingTest(unittest.TestCase):

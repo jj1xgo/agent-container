@@ -41,10 +41,22 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _exact_socket_path(path: Path) -> Path:
-    if not path.is_absolute() or str(path) != os.path.abspath(str(path)):
+def _exact_socket_path(value: object) -> Path:
+    if (
+        type(value) is not str
+        or not value.startswith("/")
+        or value.startswith("//")
+        or value.endswith("/")
+        or any(
+            ord(character) < 32 or 0x7F <= ord(character) <= 0x9F
+            for character in value
+        )
+    ):
         raise ValueError("family intake socket is invalid")
-    return path
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts[1:]):
+        raise ValueError("family intake socket is invalid")
+    return Path(value)
 
 
 def connect_family_intake(
@@ -53,7 +65,7 @@ def connect_family_intake(
     *,
     socket_factory: Callable[[int, int], socket.socket] = socket.socket,
 ) -> FamilyIntakeResponse:
-    socket_path = _exact_socket_path(socket_path)
+    socket_path = _exact_socket_path(str(socket_path))
     client = socket_factory(socket.AF_UNIX, socket.SOCK_STREAM)
     stream = None
     try:
@@ -70,9 +82,11 @@ def connect_family_intake(
             raise ValueError("family intake response is invalid")
         return response
     finally:
-        if stream is not None:
-            stream.close()
-        client.close()
+        try:
+            if stream is not None:
+                stream.close()
+        finally:
+            client.close()
 
 
 def run_create(
@@ -91,7 +105,7 @@ def run_create(
         "acceptance_criteria": options.acceptance_criteria,
     }
     parse_family_issue_draft(payload)
-    socket_path = _exact_socket_path(Path(environment.get("AGENT_FAMILY_SOCKET", "")))
+    socket_path = _exact_socket_path(environment.get("AGENT_FAMILY_SOCKET", ""))
     capability = environment.get("AGENT_FAMILY_CAPABILITY", "")
     request: FamilyIntakeRequest | None = None
     try:
