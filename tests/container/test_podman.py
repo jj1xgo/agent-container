@@ -68,9 +68,6 @@ class PodmanCommandTest(unittest.TestCase):
                 socket_path,
                 getattr(os, "O_PATH", os.O_RDONLY) | os.O_NOFOLLOW,
             )
-            family = mock.create_autospec(FamilyIntakeRuntime, instance=True)
-            mount = mock.create_autospec(FamilyRuntimeMount, instance=True)
-            mount.container_name = "agent-family-safe"
             try:
                 self.assertTrue(stat.S_ISSOCK(os.fstat(descriptor).st_mode))
                 with self.assertRaises((NotADirectoryError, OSError)):
@@ -83,8 +80,8 @@ class PodmanCommandTest(unittest.TestCase):
                     ),
                     None,
                     None,
-                    family,
-                    mount,
+                    None,
+                    None,
                 )
             finally:
                 os.close(descriptor)
