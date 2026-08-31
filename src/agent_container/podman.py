@@ -311,40 +311,25 @@ def _wait_for_container_pid(
     process: subprocess.Popen[str],
 ) -> int:
     deadline = time.monotonic() + 10
-    observation = "pidfile missing"
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError(
-                "family runtime launch handoff failed: "
-                f"podman exited after {observation}"
-            )
+            raise RuntimeError("podman exited before family registration")
         try:
             rendered_pid = pidfile.read_text("ascii").strip()
-        except OSError:
-            observation = "pidfile missing"
-            time.sleep(0.05)
-            continue
-        except UnicodeError:
+        except (OSError, UnicodeError):
             rendered_pid = ""
-        if not rendered_pid.isdigit() or int(rendered_pid) <= 0:
-            observation = "pidfile invalid"
-            time.sleep(0.05)
-            continue
-        pid = int(rendered_pid)
-        try:
-            process_stat = Path(f"/proc/{pid}/stat").read_text("ascii")
-        except OSError:
-            observation = "process state unavailable"
-        except UnicodeError:
-            observation = "process state invalid"
-        else:
-            closing = process_stat.rfind(")")
-            if closing < 0 or len(process_stat) < closing + 3:
-                observation = "process state invalid"
+        if rendered_pid.isdigit() and int(rendered_pid) > 0:
+            pid = int(rendered_pid)
+            try:
+                process_stat = Path(f"/proc/{pid}/stat").read_text("ascii")
+            except (OSError, UnicodeError):
+                pass
             else:
-                return pid
+                closing = process_stat.rfind(")")
+                if closing >= 0 and len(process_stat) >= closing + 3:
+                    return pid
         time.sleep(0.05)
-    raise RuntimeError(f"family runtime launch handoff failed: {observation}")
+    raise RuntimeError("family runtime pid unavailable")
 
 
 def build_image_spec(

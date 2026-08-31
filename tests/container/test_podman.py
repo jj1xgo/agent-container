@@ -119,7 +119,7 @@ class PodmanCommandTest(unittest.TestCase):
 
         self.assertEqual(pid, 123)
 
-    def test_family_handoff_reports_podman_early_exit(self) -> None:
+    def test_family_pid_wait_reports_safe_podman_exit_stage(self) -> None:
         process = mock.Mock()
         process.poll.side_effect = [None, 125]
 
@@ -128,31 +128,33 @@ class PodmanCommandTest(unittest.TestCase):
         ), mock.patch(
             "agent_container.podman.time.monotonic", side_effect=[0, 0, 0]
         ), mock.patch("agent_container.podman.time.sleep"), self.assertRaisesRegex(
-            RuntimeError, "podman exited after pidfile missing"
+            RuntimeError, "podman exited before family registration"
         ):
             _wait_for_container_pid(Path("/secret/container.pid"), process)
 
-    def test_family_handoff_timeout_reports_last_safe_observation(self) -> None:
+    def test_family_pid_wait_reports_safe_unavailable_stage(self) -> None:
         class Process:
             def poll(self):
                 return None
 
         cases = (
-            (FileNotFoundError(), "pidfile missing"),
-            ("not-a-pid", "pidfile invalid"),
+            FileNotFoundError(),
+            "not-a-pid",
         )
-        for pidfile_result, expected in cases:
-            with self.subTest(expected=expected), mock.patch.object(
+        for pidfile_result in cases:
+            with self.subTest(pidfile_result=pidfile_result), mock.patch.object(
                 Path, "read_text", side_effect=[pidfile_result]
             ), mock.patch(
                 "agent_container.podman.time.monotonic", side_effect=[0, 0, 11]
             ), mock.patch("agent_container.podman.time.sleep"):
-                with self.assertRaisesRegex(RuntimeError, expected):
+                with self.assertRaisesRegex(
+                    RuntimeError, "family runtime pid unavailable"
+                ):
                     _wait_for_container_pid(
                         Path("/secret/container.pid"), Process()
                     )
 
-    def test_family_handoff_timeout_reports_unreadable_process_state(self) -> None:
+    def test_family_pid_wait_does_not_render_pid_or_path(self) -> None:
         class Process:
             def poll(self):
                 return None
@@ -164,7 +166,7 @@ class PodmanCommandTest(unittest.TestCase):
         ), mock.patch(
             "agent_container.podman.time.monotonic", side_effect=[0, 0, 11]
         ), mock.patch("agent_container.podman.time.sleep"), self.assertRaisesRegex(
-            RuntimeError, "process state unavailable"
+            RuntimeError, "family runtime pid unavailable"
         ) as raised:
             _wait_for_container_pid(Path("/secret/container.pid"), Process())
 

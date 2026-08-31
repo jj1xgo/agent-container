@@ -417,7 +417,16 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
             image_index = spec.argv.index("image")
             self.assertEqual(
                 spec.argv[image_index + 1 : image_index + 4],
-                ("agent-runtime-launcher", "--registration-stop", "--"),
+                ("agent-runtime-launcher", "--registration-gate", "--"),
+            )
+            self.assertFalse(
+                any(
+                    argument.startswith("--registration-gate-fd=")
+                    for argument in spec.argv
+                )
+            )
+            self.assertFalse(
+                any(argument.startswith("--preserve-fd=") for argument in spec.argv)
             )
             if "agent-egress-runtime" in spec.argv:
                 self.assertGreater(
@@ -509,15 +518,6 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                 os.close(sentinel_descriptor)
                 runtime = FamilyIntakeRuntime.create(layout)
                 mount = runtime.start()
-                process_reads = []
-                assert runtime.session is not None
-                process_reader = runtime.session.process_reader
-
-                def record_process_read(pid):
-                    process_reads.append(pid)
-                    return process_reader(pid)
-
-                runtime.session.process_reader = record_process_read
                 inspector = None
                 marker_paths = ()
                 try:
@@ -588,16 +588,10 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     inspector = threading.Thread(target=inspect_running_container)
                     inspector.start()
                     try:
-                        try:
-                            completed = run_command_supervised(
-                                CommandSpec(argv, {}, base.pass_fds),
-                                None, egress, runtime, mount,
-                            )
-                        except (RuntimeError, subprocess.CalledProcessError) as error:
-                            raise AssertionError(
-                                "family peer validation process reads: "
-                                + str(len(process_reads))
-                            ) from error
+                        completed = run_command_supervised(
+                            CommandSpec(argv, {}, base.pass_fds),
+                            None, egress, runtime, mount,
+                        )
                     finally:
                         _release_marker(done_marker)
                         inspector.join(timeout=10)
