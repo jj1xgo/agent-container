@@ -305,6 +305,7 @@ class ContainerImageContractTest(unittest.TestCase):
                 "!requirements-lint.txt",
                 "!src/",
                 "!src/**",
+                "src/agent_container/family_cli.py",
                 "src/agent_container/family_github_app.py",
                 "src/agent_container/family_issue_create.py",
                 "src/agent_container/family_state.py",
@@ -372,6 +373,7 @@ class ContainerImageContractTest(unittest.TestCase):
         )
         self.assertEqual(
             {
+                "src/agent_container/family_cli.py",
                 "src/agent_container/family_github_app.py",
                 "src/agent_container/family_state.py",
             }
@@ -410,6 +412,7 @@ class ContainerImageContractTest(unittest.TestCase):
         for path in tracked:
             with self.subTest(path=path):
                 if path in {
+                    "src/agent_container/family_cli.py",
                     "src/agent_container/family_github_app.py",
                     "src/agent_container/family_issue_create.py",
                     "src/agent_container/family_state.py",

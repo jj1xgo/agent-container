@@ -366,7 +366,12 @@ def _open_binding_lock(parent_descriptor: int, binding_name: str) -> int:
         raise
 
 
-def write_family_binding(path: Path, binding: FamilyBinding) -> None:
+def write_family_binding(
+    path: Path,
+    binding: FamilyBinding,
+    *,
+    replace_existing: bool = True,
+) -> None:
     body = _encode_binding(binding)
     parent_descriptor = _open_private_parent(path)
     lock_descriptor: int | None = None
@@ -385,6 +390,8 @@ def write_family_binding(path: Path, binding: FamilyBinding) -> None:
                 original = None
             else:
                 raise error
+        if original is not None and not replace_existing:
+            raise FileExistsError("family binding already exists")
         temporary = _temporary_name(path.name)
         descriptor = os.open(
             temporary,

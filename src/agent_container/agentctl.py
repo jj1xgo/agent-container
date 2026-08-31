@@ -147,6 +147,20 @@ def _positive_repository_id(value: str) -> int:
     return parsed
 
 
+def _positive_issue_number(value: str) -> int:
+    if (
+        len(value) > 10
+        or not value.isascii()
+        or not value.isdecimal()
+        or value.startswith("0")
+    ):
+        raise argparse.ArgumentTypeError("issue number must be a positive integer")
+    parsed = int(value)
+    if parsed > 2_147_483_647:
+        raise argparse.ArgumentTypeError("issue number must be a positive integer")
+    return parsed
+
+
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog="agentctl")
     command.add_argument(
@@ -204,6 +218,29 @@ def parser() -> argparse.ArgumentParser:
     migrate.add_argument("--from", dest="source", type=Path, required=True)
     migrate.add_argument("--plugin", dest="plugins", action="append", default=[])
     migrate.add_argument("--apply", action="store_true")
+    family = subcommands.add_parser("family")
+    family_subcommands = family.add_subparsers(dest="family_command", required=True)
+    family_bind = family_subcommands.add_parser("bind")
+    family_bind.add_argument("project")
+    family_bind.add_argument("repository")
+    family_list = family_subcommands.add_parser("list")
+    family_list.add_argument("project")
+    family_doctor = family_subcommands.add_parser("doctor")
+    family_doctor.add_argument("project")
+    family_issue = family_subcommands.add_parser("issue")
+    family_issue_subcommands = family_issue.add_subparsers(
+        dest="family_issue_command", required=True
+    )
+    family_pending = family_issue_subcommands.add_parser("pending")
+    family_pending.add_argument("project")
+    for operation in ("preview", "approve", "reject", "resolve-not-created"):
+        action = family_issue_subcommands.add_parser(operation)
+        action.add_argument("project")
+        action.add_argument("request_id")
+    family_resolve_created = family_issue_subcommands.add_parser("resolve-created")
+    family_resolve_created.add_argument("project")
+    family_resolve_created.add_argument("request_id")
+    family_resolve_created.add_argument("issue_number", type=_positive_issue_number)
     return command
 
 
@@ -1297,6 +1334,33 @@ def _run_with_egress_supervision(
     return results[0]
 
 
+def _approve_family_issue(
+    layout,
+    request_id: str,
+    *,
+    provider_factory: Callable,
+    inventory,
+    creator,
+    stdin: TextIO,
+    stdout: TextIO,
+    now: int,
+) -> int:
+    """Run one host-approved Issue creation with explicit operator streams."""
+
+    from agent_container.family_cli import approve_family_issue
+
+    return approve_family_issue(
+        layout,
+        request_id,
+        provider_factory=provider_factory,
+        inventory=inventory,
+        creator=creator,
+        stdin=stdin,
+        stdout=stdout,
+        now=now,
+    )
+
+
 def main(
     argv: list[str] | None = None,
     environment: Mapping[str, str] | None = None,
@@ -1310,6 +1374,10 @@ def main(
     runtime_spec_builders: Mapping[str, RuntimeSpecBuilder] | None = None,
     cachebuster_reader: Callable[[], str] = read_cachebuster,
     token_reader: Callable[[str], str] | None = None,
+    family_token_provider_factory: Callable | None = None,
+    family_inventory: object | None = None,
+    family_creator: object | None = None,
+    family_clock: Callable[[], int] | None = None,
 ) -> int:
     try:
         arguments = parser().parse_args(argv)
@@ -1352,7 +1420,41 @@ def main(
             validate_project_id(arguments.project)
             for plugin in arguments.plugins:
                 validate_plugin_identifier(plugin)
+        elif arguments.command == "family":
+            validate_project_id(arguments.project)
         repository_root = Path(__file__).resolve().parents[2]
+        if arguments.command == "family":
+            try:
+                from agent_container.family_cli import dispatch_family
+                from agent_container.family_state import FamilyStateLayout
+
+                state_layout = StateLayout.from_environment(
+                    arguments.project, environment
+                )
+                _ensure_exact_state_root(state_layout, environment)
+                for directory in (
+                    state_layout.root,
+                    state_layout.project_dir.parent,
+                    state_layout.project_dir,
+                ):
+                    ensure_private_directory(directory)
+                _read_runtime_project(state_layout.project_file)
+                family_layout = FamilyStateLayout(
+                    state_layout.root, state_layout.project_id
+                )
+                return dispatch_family(
+                    arguments,
+                    family_layout,
+                    stdin=stdin,
+                    stdout=stdout,
+                    provider_factory=family_token_provider_factory,
+                    inventory=family_inventory,
+                    creator=family_creator,
+                    now=(family_clock or (lambda: int(time.time())))(),
+                    approval_handler=_approve_family_issue,
+                )
+            except Exception:
+                raise ValueError("family command failed") from None
         if arguments.command == "build":
             _podman_preflight(runner)
             runner(
