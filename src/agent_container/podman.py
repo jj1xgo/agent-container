@@ -293,7 +293,8 @@ def _wait_for_stopped_container(
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(
-                "family runtime launch handoff failed: podman exited"
+                "family runtime launch handoff failed: "
+                f"podman exited after {observation}"
             )
         try:
             rendered_pid = pidfile.read_text("ascii").strip()

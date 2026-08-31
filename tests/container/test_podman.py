@@ -52,11 +52,15 @@ HANDOVER_BROKER = HandoverRuntimeMount(Path("/state/handover-broker/one"))
 class PodmanCommandTest(unittest.TestCase):
     def test_family_handoff_reports_podman_early_exit(self) -> None:
         process = mock.Mock()
-        process.poll.return_value = 125
+        process.poll.side_effect = [None, 125]
 
-        with mock.patch(
-            "agent_container.podman.time.monotonic", side_effect=[0, 0]
-        ), self.assertRaisesRegex(RuntimeError, "podman exited"):
+        with mock.patch.object(
+            Path, "read_text", side_effect=FileNotFoundError()
+        ), mock.patch(
+            "agent_container.podman.time.monotonic", side_effect=[0, 0, 0]
+        ), mock.patch("agent_container.podman.time.sleep"), self.assertRaisesRegex(
+            RuntimeError, "podman exited after pidfile missing"
+        ):
             _wait_for_stopped_container(Path("/secret/container.pid"), process)
 
     def test_family_handoff_timeout_reports_last_safe_observation(self) -> None:
