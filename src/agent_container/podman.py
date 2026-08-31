@@ -247,7 +247,7 @@ def _family_runtime_args(
         "AGENT_FAMILY_CAPABILITY": family.capability,
     }
     preserved_fds = family.pass_fds
-    if len(preserved_fds) != 1 or preserved_fds[0] < 3:
+    if preserved_fds:
         raise ValueError("family runtime mount is invalid")
     if (
         not socket_dir.is_absolute()
@@ -259,7 +259,6 @@ def _family_runtime_args(
         raise ValueError("family runtime mount is invalid")
     family.revalidate()
     arguments = [
-        f"--preserve-fd={preserved_fds[0]}",
         "--mount",
         _mount(family.mount_source, _FAMILY_SOCKET_TARGET),
         "--env",
@@ -276,7 +275,7 @@ def _runtime_launcher_args(
     family: FamilyRuntimeMount | None,
 ) -> list[str]:
     arguments = [_RUNTIME_LAUNCHER]
-    if family is not None:
+    if family is not None and family.pass_fds:
         arguments.append(f"--close-fd={family.pass_fds[0]}")
     arguments.append("--")
     return arguments

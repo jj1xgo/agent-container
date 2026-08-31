@@ -1,5 +1,4 @@
 import ast
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -196,17 +195,8 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
                 "AGENT_FAMILY_CAPABILITY",
             })
             self.assertFalse(runtime.session.consumed)
-            self.assertEqual(len(mount.pass_fds), 1)
-            self.assertGreaterEqual(mount.pass_fds[0], 3)
-            self.assertTrue(
-                fcntl.fcntl(mount.pass_fds[0], fcntl.F_GETFD)
-                & fcntl.FD_CLOEXEC
-            )
-            self.assertTrue(stat.S_ISDIR(os.fstat(mount.pass_fds[0]).st_mode))
-            self.assertEqual(
-                mount.mount_source,
-                Path(f"/proc/self/fd/{mount.pass_fds[0]}/intake.sock"),
-            )
+            self.assertEqual(mount.pass_fds, ())
+            self.assertEqual(mount.mount_source, mount.socket_path)
 
         self.assertFalse(run_dir.exists())
         runtime.close()

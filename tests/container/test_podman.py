@@ -278,7 +278,7 @@ class PodmanCommandTest(unittest.TestCase):
             with self.subTest(agent=spec.argv[-1]):
                 self.assertEqual(
                     spec.argv.count(
-                        "type=bind,src=/proc/self/fd/77/intake.sock,"
+                        f"type=bind,src={run_dir}/intake.sock,"
                         "dst=/run/agent-family/intake.sock"
                     ),
                     1,
@@ -292,11 +292,8 @@ class PodmanCommandTest(unittest.TestCase):
                 self.assertEqual(
                     spec.argv.count(f"AGENT_FAMILY_CAPABILITY={capability}"), 1
                 )
-                self.assertEqual(spec.argv.count("--preserve-fd=77"), 1)
-                self.assertEqual(spec.pass_fds, (77,))
-                self.assertLess(
-                    spec.argv.index("--preserve-fd=77"), spec.argv.index(IMAGE)
-                )
+                self.assertNotIn("--preserve-fd=77", spec.argv)
+                self.assertEqual(spec.pass_fds, ())
                 rendered = " ".join(spec.argv)
                 for forbidden in (
                     "family/app.json", "private-key", "installation-token",

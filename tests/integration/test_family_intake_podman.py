@@ -405,25 +405,23 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
                 ),
             )
         for spec in specs:
-            self.assertEqual(spec.pass_fds, (77,))
-            self.assertEqual(spec.argv.count("--preserve-fd=77"), 1)
+            self.assertEqual(spec.pass_fds, ())
+            self.assertNotIn("--preserve-fd=77", spec.argv)
             self.assertEqual(
                 spec.argv.count(
-                    "type=bind,src=/proc/self/fd/77/intake.sock,"
+                    f"type=bind,src={mount.socket_path},"
                     "dst=/run/agent-family/intake.sock"
                 ),
                 1,
             )
-            self.assertLess(spec.argv.index("--preserve-fd=77"), spec.argv.index("image"))
-            self.assertNotIn(78, spec.pass_fds)
             image_index = spec.argv.index("image")
             self.assertEqual(
-                spec.argv[image_index + 1 : image_index + 4],
-                ("agent-runtime-launcher", "--close-fd=77", "--"),
+                spec.argv[image_index + 1 : image_index + 3],
+                ("agent-runtime-launcher", "--"),
             )
             if "agent-egress-runtime" in spec.argv:
                 self.assertGreater(
-                    spec.argv.index("agent-egress-runtime"), image_index + 3
+                    spec.argv.index("agent-egress-runtime"), image_index + 2
                 )
 
 
@@ -530,10 +528,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                         state.workspace, marker_id
                     )
                     marker_paths = (ready_marker, done_marker)
-                    payload = (
-                        f"test ! -e /proc/self/fd/{mount.pass_fds[0]}; "
-                        + _probe_script(marker_id, sentinel_name)
-                    )
+                    payload = _probe_script(marker_id, sentinel_name)
                     egress = None
                     if with_egress:
                         egress_dir = root / "egress-fixture" / agent

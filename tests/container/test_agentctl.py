@@ -2131,7 +2131,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 self.assertIs(observed_mount, mount)
                 events.append(("supervise", gateway, egress, runtime))
                 joined = " ".join(spec.argv)
-                self.assertIn("/proc/self/fd/77/intake.sock", joined)
+                self.assertIn(str(run_dir / "intake.sock"), joined)
                 self.assertNotIn("family/roadmap", joined)
                 return subprocess.CompletedProcess(spec.argv, 0)
 
