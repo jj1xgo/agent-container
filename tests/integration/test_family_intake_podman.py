@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import subprocess
 import threading
@@ -26,10 +27,16 @@ from agent_container.podman import run_command_supervised
 from agent_container.state import Repository
 from agent_container.state import StateLayout
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
+from agent_container.egress_broker_runtime import EgressRuntimeMount
 
 
 _IMAGE = os.environ.get("AGENT_FAMILY_TEST_IMAGE", "")
-_PROBE_SCRIPT = (
+def _probe_script(marker_id: str) -> str:
+    if re.fullmatch(r"[0-9a-f]{16}", marker_id) is None:
+        raise ValueError("inspection marker id is invalid")
+    ready = f"/workspace/.family-inspect-{marker_id}-ready"
+    done = f"/workspace/.family-inspect-{marker_id}-done"
+    return (
     "set -eu; "
     "test \"$(env | grep -c '^AGENT_FAMILY_')\" -eq 2; "
     "! env | grep -E 'family/roadmap|repository_id|private-key|token'; "
@@ -37,36 +44,65 @@ _PROBE_SCRIPT = (
     "! find / -xdev -name 'private-key.pem' -print 2>/dev/null | grep .; "
     "agent-family issue create --title T --summary S "
     "--context C --acceptance-criterion A; "
-    ": > /run/agent-family/inspect-ready; "
-    "deadline=100; while ! test -e /run/agent-family/inspect-done; do "
+    f": > {ready}; "
+    f"deadline=100; while ! test -e {done}; do "
     "deadline=$((deadline - 1)); test \"$deadline\" -gt 0 || exit 92; "
     "sleep 0.05; done; "
-    "rm -f /run/agent-family/inspect-ready /run/agent-family/inspect-done; "
+    f"rm -f {ready} {done}; "
     "if agent-family issue create --title T --summary S "
     "--context C --acceptance-criterion A >/tmp/second 2>&1; "
     "then exit 91; fi"
-)
+    )
+
+
+_PROBE_SCRIPT = _probe_script("0123456789abcdef")
+
+
+def _marker_paths(workspace: Path, marker_id: str) -> tuple[Path, Path]:
+    if not workspace.is_absolute() or workspace.is_symlink():
+        raise ValueError("inspection workspace is invalid")
+    _probe_script(marker_id)
+    paths = tuple(
+        workspace / f".family-inspect-{marker_id}-{suffix}"
+        for suffix in ("ready", "done")
+    )
+    for path in paths:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        raise ValueError("inspection marker collision")
+    return paths
+
+
+def _marker_exists(path: Path) -> bool:
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _release_marker(path: Path) -> None:
+    if _marker_exists(path):
+        return
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600,
+    )
+    os.close(descriptor)
 
 
 def _podman_prerequisite() -> str | None:
+    if any(os.environ.get(name) for name in ("CONTAINER_HOST", "CONTAINER_CONNECTION")):
+        return "a local (non-remote) Podman service is required"
     if shutil.which("podman") is None:
         return "rootless Podman executable is unavailable"
     try:
         version = subprocess.run(
             ("podman", "--version"), text=True, capture_output=True,
             check=False, timeout=5,
-        )
-        probe = subprocess.run(
-            ("podman", "info", "--format", "{{.Host.Security.Rootless}}"),
-            text=True, capture_output=True, check=False, timeout=5,
-        )
-        runtime = subprocess.run(
-            ("podman", "info", "--format", "{{.Host.OCIRuntime.Name}}"),
-            text=True, capture_output=True, check=False, timeout=5,
-        )
-        connections = subprocess.run(
-            ("podman", "system", "connection", "list", "--format", "json"),
-            text=True, capture_output=True, check=False, timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
         return "Podman prerequisite probes did not complete"
@@ -78,10 +114,31 @@ def _podman_prerequisite() -> str | None:
         int(match.group(1)), int(match.group(2))
     ) < (5, 8):
         return "local Podman 5.8 or newer is required"
+    try:
+        probe = subprocess.run(
+            ("podman", "info", "--format", "{{.Host.Security.Rootless}}"),
+            text=True, capture_output=True, check=False, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "Podman prerequisite probes did not complete"
     if probe.returncode != 0 or probe.stdout.strip() != "true":
         return "a working rootless Podman service is unavailable"
+    try:
+        runtime = subprocess.run(
+            ("podman", "info", "--format", "{{.Host.OCIRuntime.Name}}"),
+            text=True, capture_output=True, check=False, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "Podman prerequisite probes did not complete"
     if runtime.returncode != 0 or runtime.stdout.strip() != "crun":
         return "the local crun OCI runtime is required"
+    try:
+        connections = subprocess.run(
+            ("podman", "system", "connection", "list", "--format", "json"),
+            text=True, capture_output=True, check=False, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "Podman prerequisite probes did not complete"
     try:
         decoded = json.loads(connections.stdout)
     except (json.JSONDecodeError, TypeError):
@@ -110,6 +167,42 @@ _MISSING = _podman_prerequisite()
 
 
 class FamilyIntakePodmanFixtureTest(unittest.TestCase):
+    def test_remote_environment_skips_before_any_podman_probe(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"CONTAINER_HOST": "ssh://example.invalid/run/podman.sock"},
+            clear=True,
+        ), mock.patch("shutil.which") as which, mock.patch(
+            "subprocess.run"
+        ) as run:
+            reason = _podman_prerequisite()
+        self.assertEqual(reason, "a local (non-remote) Podman service is required")
+        which.assert_not_called()
+        run.assert_not_called()
+
+    def test_old_podman_stops_prerequisite_probes_at_version(self) -> None:
+        version = subprocess.CompletedProcess(
+            ("podman", "--version"), 0, stdout="podman version 5.7.9\n"
+        )
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
+            "shutil.which", return_value="/usr/bin/podman"
+        ), mock.patch("subprocess.run", return_value=version) as run:
+            reason = _podman_prerequisite()
+        self.assertEqual(reason, "local Podman 5.8 or newer is required")
+        self.assertEqual(run.call_count, 1)
+
+    def test_marker_paths_are_unique_workspace_local_and_reject_collisions(self) -> None:
+        with TemporaryDirectory() as temp:
+            workspace = Path(temp).resolve()
+            ready, done = _marker_paths(workspace, "fedcba9876543210")
+            self.assertEqual(ready.parent, workspace)
+            self.assertEqual(done.parent, workspace)
+            outside = workspace / "outside"
+            outside.write_text("x", encoding="ascii")
+            ready.symlink_to(outside)
+            with self.assertRaisesRegex(ValueError, "collision"):
+                _marker_paths(workspace, "fedcba9876543210")
+
     def test_instrumented_script_is_strict_and_shell_syntax_is_valid(self) -> None:
         checked = subprocess.run(
             ("/bin/sh", "-n", "-c", _PROBE_SCRIPT),
@@ -121,8 +214,10 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
         self.assertEqual((checked.returncode, checked.stderr), (0, ""))
         self.assertTrue(_PROBE_SCRIPT.startswith("set -eu;"))
         self.assertIn("if agent-family issue create", _PROBE_SCRIPT)
-        self.assertIn("inspect-ready", _PROBE_SCRIPT)
-        self.assertIn("inspect-done", _PROBE_SCRIPT)
+        self.assertIn("-ready", _PROBE_SCRIPT)
+        self.assertIn("-done", _PROBE_SCRIPT)
+        self.assertIn("/workspace/.family-inspect-", _PROBE_SCRIPT)
+        self.assertNotIn("/run/agent-family/inspect", _PROBE_SCRIPT)
         self.assertNotIn("; test $?", _PROBE_SCRIPT)
         self.assertNotIn("sleep 2", _PROBE_SCRIPT)
         self.assertIn("deadline=", _PROBE_SCRIPT)
@@ -147,6 +242,12 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
         object.__setattr__(mount, "_directory_descriptor", 77)
         object.__setattr__(mount, "_socket_descriptor", 78)
         with mock.patch.object(type(mount), "revalidate"):
+            egress_codex = EgressRuntimeMount(
+                Path("/state/egress/codex"), "demo", "codex"
+            )
+            egress_claude = EgressRuntimeMount(
+                Path("/state/egress/claude"), "demo", "claude"
+            )
             specs = (
                 run_codex_spec(
                     state, Path("/handover/demo"), "image", os.getuid(),
@@ -156,6 +257,15 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
                     state, Path("/handover/demo"), "image", os.getuid(),
                     os.getgid(), HandoverRuntimeMount(Path("/handover/broker")),
                     family_mount=mount,
+                ),
+                run_codex_spec(
+                    state, Path("/handover/demo"), "image", os.getuid(),
+                    os.getgid(), family_mount=mount, egress=egress_codex,
+                ),
+                run_claude_spec(
+                    state, Path("/handover/demo"), "image", os.getuid(),
+                    os.getgid(), HandoverRuntimeMount(Path("/handover/broker")),
+                    family_mount=mount, egress=egress_claude,
                 ),
             )
         for spec in specs:
@@ -169,6 +279,16 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
                 1,
             )
             self.assertLess(spec.argv.index("--preserve-fd=78"), spec.argv.index("image"))
+            self.assertNotIn(77, spec.pass_fds)
+            image_index = spec.argv.index("image")
+            self.assertEqual(
+                spec.argv[image_index + 1 : image_index + 4],
+                ("agent-runtime-launcher", "--close-fd=78", "--"),
+            )
+            if "agent-egress-runtime" in spec.argv:
+                self.assertGreater(
+                    spec.argv.index("agent-egress-runtime"), image_index + 3
+                )
 
 
 @unittest.skipIf(_MISSING is not None, _MISSING or "Podman prerequisite missing")
@@ -195,11 +315,9 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                 )
                 runtime = FamilyIntakeRuntime.create(layout)
                 mount = runtime.start()
+                inspector = None
+                marker_paths = ()
                 try:
-                    payload = (
-                        f"test ! -e /proc/self/fd/{mount.pass_fds[0]}; "
-                        + _PROBE_SCRIPT
-                    )
                     state = StateLayout(root, "demo")
                     handover = Path(handover_temp) / "demo"
                     for directory in (
@@ -211,6 +329,15 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     for file_path in (state.codex_auth_file, state.claude_token_file):
                         file_path.parent.mkdir(parents=True, exist_ok=True)
                         file_path.write_text("x" * 32, encoding="ascii")
+                    marker_id = secrets.token_hex(8)
+                    ready_marker, done_marker = _marker_paths(
+                        state.workspace, marker_id
+                    )
+                    marker_paths = (ready_marker, done_marker)
+                    payload = (
+                        f"test ! -e /proc/self/fd/{mount.pass_fds[0]}; "
+                        + _probe_script(marker_id)
+                    )
                     base = (
                         run_codex_spec(
                             state, handover, _IMAGE, os.getuid(), os.getgid(),
@@ -235,7 +362,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                         deadline = time.monotonic() + 5
                         try:
                             while time.monotonic() < deadline:
-                                if (mount.socket_dir / "inspect-ready").exists():
+                                if _marker_exists(ready_marker):
                                     inspection.append(
                                         subprocess.run(
                                             ("podman", "inspect", mount.container_name),
@@ -246,18 +373,18 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                                     return
                                 time.sleep(0.05)
                         finally:
-                            (mount.socket_dir / "inspect-done").touch()
+                            _release_marker(done_marker)
 
                     inspector = threading.Thread(target=inspect_running_container)
                     inspector.start()
-                    completed = run_command_supervised(
-                        CommandSpec(argv, {}, base.pass_fds),
-                        None,
-                        None,
-                        runtime,
-                        mount,
-                    )
-                    inspector.join(timeout=10)
+                    try:
+                        completed = run_command_supervised(
+                            CommandSpec(argv, {}, base.pass_fds),
+                            None, None, runtime, mount,
+                        )
+                    finally:
+                        _release_marker(done_marker)
+                        inspector.join(timeout=10)
                     self.assertFalse(inspector.is_alive())
                     self.assertEqual(len(inspection), 1)
                     self.assertEqual(inspection[0].returncode, 0)
@@ -280,6 +407,12 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     ):
                         self.assertNotIn(forbidden, rendered)
                 finally:
+                    if inspector is not None and inspector.is_alive():
+                        if len(marker_paths) == 2:
+                            _release_marker(marker_paths[1])
+                        inspector.join(timeout=10)
+                    for marker in marker_paths:
+                        marker.unlink(missing_ok=True)
                     runtime.close()
                 self.assertFalse(mount.socket_dir.exists())
                 self.assertNotEqual(

@@ -801,16 +801,7 @@ def _podman_preflight(
     runner: Callable[[CommandSpec], subprocess.CompletedProcess],
     image_required: str | None = None,
 ) -> None:
-    version_result = _required_probe_run(runner, podman_version_spec())
-    version_text = (version_result.stdout or "").strip()
-    version_match = re.fullmatch(
-        r"podman version ([0-9]+)\.([0-9]+)(?:\.[0-9]+)?", version_text
-    )
-    if (
-        version_match is None
-        or (int(version_match.group(1)), int(version_match.group(2))) < (5, 8)
-    ):
-        raise ValueError("Podman 5.8 or newer is required")
+    _required_probe_run(runner, podman_version_spec())
     rootless = _required_probe_run(runner, podman_rootless_spec())
     if (rootless.stdout or "").strip().lower() != "true":
         raise ValueError("rootless Podman is required")
@@ -828,6 +819,18 @@ def _family_podman_preflight(
         for name in ("CONTAINER_HOST", "CONTAINER_CONNECTION")
     ):
         raise ValueError("local Podman with crun is required for family intake")
+    version_result = _required_probe_run(runner, podman_version_spec())
+    version_match = re.fullmatch(
+        r"podman version ([0-9]+)\.([0-9]+)(?:\.[0-9]+)?",
+        (version_result.stdout or "").strip(),
+    )
+    if version_match is None or (
+        int(version_match.group(1)), int(version_match.group(2))
+    ) < (5, 8):
+        raise ValueError("Podman 5.8 or newer is required for family intake")
+    rootless = _required_probe_run(runner, podman_rootless_spec())
+    if (rootless.stdout or "").strip().lower() != "true":
+        raise ValueError("rootless Podman is required for family intake")
     runtime = _required_probe_run(runner, podman_oci_runtime_spec())
     if (runtime.stdout or "").strip() != "crun":
         raise ValueError("local Podman with crun is required for family intake")
@@ -1774,7 +1777,23 @@ def main(
                 identity_reader,
                 arguments.github_broker,
             )
-            _podman_preflight(runner, image_required=arguments.image)
+            from agent_container.family_state import FamilyStateLayout
+            from agent_container.family_state import load_family_binding
+
+            family_layout = FamilyStateLayout(layout.root, layout.project_id)
+            try:
+                os.lstat(family_layout.family_binding_file)
+            except FileNotFoundError:
+                family_bound = False
+            else:
+                load_family_binding(family_layout.family_binding_file)
+                family_bound = True
+            if family_bound:
+                _family_podman_preflight(runner, environment)
+                image_probe = podman_image_exists_spec(arguments.image)
+                _require_success(_required_probe_run(runner, image_probe), image_probe)
+            else:
+                _podman_preflight(runner, image_required=arguments.image)
             resolution = _resolve_project_image(
                 layout,
                 arguments.image,
@@ -1798,16 +1817,11 @@ def main(
                 builders = {**builders, "codex": runtime_spec_builder}
             with ExitStack() as stack:
                 from agent_container.family_intake_runtime import FamilyIntakeRuntime
-                from agent_container.family_state import FamilyStateLayout
 
-                family_layout = FamilyStateLayout(layout.root, layout.project_id)
-                try:
-                    os.lstat(family_layout.family_binding_file)
-                except FileNotFoundError:
+                if not family_bound:
                     family_runtime = None
                     family_mount = None
                 else:
-                    _family_podman_preflight(runner, environment)
                     factory = (
                         FamilyIntakeRuntime.create
                         if family_runtime_factory is None

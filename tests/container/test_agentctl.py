@@ -4260,6 +4260,59 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
 
 
 class AgentCtlFamilyRuntimeTest(unittest.TestCase):
+    def test_unbound_run_keeps_legacy_podman_57_contract(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _environment = self._state(temp)
+            calls = []
+
+            def runner(spec):
+                calls.append(spec.argv)
+                if spec.argv == ("podman", "--version"):
+                    return subprocess.CompletedProcess(
+                        spec.argv, 0, stdout="podman version 5.7.2\n"
+                    )
+                return successful_podman_result(spec)
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda _path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 0)
+            self.assertNotIn(
+                ("podman", "info", "--format", "{{.Host.OCIRuntime.Name}}"),
+                calls,
+            )
+
+    def test_bound_remote_environment_runs_no_podman_command(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _environment = self._state(temp)
+            self._bind(root)
+            calls = []
+
+            result = main(
+                ["run", "agent-container"],
+                environment={
+                    "AGENT_CONTAINER_HOME": str(root),
+                    "CONTAINER_HOST": "ssh://example.invalid/run/podman.sock",
+                },
+                runner=lambda spec: calls.append(spec) or successful_podman_result(spec),
+                git_remote_reader=lambda _path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(calls, [])
+
     def test_bound_run_rejects_non_crun_remote_and_malformed_connection_state(self) -> None:
         scenarios = (
             ("runc", "[]", False),

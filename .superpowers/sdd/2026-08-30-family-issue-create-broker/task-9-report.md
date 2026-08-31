@@ -210,3 +210,39 @@ This host has no Podman executable, so the actual rootless Podman/crun
 file-bind, ancestry, one-shot, inspect, and forced-cleanup path remains **not
 run**. Deployment must keep the feature fail-closed until that exact host gate
 is observed successfully.
+
+## Fix round 5
+
+- Moved the live inspection rendezvous off the now single-file-mounted socket
+  directory. Each Codex/Claude subtest generates a 128-bit marker id and uses
+  only its already-mounted project workspace at
+  `/workspace/.family-inspect-<id>-{ready,done}`. Host paths are the exact
+  `StateLayout.workspace` children. Pre-existing files or symlinks fail as
+  collisions; the host creates the release marker with
+  `O_EXCL|O_NOFOLLOW`, always releases and joins in `finally`, and unlinks both
+  names at the outer cleanup boundary. No family state or socket directory is
+  exposed for coordination.
+- Restored the common Podman preflight to its pre-family contract: availability
+  and rootless mode only. Family binding presence and binding contents are now
+  checked through the host-only no-follow binding reader before the first
+  Podman interaction. Bound runs then check, in order, remote environment
+  absence, exact Podman >=5.8 parsing, rootless mode, `crun`, and valid local
+  connection JSON before image inspection/build or runtime startup. An explicit
+  remote environment produces zero Podman calls. Unbound Podman 5.7 runs retain
+  the legacy path; stats, auth, build, and superpowers keep the common contract.
+- The integration prerequisite checks remote environment selection before
+  executable lookup or subprocess probes and reports the precise local-service
+  reason. Non-Podman spec tests now cover Codex/Claude both with and without
+  egress, exact launcher `--close-fd=N --` placement, socket mount target and
+  preserve number agreement, and exclusion of the held host directory fd from
+  `pass_fds`.
+
+Round-5 RED: unbound Podman 5.7 was rejected by the shared preflight; a bound
+remote environment performed three Podman probes before failing; and the live
+probe attempted marker writes under an unshared root-owned socket parent.
+GREEN: exact focused command 50 PASS; full container 913 PASS; full integration
+28 PASS / 13 prerequisite skips; lint and diff-check PASS. Live rootless
+Podman/crun remains accurately **not run** because no Podman executable exists.
+
+Open implementation findings: zero. Environmental evidence still open: the
+previously documented real Podman/crun socket-file-bind gate remains not run.
