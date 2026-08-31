@@ -143,6 +143,19 @@ def _marker_exists(path: Path) -> bool:
     return True
 
 
+def _start_runtime(runtime: FamilyIntakeRuntime) -> FamilyRuntimeMount:
+    try:
+        return runtime.start()
+    except FamilyIntakeRuntimeError as error:
+        cause = error.__context__
+        detail = (
+            type(cause).__name__ + ": " + str(cause)
+            if isinstance(cause, (OSError, ValueError))
+            else "unavailable"
+        )
+        raise AssertionError("family runtime fixture start failed: " + detail) from error
+
+
 def _validate_released_marker(path: Path) -> None:
     try:
         details = os.lstat(path)
@@ -510,7 +523,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                 )
                 os.close(sentinel_descriptor)
                 runtime = FamilyIntakeRuntime.create(layout)
-                mount = runtime.start()
+                mount = _start_runtime(runtime)
                 inspector = None
                 marker_paths = ()
                 try:
