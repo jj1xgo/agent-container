@@ -339,12 +339,45 @@ class PendingStoreTest(unittest.TestCase):
         request = self._create()
         self._transition(request.request_id, PendingState.SENDING)
 
-        recovered = recover_sending(self.store, request.request_id, "demo")
+        recovered = recover_sending(
+            self.store,
+            request.request_id,
+            "demo",
+            audit_path=self.audit,
+            clock=lambda: NOW,
+        )
 
         self.assertEqual(recovered.state, PendingState.UNKNOWN)
         self.assertEqual(recovered.issue, self.issue)
         with self.assertRaises(ValueError):
-            recover_sending(self.store, request.request_id, "demo")
+            recover_sending(
+                self.store,
+                request.request_id,
+                "demo",
+                audit_path=self.audit,
+                clock=lambda: NOW,
+            )
+
+    # Break caught: point recovery mutating a different interrupted request.
+    def test_point_recovery_never_recovers_an_unrequested_sibling(self) -> None:
+        requested = self._create(1)
+        sibling = self._create(2)
+        self._transition(sibling.request_id, PendingState.SENDING)
+
+        with self.assertRaises(ValueError):
+            recover_sending(
+                self.store,
+                requested.request_id,
+                "demo",
+                audit_path=self.audit,
+                clock=lambda: NOW,
+            )
+
+        self.assertEqual(
+            load_pending(self.store, sibling.request_id, "demo").state,
+            PendingState.SENDING,
+        )
+        self.assertFalse(self.audit.exists())
 
     # Break caught: restart inventory leaving an interrupted send retryable by omission.
     def test_store_initialization_recovers_every_sending_record_without_id(self) -> None:
@@ -356,7 +389,12 @@ class PendingStoreTest(unittest.TestCase):
         self.assertEqual(before[pending.request_id], PendingState.PENDING)
         self.assertEqual(before[sending.request_id], PendingState.SENDING)
 
-        initialized = family_pending.initialize_pending_store(self.store, "demo")
+        initialized = family_pending.initialize_pending_store(
+            self.store,
+            "demo",
+            audit_path=self.audit,
+            clock=lambda: NOW,
+        )
 
         self.assertEqual(
             [(request.request_id, request.project_id) for request in initialized],
@@ -367,6 +405,169 @@ class PendingStoreTest(unittest.TestCase):
             PendingState.PENDING,
         )
         self.assertEqual(load_pending(self.store, sending.request_id, "demo").state, PendingState.UNKNOWN)
+
+    # Break caught: invalid startup dependencies mutating sending before recovery can audit it.
+    def test_recovery_validates_clock_before_mutating_sending(self) -> None:
+        request = self._create()
+        self._transition(request.request_id, PendingState.SENDING)
+
+        with self.assertRaises(ValueError):
+            family_pending.initialize_pending_store(
+                self.store,
+                "demo",
+                audit_path=self.audit,
+                clock=lambda: True,
+            )
+
+        self.assertEqual(
+            load_pending(self.store, request.request_id, "demo").state,
+            PendingState.SENDING,
+        )
+        self.assertFalse(self.audit.exists())
+
+    # Break caught: an audit failure losing the only durable evidence of crash recovery.
+    def test_recovery_audit_failures_leave_retryable_durable_marker(self) -> None:
+        real_write_all = family_pending._write_all
+        real_fsync = family_pending.os.fsync
+
+        def fail_open(*_args, **_kwargs):
+            raise OSError("private audit open failure")
+
+        def fail_audit_write(descriptor: int, body: bytes) -> None:
+            if b'"operation":"recover"' in body:
+                raise OSError("private audit write failure")
+            real_write_all(descriptor, body)
+
+        fsync_failed = False
+
+        def fail_first_audit_fsync(descriptor: int) -> None:
+            nonlocal fsync_failed
+            try:
+                target = os.readlink(f"/proc/self/fd/{descriptor}")
+            except OSError:
+                target = ""
+            if not fsync_failed and target.endswith("events.jsonl"):
+                fsync_failed = True
+                raise OSError("private audit fsync failure")
+            real_fsync(descriptor)
+
+        failures = (
+            patch.object(family_pending, "_open_audit", side_effect=fail_open),
+            patch.object(family_pending, "_write_all", side_effect=fail_audit_write),
+            patch.object(family_pending.os, "fsync", side_effect=fail_first_audit_fsync),
+        )
+        for index, failure in enumerate(failures, start=1):
+            with self.subTest(failure=index):
+                request = self._create(0x30 + index)
+                self._transition(request.request_id, PendingState.SENDING)
+                with failure, self.assertRaises(Exception):
+                    family_pending.initialize_pending_store(
+                        self.store,
+                        "demo",
+                        audit_path=self.audit,
+                        clock=lambda: NOW + index,
+                    )
+
+                stranded = load_pending(self.store, request.request_id, "demo")
+                self.assertEqual(stranded.state, PendingState.UNKNOWN)
+                self.assertTrue(stranded.recovery_audit_pending)
+
+                recovered = family_pending.initialize_pending_store(
+                    self.store,
+                    "demo",
+                    audit_path=self.audit,
+                    clock=lambda: NOW + 100 + index,
+                )
+                self.assertIn(request.request_id, [item.request_id for item in recovered])
+                repaired = load_pending(self.store, request.request_id, "demo")
+                self.assertEqual(repaired.state, PendingState.UNKNOWN)
+                self.assertFalse(repaired.recovery_audit_pending)
+
+        events = [
+            json.loads(line)
+            for line in self.audit.read_text("ascii").splitlines()
+        ]
+        self.assertEqual(
+            [event["request_id"] for event in events],
+            ["31" * 16, "32" * 16, "33" * 16],
+        )
+        self.assertTrue(
+            all(
+                (event["operation"], event["status"], event["stage"])
+                == ("recover", "unknown", "reconcile")
+                for event in events
+            )
+        )
+
+    # Break caught: a process death after state recovery making reconciliation race its audit.
+    def test_recovery_marker_survives_crash_and_holds_lock_until_audited(self) -> None:
+        request = self._create()
+        self._transition(request.request_id, PendingState.SENDING)
+
+        with patch.object(
+            family_pending,
+            "append_family_audit",
+            side_effect=KeyboardInterrupt,
+        ), self.assertRaises(KeyboardInterrupt):
+            family_pending.initialize_pending_store(
+                self.store,
+                "demo",
+                audit_path=self.audit,
+                clock=lambda: NOW,
+            )
+        crashed = load_pending(self.store, request.request_id, "demo")
+        self.assertEqual(crashed.state, PendingState.UNKNOWN)
+        self.assertTrue(crashed.recovery_audit_pending)
+
+        audit_started = threading.Event()
+        allow_audit = threading.Event()
+        competitor_started = threading.Event()
+        competitor_acquired = threading.Event()
+        real_append = family_pending.append_family_audit
+
+        def delayed_append(*args, **kwargs):
+            raw = json.loads(self._record_path(request.request_id).read_text("ascii"))
+            self.assertEqual(raw["state"], "unknown")
+            self.assertIs(raw["recovery_audit_pending"], True)
+            audit_started.set()
+            self.assertTrue(allow_audit.wait(1))
+            return real_append(*args, **kwargs)
+
+        def initialize() -> None:
+            with patch.object(
+                family_pending,
+                "append_family_audit",
+                side_effect=delayed_append,
+            ):
+                family_pending.initialize_pending_store(
+                    self.store,
+                    "demo",
+                    audit_path=self.audit,
+                    clock=lambda: NOW + 1,
+                )
+
+        def reconcile() -> None:
+            competitor_started.set()
+            with pending_lock(self.store, request.request_id, "demo") as locked:
+                competitor_acquired.set()
+                self.assertFalse(locked.request.recovery_audit_pending)
+
+        recovery_thread = threading.Thread(target=initialize)
+        recovery_thread.start()
+        self.assertTrue(audit_started.wait(1))
+        competitor_thread = threading.Thread(target=reconcile)
+        competitor_thread.start()
+        self.assertTrue(competitor_started.wait(1))
+        self.assertFalse(competitor_acquired.wait(0.05))
+        allow_audit.set()
+        recovery_thread.join(timeout=2)
+        competitor_thread.join(timeout=2)
+
+        self.assertFalse(recovery_thread.is_alive())
+        self.assertFalse(competitor_thread.is_alive())
+        self.assertTrue(competitor_acquired.is_set())
+        repaired = load_pending(self.store, request.request_id, "demo")
+        self.assertFalse(repaired.recovery_audit_pending)
 
     # Break caught: expiry before its exact deadline or from an in-flight state.
     def test_expiry_requires_pending_state_at_or_after_deadline(self) -> None:
@@ -665,7 +866,10 @@ class PendingStoreTest(unittest.TestCase):
         self._transition(sending.request_id, PendingState.SENDING)
         try:
             recovered = family_pending.initialize_pending_store(
-                self.store, "demo"
+                self.store,
+                "demo",
+                audit_path=self.audit,
+                clock=lambda: NOW,
             )
         except TypeError:
             self.fail("initializer does not accept expected project")

@@ -310,3 +310,143 @@ All checks passed!
 ```
 
 No real GitHub operation was performed in review round 1.
+
+## Review fix round 2
+
+The second review fix round closes the remaining post-send, startup-recovery,
+and terminal-source ambiguity:
+
+- approval now catches every ordinary exception raised while validating the
+  creator's returned object, including missing attributes and hostile
+  properties. The catch surrounds result validation only; the subsequent
+  durable `sending -> unknown` transition and fixed
+  `approve/unknown/response` audit are not swallowed, and `BaseException`
+  remains outside the ordinary failure path;
+- interrupted-send recovery now persists an exact internal
+  `recovery_audit_pending: true` marker with `sending -> unknown`. While still
+  holding the same request lock, startup appends the fixed
+  `recover/unknown/reconcile` event and only then durably clears the marker.
+  Invalid clock or audit prerequisites fail before mutation. Audit open,
+  write, fsync, or process-crash failures leave the marker for retry by the
+  next CLI or intake-runtime startup, and reconciliation remains blocked on
+  that request lock until append and clear finish;
+- recovery is deliberately at-least-once. A crash after the durable audit
+  append but before marker clear can duplicate the fixed recovery event on
+  restart, but cannot omit it. Doctor remains read-only and reports either a
+  surviving `sending` record or an `unknown` record with the internal marker
+  as recovery-required;
+- irreversible confirmation duplicates the supplied `fileno()` immediately,
+  verifies the duplicated descriptor with `os.isatty`, and reads the bounded,
+  newline-terminated UTF-8 confirmation directly with `os.read`. It rejects
+  EOF, invalid UTF-8, overlong input, and extra input. It never consults
+  `stdin.readline`, and closes the duplicate in `finally`; closing and reusing
+  the original fd cannot redirect the confirmation source.
+
+The recovery marker is excluded from representations and all CLI/container
+output. The exact pending JSON decoder accepts it only as boolean `true` on an
+`unknown` content-bearing record; normal and terminal schemas remain exact.
+Point recovery was also tightened so requesting an ineligible record cannot
+recover an unrelated interrupted sibling.
+
+### Review round 2 RED
+
+Malformed returned-object regression before broadening the result-validation
+catch:
+
+```text
+PYTHONPATH=src python3 -m unittest \
+  tests.container.test_agentctl.AgentCtlFamilyTest.test_malformed_created_objects_never_escape_response_quarantine -v
+```
+
+Result: exit `1`; one method with three failing subtests. Forged
+`object.__new__`, deleted-attribute, and hostile-property results all left the
+request in `sending` instead of `unknown`.
+
+Recovery prerequisite regression before the coupled API existed:
+
+```text
+PYTHONPATH=src python3 -m unittest \
+  tests.container.test_family_pending.PendingStoreTest.test_recovery_validates_clock_before_mutating_sending -v
+```
+
+Result: exit `1`; `TypeError` reported that `initialize_pending_store` did not
+accept `audit_path`, proving recovery could not yet couple durable state and
+audit.
+
+Terminal source-binding regression before direct duplicated-fd reads:
+
+```text
+PYTHONPATH=src python3 -m unittest \
+  tests.container.test_agentctl.AgentCtlFamilyTest.test_irreversible_confirmation_requires_real_fd_and_bounded_line -v
+```
+
+Result: exit `1`; a wrapper exposing a real PTY fd while fabricating the exact
+`readline()` value returned success and performed the creator call.
+
+The point-recovery isolation regression was also demonstrated before its
+minimal refactor:
+
+```text
+PYTHONPATH=src python3 -m unittest \
+  tests.container.test_family_pending.PendingStoreTest.test_point_recovery_never_recovers_an_unrequested_sibling -v
+```
+
+Result: exit `1`; the unrequested sibling changed from `sending` to `unknown`.
+
+### Review round 2 GREEN and final verification
+
+Focused recovery tests cover invalid exact clocks, audit open/write/fsync
+failures and repair, simulated crash repair, held-lock ordering against
+reconciliation, and exact point recovery. Focused terminal tests cover the
+forged stream method, invalid UTF-8, extra input, overlong input, and original
+fd close/reuse while the duplicate stays pinned. The complete Task 8 class
+then passed:
+
+```text
+PYTHONPATH=src python3 -m unittest \
+  tests.container.test_agentctl.AgentCtlFamilyTest -v
+Ran 37 tests in 0.317s
+OK
+```
+
+Full agentctl regression:
+
+```text
+PYTHONPATH=src python3 -m unittest tests.container.test_agentctl -v
+Ran 160 tests in 1.034s
+OK
+```
+
+Final all-family regression, including the real Unix socket integration suite,
+outside the restricted socket sandbox:
+
+```text
+PYTHONPATH=src python3 -m unittest \
+  tests.container.test_family_issue \
+  tests.container.test_family_state \
+  tests.container.test_family_pending \
+  tests.container.test_family_issue_create \
+  tests.container.test_family_github_app \
+  tests.container.test_family_intake_protocol \
+  tests.container.test_family_intake_transport \
+  tests.container.test_family_intake_broker \
+  tests.container.test_family_intake_client \
+  tests.container.test_family_intake_runtime \
+  tests.integration.test_family_intake_socket
+Ran 196 tests in 1.871s
+OK
+```
+
+Final complete verification outside the restricted socket sandbox:
+
+```text
+PYTHONPATH=src python3 -m unittest discover -s tests
+Ran 930 tests in 4.957s
+OK (skipped=12)
+
+bin/lint && git diff --check
+All checks passed!
+```
+
+All creator, provider, and inventory dependencies were fakes in these tests.
+No real GitHub operation was performed in review round 2.

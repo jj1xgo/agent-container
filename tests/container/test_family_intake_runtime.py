@@ -97,9 +97,9 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
         real_initialize = __import__(
             "agent_container.family_intake_runtime", fromlist=["initialize_pending_store"]
         ).initialize_pending_store
-        def initialize(store: Path, expected_project_id: str):
+        def initialize(store: Path, expected_project_id: str, **kwargs):
             order.append("initialize")
-            return real_initialize(store, expected_project_id)
+            return real_initialize(store, expected_project_id, **kwargs)
 
         class RecordingSocket(socket.socket):
             def bind(self, address: str) -> None:

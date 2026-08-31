@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import os
+import select
 from typing import Callable, Protocol, TextIO
 
 from agent_container.family_github_app import FamilyInstallationTokenProvider
@@ -283,21 +284,65 @@ def _read_clock(clock: Callable[[], int]) -> int:
     return value
 
 
-def _terminal_fd(stdin: TextIO) -> int | None:
+@contextmanager
+def _terminal_input(stdin: TextIO):
+    duplicated: int | None = None
     try:
         descriptor = stdin.fileno()
     except (AttributeError, OSError, ValueError):
-        return None
+        yield None
+        return
     if type(descriptor) is not int or descriptor < 0:
-        return None
+        yield None
+        return
     try:
-        return descriptor if os.isatty(descriptor) else None
+        duplicated = os.dup(descriptor)
     except OSError:
-        return None
+        yield None
+        return
+    try:
+        try:
+            terminal = os.isatty(duplicated)
+        except OSError:
+            terminal = False
+        yield duplicated if terminal else None
+    finally:
+        os.close(duplicated)
 
 
-def _read_exact_confirmation(stdin: TextIO, expected: str) -> bool:
-    return stdin.readline(_MAX_CONFIRMATION_CHARS) == expected
+def _read_exact_confirmation(descriptor: int, expected: str) -> bool:
+    body = bytearray()
+    while len(body) <= _MAX_CONFIRMATION_CHARS:
+        try:
+            chunk = os.read(
+                descriptor,
+                _MAX_CONFIRMATION_CHARS + 1 - len(body),
+            )
+        except OSError:
+            return False
+        if not chunk:
+            return False
+        body.extend(chunk)
+        newline = body.find(b"\n")
+        if newline >= 0:
+            if newline != len(body) - 1:
+                return False
+            try:
+                readable, _writable, _exceptional = select.select(
+                    [descriptor], [], [], 0
+                )
+                if readable and os.read(descriptor, 1):
+                    return False
+            except (OSError, ValueError):
+                return False
+            break
+        if len(body) > _MAX_CONFIRMATION_CHARS:
+            return False
+    try:
+        confirmation = bytes(body).decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return False
+    return confirmation == expected
 
 
 def _validate_created_result(
@@ -341,50 +386,51 @@ def _approval_preview(
     stdout: TextIO,
     clock: Callable[[], int],
 ):
-    if _terminal_fd(stdin) is None:
-        load_pending(
+    with _terminal_input(stdin) as terminal:
+        if terminal is None:
+            load_pending(
+                layout.family_pending_dir, request_id, layout.project_id
+            )
+            _audit(
+                layout,
+                request_id,
+                now=_read_clock(clock),
+                operation="approve",
+                status="denied",
+                stage="validation",
+            )
+            print("approval refused: interactive TTY required", file=stdout)
+            return None
+        snapshot = snapshot_pending(
             layout.family_pending_dir, request_id, layout.project_id
         )
-        _audit(
-            layout,
-            request_id,
-            now=_read_clock(clock),
-            operation="approve",
-            status="denied",
-            stage="validation",
-        )
-        print("approval refused: interactive TTY required", file=stdout)
-        return None
-    snapshot = snapshot_pending(
-        layout.family_pending_dir, request_id, layout.project_id
-    )
-    request = snapshot.request
-    if request.state is not PendingState.PENDING or request.issue is None:
-        raise ValueError("family pending request cannot be approved")
-    binding = load_family_binding(layout.family_binding_file)
-    print("External effect: create exactly one GitHub Issue", file=stdout)
-    print(f"request-id: {request.request_id}", file=stdout)
-    print(f"project: {request.project_id}", file=stdout)
-    print(f"repository: {binding.repository.slug}", file=stdout)
-    print("title:", file=stdout)
-    print(request.issue.title, file=stdout)
-    print("body:", file=stdout)
-    print(request.issue.body, file=stdout)
-    print(f"Type exactly: approve {request.request_id}", file=stdout)
-    if not _read_exact_confirmation(
-        stdin, f"approve {request.request_id}\n"
-    ):
-        _audit(
-            layout,
-            request.request_id,
-            now=_read_clock(clock),
-            operation="approve",
-            status="denied",
-            stage="validation",
-        )
-        print("approval cancelled", file=stdout)
-        return None
-    return snapshot, binding
+        request = snapshot.request
+        if request.state is not PendingState.PENDING or request.issue is None:
+            raise ValueError("family pending request cannot be approved")
+        binding = load_family_binding(layout.family_binding_file)
+        print("External effect: create exactly one GitHub Issue", file=stdout)
+        print(f"request-id: {request.request_id}", file=stdout)
+        print(f"project: {request.project_id}", file=stdout)
+        print(f"repository: {binding.repository.slug}", file=stdout)
+        print("title:", file=stdout)
+        print(request.issue.title, file=stdout)
+        print("body:", file=stdout)
+        print(request.issue.body, file=stdout)
+        print(f"Type exactly: approve {request.request_id}", file=stdout)
+        if not _read_exact_confirmation(
+            terminal, f"approve {request.request_id}\n"
+        ):
+            _audit(
+                layout,
+                request.request_id,
+                now=_read_clock(clock),
+                operation="approve",
+                status="denied",
+                stage="validation",
+            )
+            print("approval cancelled", file=stdout)
+            return None
+        return snapshot, binding
 
 
 @contextmanager
@@ -558,7 +604,7 @@ def approve_family_issue(
             raise ValueError("family Issue send outcome is unknown") from None
         try:
             created = _validate_created_result(created, current_binding)
-        except (TypeError, ValueError):
+        except Exception:
             transition_pending(locked, PendingState.UNKNOWN)
             _audit(
                 layout,
@@ -758,62 +804,66 @@ def resolve_not_created_family_issue(
     stdout: TextIO,
     now: int,
 ) -> int:
-    if _terminal_fd(stdin) is None:
-        request = load_pending(
+    with _terminal_input(stdin) as terminal:
+        if terminal is None:
+            load_pending(
+                layout.family_pending_dir, request_id, layout.project_id
+            )
+            _audit(
+                layout,
+                request_id,
+                now=now,
+                operation="resolve-not-created",
+                status="denied",
+                stage="reconcile",
+            )
+            print("reconciliation refused: interactive TTY required", file=stdout)
+            return 1
+        snapshot = snapshot_pending(
             layout.family_pending_dir, request_id, layout.project_id
         )
-        _audit(
-            layout,
-            request_id,
-            now=now,
-            operation="resolve-not-created",
-            status="denied",
-            stage="reconcile",
+        request = snapshot.request
+        if request.state is not PendingState.UNKNOWN or request.issue is None:
+            raise ValueError("family pending request cannot be reconciled")
+        print(
+            "WARNING: A later approve can create external state on GitHub.",
+            file=stdout,
         )
-        print("reconciliation refused: interactive TTY required", file=stdout)
-        return 1
-    snapshot = snapshot_pending(
-        layout.family_pending_dir, request_id, layout.project_id
-    )
-    request = snapshot.request
-    if request.state is not PendingState.UNKNOWN or request.issue is None:
-        raise ValueError("family pending request cannot be reconciled")
-    print(
-        "WARNING: A later approve can create external state on GitHub.",
-        file=stdout,
-    )
-    print(f"request-id: {request_id}", file=stdout)
-    print(f"Type exactly: not-created {request_id}", file=stdout)
-    if not _read_exact_confirmation(
-        stdin, f"not-created {request_id}\n"
-    ):
-        _audit(
-            layout,
+        print(f"request-id: {request_id}", file=stdout)
+        print(f"Type exactly: not-created {request_id}", file=stdout)
+        if not _read_exact_confirmation(
+            terminal, f"not-created {request_id}\n"
+        ):
+            _audit(
+                layout,
+                request_id,
+                now=now,
+                operation="resolve-not-created",
+                status="denied",
+                stage="reconcile",
+            )
+            print("reconciliation cancelled", file=stdout)
+            return 1
+        with pending_lock(
+            layout.family_pending_dir,
             request_id,
-            now=now,
-            operation="resolve-not-created",
-            status="denied",
-            stage="reconcile",
-        )
-        print("reconciliation cancelled", file=stdout)
-        return 1
-    with pending_lock(
-        layout.family_pending_dir,
-        request_id,
-        layout.project_id,
-        snapshot=snapshot,
-    ) as locked:
-        if locked.request != request or locked.request.state is not PendingState.UNKNOWN:
-            raise ValueError("family pending request changed")
-        transition_pending(locked, PendingState.PENDING)
-        _audit(
-            layout,
-            request_id,
-            now=now,
-            operation="resolve-not-created",
-            status="pending",
-            stage="reconcile",
-        )
+            layout.project_id,
+            snapshot=snapshot,
+        ) as locked:
+            if (
+                locked.request != request
+                or locked.request.state is not PendingState.UNKNOWN
+            ):
+                raise ValueError("family pending request changed")
+            transition_pending(locked, PendingState.PENDING)
+            _audit(
+                layout,
+                request_id,
+                now=now,
+                operation="resolve-not-created",
+                status="pending",
+                stage="reconcile",
+            )
     print("state: pending", file=stdout)
     return 0
 
@@ -844,7 +894,11 @@ def doctor_family(
         requests = inspect_pending_store(
             layout.family_pending_dir, layout.project_id
         )
-        if any(request.state is PendingState.SENDING for request in requests):
+        if any(
+            request.state is PendingState.SENDING
+            or request.recovery_audit_pending
+            for request in requests
+        ):
             raise ValueError("family pending recovery is required")
         checks.append(("PASS", "pending-invariants", "valid"))
     except Exception:
@@ -871,18 +925,12 @@ def doctor_family(
 def _recover_interrupted_sends(
     layout: FamilyStateLayout, clock: Callable[[], int]
 ) -> None:
-    recovered = initialize_pending_store(
-        layout.family_pending_dir, layout.project_id
+    initialize_pending_store(
+        layout.family_pending_dir,
+        layout.project_id,
+        audit_path=layout.family_audit_file,
+        clock=clock,
     )
-    for request in recovered:
-        _audit(
-            layout,
-            request.request_id,
-            now=_read_clock(clock),
-            operation="recover",
-            status="unknown",
-            stage="reconcile",
-        )
 
 
 def dispatch_family(

@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from contextlib import redirect_stderr
 from io import StringIO
 import hmac
@@ -12,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 import agent_container.agentctl as agentctl
+import agent_container.family_cli as family_cli
 import agent_container.handover_broker_client as handover_broker_client
 from agent_container import __version__
 from agent_container.agentctl import main
@@ -4645,6 +4647,40 @@ class _PtyTTY:
         os.close(self._master)
 
 
+class _FabricatedReadlineTTY:
+    """Expose a real PTY fd while lying through the high-level stream API."""
+
+    def __init__(self, terminal: _PtyTTY, fabricated: str) -> None:
+        self._terminal = terminal
+        self._fabricated = fabricated
+
+    def fileno(self) -> int:
+        return self._terminal.fileno()
+
+    def readline(self, _size: int = -1) -> str:
+        return self._fabricated
+
+
+class _RawPtyTTY:
+    def __init__(self, value: bytes) -> None:
+        self._master, self._slave = os.openpty()
+        os.write(self._master, value)
+
+    def fileno(self) -> int:
+        return self._slave
+
+    def abandon_slave(self) -> int:
+        descriptor = self._slave
+        os.close(descriptor)
+        self._slave = -1
+        return descriptor
+
+    def close(self) -> None:
+        if self._slave >= 0:
+            os.close(self._slave)
+        os.close(self._master)
+
+
 class _FamilyCreator:
     def __init__(self, outcome=None, before_create=None) -> None:
         self.outcome = outcome
@@ -5225,15 +5261,24 @@ class AgentCtlFamilyTest(unittest.TestCase):
 
                 creator = _FamilyCreator()
                 inventory = _FamilyInventory(self.binding)
-                result, _, error, _ = self._run_family(
-                    environment,
-                    "approve",
-                    creator=creator,
-                    inventory=inventory,
-                    stdin=self._tty(
-                        f"approve {self.request_id}\n", before_read=mutate
-                    ),
-                )
+                real_read = family_cli._read_exact_confirmation
+
+                def read_confirmation(descriptor: int, expected: str) -> bool:
+                    mutate()
+                    return real_read(descriptor, expected)
+
+                with patch.object(
+                    family_cli,
+                    "_read_exact_confirmation",
+                    side_effect=read_confirmation,
+                ):
+                    result, _, error, _ = self._run_family(
+                        environment,
+                        "approve",
+                        creator=creator,
+                        inventory=inventory,
+                        stdin=self._tty(f"approve {self.request_id}\n"),
+                    )
 
                 self.assertEqual(result, 1)
                 self.assertEqual(creator.create_calls, [])
@@ -5296,15 +5341,23 @@ class AgentCtlFamilyTest(unittest.TestCase):
                         transition_pending(locked, target)
 
                 creator = _FamilyCreator()
-                result, _, _, _ = self._run_family(
-                    environment,
-                    "approve",
-                    creator=creator,
-                    stdin=self._tty(
-                        f"approve {self.request_id}\n",
-                        before_read=concurrent_transition,
-                    ),
-                )
+                real_read = family_cli._read_exact_confirmation
+
+                def read_confirmation(descriptor: int, expected: str) -> bool:
+                    concurrent_transition()
+                    return real_read(descriptor, expected)
+
+                with patch.object(
+                    family_cli,
+                    "_read_exact_confirmation",
+                    side_effect=read_confirmation,
+                ):
+                    result, _, _, _ = self._run_family(
+                        environment,
+                        "approve",
+                        creator=creator,
+                        stdin=self._tty(f"approve {self.request_id}\n"),
+                    )
 
                 self.assertEqual(result, 1)
                 self.assertEqual(creator.create_calls, [])
@@ -5839,15 +5892,23 @@ class AgentCtlFamilyTest(unittest.TestCase):
             creator = _FamilyCreator(
                 CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
             )
-            result, _, _, _ = self._run_family(
-                environment,
-                "approve",
-                creator=creator,
-                stdin=self._tty(
-                    f"approve {self.request_id}\n",
-                    before_read=replace_with_equal_bytes,
-                ),
-            )
+            real_read = family_cli._read_exact_confirmation
+
+            def read_confirmation(descriptor: int, expected: str) -> bool:
+                replace_with_equal_bytes()
+                return real_read(descriptor, expected)
+
+            with patch.object(
+                family_cli,
+                "_read_exact_confirmation",
+                side_effect=read_confirmation,
+            ):
+                result, _, _, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=self._tty(f"approve {self.request_id}\n"),
+                )
 
             self.assertEqual(result, 1)
             self.assertEqual(creator.create_calls, [])
@@ -5895,6 +5956,61 @@ class AgentCtlFamilyTest(unittest.TestCase):
                 self.assertNotIn("issue-number:", output)
                 self.assertEqual(self._audit(layout)[-1]["stage"], "response")
                 self.assertEqual(self._audit(layout)[-1]["status"], "unknown")
+
+    # Break caught: ordinary property failures escaping after POST and leaving sending.
+    def test_malformed_created_objects_never_escape_response_quarantine(self) -> None:
+        missing = object.__new__(CreatedIssue)
+        deleted = CreatedIssue(
+            7, "https://github.com/family/roadmap/issues/7"
+        )
+        object.__delattr__(deleted, "number")
+
+        def hostile_number(_instance):
+            raise RuntimeError("private hostile property marker")
+
+        cases = (
+            ("object-new", missing, None),
+            ("delattr", deleted, None),
+            (
+                "hostile-property",
+                CreatedIssue(
+                    7, "https://github.com/family/roadmap/issues/7"
+                ),
+                property(hostile_number),
+            ),
+        )
+        for label, outcome, hostile in cases:
+            with self.subTest(case=label), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                creator = _FamilyCreator(outcome)
+                context = (
+                    patch.object(CreatedIssue, "number", hostile, create=True)
+                    if hostile is not None
+                    else nullcontext()
+                )
+
+                with context:
+                    result, output, error, _ = self._run_family(
+                        environment,
+                        "approve",
+                        creator=creator,
+                        stdin=self._tty(f"approve {self.request_id}\n"),
+                    )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(len(creator.create_calls), 1)
+                self.assertEqual(
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
+                    PendingState.UNKNOWN,
+                )
+                self.assertEqual(self._audit(layout)[-1]["stage"], "response")
+                self.assertEqual(self._audit(layout)[-1]["status"], "unknown")
+                self.assertNotIn("issue-number:", output)
+                self.assertNotIn("private hostile property marker", error)
 
     # Break caught: approval using a time sampled before prompt and remote preflight.
     def test_approval_samples_expiry_after_preflight_at_exact_boundary(self) -> None:
@@ -5947,17 +6063,17 @@ class AgentCtlFamilyTest(unittest.TestCase):
 
             def inspect_recovery(path, **event):
                 if event["operation"] == "recover":
-                    recovered_states.append(
-                        load_pending(
-                            layout.family_pending_dir,
-                            self.request_id,
-                            "demo",
-                        ).state
+                    payload = json.loads(
+                        (
+                            layout.family_pending_dir
+                            / f"{self.request_id}.json"
+                        ).read_text("ascii")
                     )
+                    recovered_states.append(PendingState(payload["state"]))
                 append_family_audit(path, **event)
 
             with patch(
-                "agent_container.family_cli.append_family_audit",
+                "agent_container.family_pending.append_family_audit",
                 side_effect=inspect_recovery,
             ):
                 result, _, error, _ = self._run_family(
@@ -5986,16 +6102,27 @@ class AgentCtlFamilyTest(unittest.TestCase):
 
     # Break caught: doctor mutating interrupted work or ignoring unsafe audit state.
     def test_doctor_is_read_only_and_fails_sending_or_invalid_audit(self) -> None:
-        for damage in ("sending", "malformed-audit", "insecure-audit"):
+        for damage in (
+            "sending",
+            "recovery-marker",
+            "malformed-audit",
+            "insecure-audit",
+        ):
             with self.subTest(damage=damage), TemporaryDirectory() as temp:
                 root, environment = self._registered_state(temp)
                 layout = self._family_state(root)
                 self._pending(layout)
-                if damage == "sending":
+                if damage in {"sending", "recovery-marker"}:
                     with pending_lock(
                         layout.family_pending_dir, self.request_id, "demo"
                     ) as locked:
                         transition_pending(locked, PendingState.SENDING)
+                        if damage == "recovery-marker":
+                            transition_pending(
+                                locked,
+                                PendingState.UNKNOWN,
+                                recovery_audit_pending=True,
+                            )
                 else:
                     layout.family_audit_file.write_bytes(b"{not-json}\n")
                     layout.family_audit_file.chmod(
@@ -6067,6 +6194,55 @@ class AgentCtlFamilyTest(unittest.TestCase):
             root, environment = self._registered_state(temp)
             layout = self._family_state(root)
             self._pending(layout)
+            creator = _FamilyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            terminal = self._tty("reject this request\n")
+            stdin = _FabricatedReadlineTTY(
+                terminal, f"approve {self.request_id}\n"
+            )
+
+            result, _, _, _ = self._run_family(
+                environment,
+                "approve",
+                creator=creator,
+                stdin=stdin,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(creator.create_calls, [])
+
+        for raw_confirmation in (
+            b"\xff\n",
+            f"approve {self.request_id}\nunexpected\n".encode("ascii"),
+        ):
+            with self.subTest(raw=raw_confirmation), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                creator = _FamilyCreator(
+                    CreatedIssue(
+                        7,
+                        "https://github.com/family/roadmap/issues/7",
+                    )
+                )
+                terminal = _RawPtyTTY(raw_confirmation)
+                self.addCleanup(terminal.close)
+
+                result, _, _, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=terminal,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(creator.create_calls, [])
+
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
             creator = _FamilyCreator()
             confirmation = self._tty(
                 f"approve {self.request_id}" + ("x" * 256) + "\n"
@@ -6079,9 +6255,52 @@ class AgentCtlFamilyTest(unittest.TestCase):
             )
             self.assertEqual(result, 1)
             self.assertEqual(creator.create_calls, [])
-            self.assertEqual(len(confirmation.read_sizes), 1)
-            self.assertGreater(confirmation.read_sizes[0], 0)
-            self.assertLessEqual(confirmation.read_sizes[0], 128)
+
+    # Break caught: closing and reusing stdin after fileno redirecting confirmation reads.
+    def test_irreversible_confirmation_duplicates_and_pins_the_terminal_fd(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            terminal = _RawPtyTTY(
+                f"approve {self.request_id}\n".encode("ascii")
+            )
+            self.addCleanup(terminal.close)
+            creator = _FamilyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            real_dup = os.dup
+            duplicated: list[int] = []
+            reused: list[int] = []
+
+            def close_reuse_and_duplicate(descriptor: int) -> int:
+                pinned = real_dup(descriptor)
+                duplicated.append(pinned)
+                original = terminal.abandon_slave()
+                replacement = os.open("/dev/null", os.O_RDONLY)
+                self.assertEqual(replacement, original)
+                reused.append(replacement)
+                return pinned
+
+            with patch.object(
+                family_cli.os,
+                "dup",
+                side_effect=close_reuse_and_duplicate,
+            ):
+                result, _, _, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=terminal,
+                )
+
+            for descriptor in reused:
+                os.close(descriptor)
+            self.assertEqual(result, 0)
+            self.assertEqual(len(creator.create_calls), 1)
+            self.assertEqual(len(duplicated), 1)
+            with self.assertRaises(OSError):
+                os.fstat(duplicated[0])
 
     # Break caught: falsy injected complete dependencies being silently discarded.
     def test_falsy_injected_family_dependencies_are_used_when_not_none(self) -> None:
