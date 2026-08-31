@@ -2,6 +2,8 @@ from base64 import urlsafe_b64decode
 from copy import deepcopy
 from datetime import datetime, timezone
 from email.message import Message
+import errno
+import fcntl
 import http.client
 from io import BytesIO
 import json
@@ -68,9 +70,9 @@ def decode_segment(value: str) -> dict[str, object]:
 
 class FakeSigner:
     def __init__(self) -> None:
-        self.calls: list[tuple[bytes, Path]] = []
+        self.calls: list[tuple[bytes, int]] = []
 
-    def sign(self, content: bytes, private_key: Path) -> bytes:
+    def sign(self, content: bytes, private_key: int) -> bytes:
         self.calls.append((content, private_key))
         return b"family-binary-signature"
 
@@ -244,7 +246,7 @@ class FamilyGitHubAppTest(unittest.TestCase):
 
     def provider(self, response: HttpResponse | None = None):  # type: ignore[no-untyped-def]
         return FamilyInstallationTokenProvider(
-            self.metadata(),
+            self.layout,
             signer=FakeSigner(),
             transport=lambda *_: token_response() if response is None else response,
             clock=lambda: 1_800_000_000,
@@ -384,16 +386,12 @@ class FamilyGitHubAppTest(unittest.TestCase):
         self, run: mock.Mock
     ) -> None:
         run.return_value = subprocess.CompletedProcess([], 0, b"signature", b"")
-        descriptor = os.open(
-            self.layout.family_private_key_file,
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
-        )
-        try:
+        with family_github_app._sealed_key_snapshot(
+            b"family-private-key-marker"
+        ) as descriptor:
             signature = family_github_app.FamilyOpenSSLSigner().sign(
                 b"content", descriptor
             )
-        finally:
-            os.close(descriptor)
 
         self.assertEqual(signature, b"signature")
         call = run.call_args
@@ -506,11 +504,10 @@ class FamilyGitHubAppTest(unittest.TestCase):
     def test_provider_rejects_replaced_app_or_key_before_side_effects(self) -> None:
         for replaced in ("app", "key"):
             with self.subTest(replaced=replaced):
-                metadata = self.metadata()
                 signer = FakeSigner()
                 transport_calls: list[object] = []
                 provider = FamilyInstallationTokenProvider(
-                    metadata,
+                    self.layout,
                     signer=signer,
                     transport=lambda *call: (
                         transport_calls.append(call) or token_response()
@@ -523,7 +520,7 @@ class FamilyGitHubAppTest(unittest.TestCase):
                     else self.layout.family_private_key_file
                 )
                 replacement = self.layout.family_root / f".{replaced}-replacement"
-                replacement.write_bytes(target.read_bytes())
+                replacement.write_bytes(b"")
                 replacement.chmod(0o600)
                 os.replace(replacement, target)
 
@@ -554,7 +551,6 @@ class FamilyGitHubAppTest(unittest.TestCase):
     def test_key_fd_stays_pinned_and_swap_during_sign_fails_before_network(
         self,
     ) -> None:
-        metadata = self.metadata()
         transport_calls: list[object] = []
 
         class SwappingSigner:
@@ -582,7 +578,7 @@ class FamilyGitHubAppTest(unittest.TestCase):
         signer.layout = self.layout
         signer.assertEqual = self.assertEqual
         provider = FamilyInstallationTokenProvider(
-            metadata,
+            self.layout,
             signer=signer,  # type: ignore[arg-type]
             transport=lambda *call: transport_calls.append(call) or token_response(),
             clock=lambda: 1_800_000_000,
@@ -600,7 +596,7 @@ class FamilyGitHubAppTest(unittest.TestCase):
         signer = FakeSigner()
         transport_calls: list[object] = []
         provider = FamilyInstallationTokenProvider(
-            self.metadata(),
+            self.layout,
             signer=signer,
             transport=lambda *call: transport_calls.append(call) or token_response(),
             clock=lambda: 1_800_000_000,
@@ -662,12 +658,22 @@ class FamilyGitHubAppTest(unittest.TestCase):
             repository_id=42,
             private_key=self.layout.family_private_key_file,
         )
+        other_root = self.root / "other-state"
+        other_root.mkdir(mode=0o700)
+        other_layout = FamilyStateLayout(other_root, "demo")
+        other_layout.family_root.mkdir(mode=0o700)
+        other_layout.family_app_file.write_bytes(self.layout.family_app_file.read_bytes())
+        other_layout.family_private_key_file.write_bytes(
+            self.layout.family_private_key_file.read_bytes()
+        )
+        other_layout.family_app_file.chmod(0o600)
+        other_layout.family_private_key_file.chmod(0o600)
+        other_metadata = FamilyAppMetadata.load(other_layout)
         forged = object.__new__(FamilyAppMetadata)
-        object.__setattr__(forged, "client_id", "Iv1familyabcdefgh")
-        object.__setattr__(forged, "installation_id", 123)
-        object.__setattr__(forged, "private_key", self.root / "arbitrary-key.pem")
+        for name in FamilyAppMetadata.__dataclass_fields__:
+            object.__setattr__(forged, name, getattr(other_metadata, name))
 
-        for metadata in (development, forged):
+        for metadata in (development, other_metadata, forged):
             with self.subTest(metadata_type=type(metadata).__name__):
                 signer = FakeSigner()
                 transport_calls: list[object] = []
@@ -684,21 +690,156 @@ class FamilyGitHubAppTest(unittest.TestCase):
                 self.assertEqual(signer.calls, [])
                 self.assertEqual(transport_calls, [])
 
-    def test_provider_rejects_tampered_layout_identity_before_side_effects(
+    def test_provider_uses_an_independently_supplied_trusted_layout(self) -> None:
+        signer = FakeSigner()
+        calls: list[object] = []
+        provider = FamilyInstallationTokenProvider(
+            self.layout,
+            signer=signer,
+            transport=lambda *call: calls.append(call) or token_response(),
+            clock=lambda: 1_800_000_000,
+        )
+
+        self.assertEqual(provider.get().token, "family-installation-token-marker")
+        self.assertEqual(len(signer.calls), 1)
+        self.assertEqual(len(calls), 1)
+
+    def test_sealed_key_snapshot_blocks_all_same_inode_mutations_before_network(
         self,
     ) -> None:
-        metadata = self.metadata()
-        object.__setattr__(
-            metadata,
-            "_layout",
-            FamilyStateLayout(self.root / "arbitrary", "demo"),
+        required_seals = (
+            fcntl.F_SEAL_WRITE
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_SEAL
         )
+
+        for mutation in ("truncate", "rewrite", "grow"):
+            with self.subTest(mutation=mutation):
+                self.layout.family_private_key_file.write_bytes(
+                    b"family-private-key-marker"
+                )
+                self.layout.family_private_key_file.chmod(0o600)
+                transport_calls: list[object] = []
+
+                class MutatingSigner:
+                    def __init__(inner_self) -> None:
+                        inner_self.before = b""
+                        inner_self.after = b""
+                        inner_self.seals = 0
+                        inner_self.snapshot_size = 0
+                        inner_self.write_errno: int | None = None
+
+                    def sign(inner_self, content, descriptor):  # type: ignore[no-untyped-def]
+                        inner_self.before = os.pread(descriptor, 65_536, 0)
+                        inner_self.snapshot_size = os.fstat(descriptor).st_size
+                        inner_self.seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
+                        try:
+                            os.pwrite(descriptor, b"X", 0)
+                        except OSError as error:
+                            inner_self.write_errno = error.errno
+                        if mutation == "truncate":
+                            os.truncate(self.layout.family_private_key_file, 5)
+                        elif mutation == "rewrite":
+                            source = os.open(
+                                self.layout.family_private_key_file, os.O_WRONLY
+                            )
+                            try:
+                                os.pwrite(source, b"replacement-key-material", 0)
+                            finally:
+                                os.close(source)
+                        else:
+                            source = os.open(
+                                self.layout.family_private_key_file, os.O_WRONLY
+                            )
+                            try:
+                                os.lseek(source, 0, os.SEEK_END)
+                                os.write(source, b"-grown")
+                            finally:
+                                os.close(source)
+                        inner_self.after = os.pread(descriptor, 65_536, 0)
+                        return b"family-binary-signature"
+
+                signer = MutatingSigner()
+                provider = FamilyInstallationTokenProvider(
+                    self.layout,
+                    signer=signer,  # type: ignore[arg-type]
+                    transport=lambda *call: (
+                        transport_calls.append(call) or token_response()
+                    ),
+                    clock=lambda: 1_800_000_000,
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError, "family GitHub App metadata"
+                ):
+                    provider.get()
+
+                self.assertEqual(signer.before, b"family-private-key-marker")
+                self.assertEqual(signer.after, signer.before)
+                self.assertEqual(
+                    signer.snapshot_size, len(b"family-private-key-marker")
+                )
+                self.assertEqual(signer.seals, required_seals)
+                self.assertEqual(signer.write_errno, errno.EPERM)
+                self.assertEqual(transport_calls, [])
+
+    def test_close_failure_does_not_orphan_intermediate_descriptors(self) -> None:
+        opened: list[int] = []
+        real_open = os.open
+        real_close = os.close
+        injected = False
+
+        def recording_open(*args, **kwargs):  # type: ignore[no-untyped-def]
+            descriptor = real_open(*args, **kwargs)
+            opened.append(descriptor)
+            return descriptor
+
+        def failing_close(descriptor: int) -> None:
+            nonlocal injected
+            real_close(descriptor)
+            if not injected:
+                injected = True
+                raise OSError("close-secret-marker")
+
+        try:
+            with mock.patch(
+                "agent_container.family_github_app.os.open",
+                side_effect=recording_open,
+            ), mock.patch(
+                "agent_container.family_github_app.os.close",
+                side_effect=failing_close,
+            ):
+                with self.assertRaises(ValueError) as raised:
+                    self.metadata()
+            self.assertEqual(
+                str(raised.exception), "family GitHub App metadata is invalid"
+            )
+            self.assertNotIn("close-secret-marker", repr(raised.exception))
+            for descriptor in set(opened):
+                with self.assertRaises(OSError) as closed:
+                    os.fstat(descriptor)
+                self.assertEqual(closed.exception.errno, errno.EBADF)
+        finally:
+            for descriptor in set(opened):
+                try:
+                    real_close(descriptor)
+                except OSError:
+                    pass
+
+    def test_provider_rejects_non_exact_layout_type_before_side_effects(
+        self,
+    ) -> None:
+        class LayoutSubclass(FamilyStateLayout):
+            pass
+
+        layout = LayoutSubclass(self.root, "demo")
         signer = FakeSigner()
         transport_calls: list[object] = []
 
         with self.assertRaisesRegex(ValueError, "family GitHub App metadata"):
             provider = FamilyInstallationTokenProvider(
-                metadata,
+                layout,
                 signer=signer,
                 transport=lambda *call: (
                     transport_calls.append(call) or token_response()
@@ -719,7 +860,7 @@ class FamilyGitHubAppTest(unittest.TestCase):
             return token_response()
 
         provider = FamilyInstallationTokenProvider(
-            self.metadata(),
+            self.layout,
             signer=signer,
             transport=transport,
             clock=lambda: 1_800_000_000,
@@ -782,7 +923,7 @@ class FamilyGitHubAppTest(unittest.TestCase):
 
         signer = FakeSigner()
         provider = FamilyInstallationTokenProvider(
-            self.metadata(),
+            self.layout,
             signer=signer,
             transport=transport,
             clock=lambda: current[0],
