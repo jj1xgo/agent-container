@@ -6,6 +6,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
+import agent_container.family_pending as family_pending
 from agent_container.family_issue import CanonicalFamilyIssue
 from agent_container.family_issue import canonicalize_family_issue
 from agent_container.family_issue import FamilyIssueDraft
@@ -56,6 +57,38 @@ class PendingStoreTest(unittest.TestCase):
 
     def _record_path(self, request_id: str) -> Path:
         return self.store / f"{request_id}.json"
+
+    def _replace_cleanup_name(self, leaked_name: str):
+        real_unlink_owned = family_pending._unlink_owned
+        replaced = False
+
+        def replace(
+            parent_descriptor: int,
+            name: str,
+            expected: os.stat_result,
+        ) -> None:
+            nonlocal replaced
+            if not replaced and ".json." in name and not name.endswith(".lock"):
+                replaced = True
+                os.rename(
+                    name,
+                    leaked_name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                )
+                descriptor = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=parent_descriptor,
+                )
+                try:
+                    os.write(descriptor, b"replacement")
+                finally:
+                    os.close(descriptor)
+            real_unlink_owned(parent_descriptor, name, expected)
+
+        return replace
 
     def _transition(
         self,
@@ -313,6 +346,23 @@ class PendingStoreTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             recover_sending(self.store, request.request_id)
 
+    # Break caught: restart inventory leaving an interrupted send retryable by omission.
+    def test_store_initialization_recovers_every_sending_record_without_id(self) -> None:
+        pending = self._create(1)
+        sending = self._create(2)
+        self._transition(sending.request_id, PendingState.SENDING)
+
+        before = {request.request_id: request.state for request in list_pending(self.store)}
+        self.assertEqual(before[pending.request_id], PendingState.PENDING)
+        self.assertEqual(before[sending.request_id], PendingState.SENDING)
+
+        initialized = family_pending.initialize_pending_store(self.store)
+
+        states = {request.request_id: request.state for request in initialized}
+        self.assertEqual(states[pending.request_id], PendingState.PENDING)
+        self.assertEqual(states[sending.request_id], PendingState.UNKNOWN)
+        self.assertEqual(load_pending(self.store, sending.request_id).state, PendingState.UNKNOWN)
+
     # Break caught: expiry before its exact deadline or from an in-flight state.
     def test_expiry_requires_pending_state_at_or_after_deadline(self) -> None:
         request = self._create()
@@ -504,6 +554,67 @@ class PendingStoreTest(unittest.TestCase):
             load_pending(self.store, request.request_id)
         self.assertTrue(any("Add export" in path.read_text("ascii") for path in self.store.glob(".*.json.*")))
 
+    # Break caught: name-based cleanup silently succeeding after the displaced inode is moved.
+    def test_terminal_transition_rejects_moved_and_replaced_cleanup_name(self) -> None:
+        request = self._create()
+        leaked_name = "leaked-sensitive-content"
+
+        with patch(
+            "agent_container.family_pending._unlink_owned",
+            side_effect=self._replace_cleanup_name(leaked_name),
+        ):
+            with self.assertRaises(ValueError):
+                self._transition(request.request_id, PendingState.REJECTED)
+
+        self.assertIn("Add export", (self.store / leaked_name).read_text("ascii"))
+        with self.assertRaises(ValueError):
+            list_pending(self.store)
+
+    # Break caught: new-record publication accepting an extra sensitive hard link.
+    def test_new_record_rejects_moved_and_replaced_cleanup_name(self) -> None:
+        leaked_name = "leaked-new-record"
+
+        with patch(
+            "agent_container.family_pending._unlink_owned",
+            side_effect=self._replace_cleanup_name(leaked_name),
+        ):
+            with self.assertRaises(ValueError):
+                self._create()
+
+        self.assertIn("Add export", (self.store / leaked_name).read_text("ascii"))
+        with self.assertRaises(ValueError):
+            list_pending(self.store)
+
+    # Break caught: an extra content link appearing during the final parent sync.
+    def test_new_record_revalidates_cleanup_after_parent_fsync(self) -> None:
+        real_fsync = os.fsync
+        linked = False
+
+        def link_during_parent_sync(descriptor: int) -> None:
+            nonlocal linked
+            if not linked and os.path.isdir(f"/proc/self/fd/{descriptor}"):
+                linked = True
+                os.link(
+                    "11" * 16 + ".json",
+                    "late-sensitive-link",
+                    src_dir_fd=descriptor,
+                    dst_dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+            real_fsync(descriptor)
+
+        with patch(
+            "agent_container.family_pending.os.fsync",
+            side_effect=link_during_parent_sync,
+        ):
+            with self.assertRaises(ValueError):
+                self._create()
+
+        self.assertIn(
+            "Add export",
+            (self.store / "late-sensitive-link").read_text("ascii"),
+        )
+
 
 class FamilyAuditTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -601,6 +712,44 @@ class FamilyAuditTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 self._append(request_id="cd" * 16)
 
+    # Break caught: a short audit write poisoning every later JSONL consumer.
+    def test_partial_audit_write_rolls_back_before_a_later_safe_append(self) -> None:
+        self._append()
+        before = self.path.read_bytes()
+
+        def write_partial_then_fail(descriptor: int, body: bytes) -> None:
+            os.write(descriptor, body[:17])
+            raise OSError("partial audit append")
+
+        with patch(
+            "agent_container.family_pending._write_all",
+            side_effect=write_partial_then_fail,
+        ):
+            with self.assertRaises(OSError):
+                self._append(request_id="cd" * 16)
+
+        self.assertEqual(self.path.read_bytes(), before)
+        self._append(request_id="ef" * 16, status="error", stage="send")
+        lines = self.path.read_text("ascii").splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(json.loads(lines[1])["request_id"], "ef" * 16)
+
+    # Break caught: append treating a malformed or unterminated existing tail as valid JSONL.
+    def test_rejects_malformed_existing_audit_tail_without_appending(self) -> None:
+        existing = (
+            '{"operation":"approve","project_id":"demo","request_id":"'
+            + self.request_id
+            + '","stage":"cleanup","status":"created","timestamp":1800000000}\n'
+            + '{"operation":"approve"'
+        ).encode("ascii")
+        self.path.write_bytes(existing)
+        self.path.chmod(0o600)
+
+        with self.assertRaises(ValueError):
+            self._append(request_id="cd" * 16)
+
+        self.assertEqual(self.path.read_bytes(), existing)
+
     # Break caught: a concurrent opener reporting a new audit entry before its directory entry is durable.
     def test_every_append_syncs_the_parent_even_when_the_audit_file_exists(self) -> None:
         self._append()
@@ -617,6 +766,42 @@ class FamilyAuditTest(unittest.TestCase):
             self._append(request_id="cd" * 16)
 
         self.assertEqual(parent_syncs, 1)
+
+    # Break caught: an audit append returning after its flocked inode leaves the canonical path.
+    def test_rejects_canonical_audit_path_swap_after_file_or_parent_fsync(self) -> None:
+        real_fsync = os.fsync
+        for phase in ("file", "parent"):
+            with self.subTest(phase=phase):
+                displaced = self.parent / f"events.{phase}.old"
+                for path in (self.path, displaced):
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
+                swapped = False
+
+                def swap_after_sync(descriptor: int) -> None:
+                    nonlocal swapped
+                    is_parent = os.path.isdir(f"/proc/self/fd/{descriptor}")
+                    real_fsync(descriptor)
+                    if not swapped and (
+                        (phase == "file" and not is_parent)
+                        or (phase == "parent" and is_parent)
+                    ):
+                        swapped = True
+                        self.path.rename(displaced)
+                        self.path.write_bytes(b"")
+                        self.path.chmod(0o600)
+
+                with patch(
+                    "agent_container.family_pending.os.fsync",
+                    side_effect=swap_after_sync,
+                ):
+                    with self.assertRaises(ValueError):
+                        self._append()
+
+                self.assertEqual(self.path.read_bytes(), b"")
+                self.assertIn(b'"status":"created"', displaced.read_bytes())
 
 
 if __name__ == "__main__":

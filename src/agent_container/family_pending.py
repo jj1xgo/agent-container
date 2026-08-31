@@ -33,6 +33,7 @@ _TTL_SECONDS = 24 * 60 * 60
 _MAX_UNFINISHED = 10
 _MAX_CANONICAL_BODY_BYTES = 64 * 1024
 _MAX_RECORD_BYTES = 128 * 1024
+_MAX_AUDIT_BYTES = 4 * 1024 * 1024
 _ID_ATTEMPTS = 32
 _STORE_LOCK = ".pending.lock"
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
@@ -434,6 +435,29 @@ def _inventory(parent_descriptor: int) -> list[str]:
     return sorted(records)
 
 
+def _prove_cleanup(
+    parent_descriptor: int,
+    temporary: str,
+    retained_descriptor: int,
+    expected: os.stat_result,
+    expected_links: int,
+) -> None:
+    retained = os.fstat(retained_descriptor)
+    if not _same_inode(expected, retained) or retained.st_nlink != expected_links:
+        raise ValueError("family pending content cleanup is incomplete")
+    try:
+        os.stat(
+            temporary,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        pass
+    else:
+        raise ValueError("family pending content cleanup is incomplete")
+    _inventory(parent_descriptor)
+
+
 def _publish_new(parent_descriptor: int, record_name: str, body: bytes) -> None:
     temporary = _temporary_name(record_name)
     descriptor: int | None = None
@@ -451,8 +475,6 @@ def _publish_new(parent_descriptor: int, record_name: str, body: bytes) -> None:
         _validate_private_file(os.fstat(descriptor))
         _write_all(descriptor, body)
         os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = None
         os.link(
             temporary,
             record_name,
@@ -462,7 +484,21 @@ def _publish_new(parent_descriptor: int, record_name: str, body: bytes) -> None:
         )
         published = True
         _unlink_owned(parent_descriptor, temporary, temporary_stat)
+        _prove_cleanup(
+            parent_descriptor,
+            temporary,
+            descriptor,
+            temporary_stat,
+            1,
+        )
         os.fsync(parent_descriptor)
+        _prove_cleanup(
+            parent_descriptor,
+            temporary,
+            descriptor,
+            temporary_stat,
+            1,
+        )
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -478,6 +514,7 @@ def _atomic_replace(
 ) -> os.stat_result:
     temporary = _temporary_name(record_name)
     descriptor: int | None = None
+    displaced_descriptor: int | None = None
     temporary_stat: os.stat_result | None = None
     published = False
     try:
@@ -498,6 +535,11 @@ def _atomic_replace(
         _validate_private_file(current)
         if not _same_inode(expected, current):
             raise ValueError("family pending record changed")
+        displaced_descriptor, displaced = _open_private_file(
+            parent_descriptor, record_name
+        )
+        if not _same_inode(expected, displaced):
+            raise ValueError("family pending record changed")
         os.fsync(parent_descriptor)
         _rename_exchange(parent_descriptor, temporary, record_name)
         replaced = _entry_stat(parent_descriptor, temporary)
@@ -506,7 +548,21 @@ def _atomic_replace(
             raise ValueError("family pending record changed")
         published = True
         _unlink_owned(parent_descriptor, temporary, expected)
+        _prove_cleanup(
+            parent_descriptor,
+            temporary,
+            displaced_descriptor,
+            expected,
+            0,
+        )
         os.fsync(parent_descriptor)
+        _prove_cleanup(
+            parent_descriptor,
+            temporary,
+            displaced_descriptor,
+            expected,
+            0,
+        )
         current = _entry_stat(parent_descriptor, record_name)
         _validate_private_file(current)
         if temporary_stat is None or not _same_inode(temporary_stat, current):
@@ -515,6 +571,8 @@ def _atomic_replace(
     finally:
         if descriptor is not None:
             os.close(descriptor)
+        if displaced_descriptor is not None:
+            os.close(displaced_descriptor)
         if temporary_stat is not None and not published:
             _unlink_owned(parent_descriptor, temporary, temporary_stat)
 
@@ -649,6 +707,32 @@ def list_pending(store: Path) -> tuple[PendingRequest, ...]:
     return tuple(sorted(requests, key=lambda item: (item.created_at, item.request_id)))
 
 
+def initialize_pending_store(store: Path) -> tuple[PendingRequest, ...]:
+    """Validate a stable inventory and recover every interrupted send."""
+
+    parent_descriptor = _open_private_parent(store / "record")
+    store_lock: int | None = None
+    try:
+        store_lock = _open_lock(parent_descriptor, _STORE_LOCK)
+        request_ids = _inventory(parent_descriptor)
+        requests: list[PendingRequest] = []
+        for request_id in request_ids:
+            with pending_lock(store, request_id) as locked:
+                if locked.request.state is PendingState.SENDING:
+                    requests.append(
+                        transition_pending(locked, PendingState.UNKNOWN)
+                    )
+                else:
+                    requests.append(locked.request)
+        return tuple(
+            sorted(requests, key=lambda item: (item.created_at, item.request_id))
+        )
+    finally:
+        if store_lock is not None:
+            os.close(store_lock)
+        os.close(parent_descriptor)
+
+
 def transition_pending(
     locked: LockedPending,
     target: PendingState,
@@ -777,8 +861,55 @@ class _AuditEvent:
         ).encode("ascii")
 
 
-def _open_audit(parent_descriptor: int, name: str) -> int:
-    flags = os.O_WRONLY | os.O_APPEND | _NOFOLLOW | _CLOEXEC | _NONBLOCK
+def _decode_audit_line(body: bytes) -> _AuditEvent:
+    try:
+        payload = json.loads(
+            body.decode("ascii"),
+            object_pairs_hook=_without_duplicate_keys,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+        if not isinstance(payload, dict) or set(payload) != {
+            "operation",
+            "project_id",
+            "request_id",
+            "stage",
+            "status",
+            "timestamp",
+        }:
+            raise ValueError()
+        return _AuditEvent(
+            payload["timestamp"],
+            payload["project_id"],
+            payload["request_id"],
+            payload["operation"],
+            payload["status"],
+            payload["stage"],
+        ).validated()
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise ValueError("family audit file is invalid") from None
+
+
+def _validate_audit_contents(descriptor: int) -> int:
+    size = os.fstat(descriptor).st_size
+    if size > _MAX_AUDIT_BYTES:
+        raise ValueError("family audit file is invalid")
+    body = bytearray()
+    offset = 0
+    while offset < size:
+        chunk = os.pread(descriptor, min(4096, size - offset), offset)
+        if not chunk:
+            raise ValueError("family audit file is invalid")
+        body.extend(chunk)
+        offset += len(chunk)
+    if body and body[-1:] != b"\n":
+        raise ValueError("family audit file is invalid")
+    for line in body.splitlines():
+        _decode_audit_line(bytes(line))
+    return size
+
+
+def _open_audit(parent_descriptor: int, name: str) -> tuple[int, int]:
+    flags = os.O_RDWR | os.O_APPEND | _NOFOLLOW | _CLOEXEC | _NONBLOCK
     created = False
     try:
         descriptor = os.open(
@@ -817,10 +948,60 @@ def _open_audit(parent_descriptor: int, name: str) -> int:
         _validate_private_file(current)
         if not _same_inode(opened, current):
             raise ValueError("family audit file changed")
-        return descriptor
+        return descriptor, _validate_audit_contents(descriptor)
     except BaseException:
         os.close(descriptor)
         raise
+
+
+def _require_audit_identity(
+    parent_descriptor: int, name: str, descriptor: int
+) -> None:
+    try:
+        opened = os.fstat(descriptor)
+        _validate_private_file(opened)
+        current = os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        _validate_private_file(current)
+    except (OSError, PermissionError, ValueError):
+        raise ValueError("family audit file changed") from None
+    if not _same_inode(opened, current):
+        raise ValueError("family audit file changed")
+
+
+def _audit_identity_matches(
+    parent_descriptor: int, name: str, descriptor: int
+) -> bool:
+    try:
+        opened = os.fstat(descriptor)
+        _validate_private_file(opened)
+        current = os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        _validate_private_file(current)
+    except (OSError, PermissionError, ValueError):
+        return False
+    return _same_inode(opened, current)
+
+
+def _rollback_audit_append(
+    parent_descriptor: int,
+    name: str,
+    descriptor: int,
+    original_size: int,
+) -> None:
+    if not _audit_identity_matches(parent_descriptor, name, descriptor):
+        return
+    os.ftruncate(descriptor, original_size)
+    os.fsync(descriptor)
+    _require_audit_identity(parent_descriptor, name, descriptor)
+    os.fsync(parent_descriptor)
+    _require_audit_identity(parent_descriptor, name, descriptor)
 
 
 def append_family_audit(
@@ -845,11 +1026,25 @@ def append_family_audit(
     ).encode()
     parent_descriptor = _open_private_parent(path)
     descriptor: int | None = None
+    original_size: int | None = None
     try:
-        descriptor = _open_audit(parent_descriptor, path.name)
-        _write_all(descriptor, body)
-        os.fsync(descriptor)
-        os.fsync(parent_descriptor)
+        descriptor, original_size = _open_audit(parent_descriptor, path.name)
+        if original_size + len(body) > _MAX_AUDIT_BYTES:
+            raise ValueError("family audit file is invalid")
+        try:
+            _write_all(descriptor, body)
+            os.fsync(descriptor)
+            _require_audit_identity(parent_descriptor, path.name, descriptor)
+            os.fsync(parent_descriptor)
+            _require_audit_identity(parent_descriptor, path.name, descriptor)
+        except BaseException:
+            _rollback_audit_append(
+                parent_descriptor,
+                path.name,
+                descriptor,
+                original_size,
+            )
+            raise
     finally:
         if descriptor is not None:
             os.close(descriptor)
