@@ -7,6 +7,7 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import threading
@@ -250,28 +251,6 @@ _MISSING = (
 
 
 class FamilyIntakePodmanFixtureTest(unittest.TestCase):
-    def test_preserved_run_directory_fd_negative_fixture_reaches_sentinel(self) -> None:
-        with TemporaryDirectory() as temp:
-            family = Path(temp) / "family"
-            run_dir = family / "intake" / "r" / "project" / "run"
-            run_dir.mkdir(parents=True)
-            sentinel_name = ".family-ancestor-" + secrets.token_hex(16)
-            (family / sentinel_name).write_bytes(b"")
-            directory_fd = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY)
-            pinned_file = run_dir / "pinned-nondirectory"
-            pinned_file.write_bytes(b"")
-            nondirectory_fd = os.open(pinned_file, os.O_PATH | os.O_NOFOLLOW)
-            try:
-                self.assertTrue(
-                    _ancestor_sentinel_reachable((directory_fd,), sentinel_name)
-                )
-                self.assertFalse(
-                    _ancestor_sentinel_reachable((nondirectory_fd,), sentinel_name)
-                )
-            finally:
-                os.close(nondirectory_fd)
-                os.close(directory_fd)
-
     def test_concurrent_marker_release_is_idempotent_after_safe_create(self) -> None:
         with TemporaryDirectory() as temp:
             marker = Path(temp) / "done"
@@ -450,6 +429,53 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
 
 @unittest.skipIf(_MISSING is not None, _MISSING or "Podman prerequisite missing")
 class FamilyIntakePodmanTest(unittest.TestCase):
+    def test_preserved_run_directory_fd_negative_fixture_reaches_sentinel(self) -> None:
+        with TemporaryDirectory() as temp:
+            family = Path(temp) / "family"
+            run_dir = family / "intake" / "r" / "project" / "run"
+            run_dir.mkdir(parents=True)
+            sentinel_name = ".family-ancestor-" + secrets.token_hex(16)
+            (family / sentinel_name).write_bytes(b"")
+            socket_path = run_dir / "intake.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(socket_path))
+            directory_fd = os.open(
+                run_dir,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
+            )
+            try:
+                completed = subprocess.run(
+                    (
+                        "podman",
+                        "run",
+                        "--rm",
+                        "--network=none",
+                        f"--preserve-fd={directory_fd}",
+                        "--mount",
+                        "type=bind,src=" + str(socket_path)
+                        + ",dst=/run/agent-family/intake.sock",
+                        _IMAGE,
+                        "/bin/sh",
+                        "-c",
+                        _fd_probe_command(sentinel_name),
+                    ),
+                    pass_fds=(directory_fd,),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=30,
+                )
+            finally:
+                os.close(directory_fd)
+                listener.close()
+
+        self.assertEqual(
+            completed.returncode,
+            94,
+            "inherited directory FD did not expose the ancestor sentinel; "
+            f"stdout={completed.stdout!r} stderr={completed.stderr!r}",
+        )
+
     def test_real_runtime_ancestry_allows_one_request_and_denies_second(self) -> None:
         variants = tuple(
             (agent, with_egress)

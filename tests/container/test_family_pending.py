@@ -12,13 +12,13 @@ from agent_container.family_issue import canonicalize_family_issue
 from agent_container.family_issue import FamilyIssueDraft
 from agent_container.family_pending import append_family_audit
 from agent_container.family_pending import create_pending
-from agent_container.family_pending import expire_pending
+from agent_container.family_pending import _expire_pending as expire_pending
 from agent_container.family_pending import list_pending
 from agent_container.family_pending import load_pending
 from agent_container.family_pending import pending_lock
 from agent_container.family_pending import PendingState
 from agent_container.family_pending import recover_sending
-from agent_container.family_pending import transition_pending
+from agent_container.family_pending import _transition_pending as transition_pending
 
 
 NOW = 1_800_000_000
@@ -57,6 +57,12 @@ class PendingStoreTest(unittest.TestCase):
 
     def _record_path(self, request_id: str) -> Path:
         return self.store / f"{request_id}.json"
+
+    # Break caught: a caller bypassing the durable audit outbox through a
+    # supported non-audited state-transition API.
+    def test_public_api_exposes_no_non_audited_transition(self) -> None:
+        self.assertFalse(hasattr(family_pending, "transition_pending"))
+        self.assertFalse(hasattr(family_pending, "expire_pending"))
 
     def _replace_cleanup_name(self, leaked_name: str):
         real_unlink_owned = family_pending._unlink_owned

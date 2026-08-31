@@ -1112,7 +1112,7 @@ def initialize_pending_store(
         os.close(parent_descriptor)
 
 
-def transition_pending(
+def _transition_pending(
     locked: LockedPending,
     target: PendingState,
     *,
@@ -1310,7 +1310,7 @@ def transition_pending_audited(
         status,
         stage,
     ).validated()
-    transition_pending(
+    _transition_pending(
         locked,
         target,
         issue_number=issue_number,
@@ -1320,7 +1320,7 @@ def transition_pending_audited(
     return _drain_audit_event(locked, audit_path=audit_path)
 
 
-def expire_pending(
+def _expire_pending(
     store: Path,
     request_id: str,
     expected_project_id: str,
@@ -1334,7 +1334,7 @@ def expire_pending(
             or timestamp < locked.request.expires_at
         ):
             raise ValueError("family pending request cannot expire")
-        return transition_pending(locked, PendingState.EXPIRED)
+        return _transition_pending(locked, PendingState.EXPIRED)
 
 
 def recover_sending(

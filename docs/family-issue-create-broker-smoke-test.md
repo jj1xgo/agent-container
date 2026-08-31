@@ -24,17 +24,18 @@ PYTHONPATH=src python3 -m unittest tests.integration.test_family_forced_unknown 
 git diff --check
 ```
 
-固定期待値はCodex suiteは`Ran 21 tests ... OK`、container suiteは`Ran 927 tests ... OK`、socket suiteは`Ran 17 tests ... OK`、forced-unknown fixtureは`Ran 4 tests ... OK`です。すべてのcommandでunexpected skipは0件を要求し、件数不一致または1件でも想定外skipがあればPASSにしません。duplicate denial、content-free audit、credential non-exposure、terminal cleanup、forced unknownとcreated / not-created reconciliationがunit／socket testで通ったことをtest名と件数で記録します。秘密値やcanonical本文を記録しません。
+固定期待値はCodex suiteは`Ran 21 tests ... OK`、container suiteは`Ran 929 tests ... OK`、socket suiteは`Ran 17 tests ... OK`、forced-unknown fixtureは`Ran 4 tests ... OK`です。すべてのcommandでunexpected skipは0件を要求し、件数不一致または1件でも想定外skipがあればPASSにしません。duplicate denial、content-free audit、credential non-exposure、terminal cleanup、forced unknownとcreated / not-created reconciliationがunit／socket testで通ったことをtest名と件数で記録します。秘密値やcanonical本文を記録しません。
 
 ## 2. Real Podman gate
 
 これはunit testで代替できない必須gateです。Podman 5.8以降、local rootless Podman、crun、instrumented imageが必要です。remote Podmanや別OCI runtimeではnot runです。
 
 ```bash
+bin/agentctl --image localhost/agent-family-test:local build
 AGENT_CONTAINER_RUN_SOCKET_INTEGRATION=1 AGENT_CONTAINER_RUN_PODMAN_INTEGRATION=1 AGENT_FAMILY_TEST_IMAGE=localhost/agent-family-test:local PYTHONPATH=src python3 -m unittest tests.integration.test_project_image_podman tests.integration.test_egress_podman tests.integration.test_family_intake_podman -v
 ```
 
-`localhost/agent-family-test:local`はこのcheckoutから事前に構築し、probe commandを実行できる使い捨てinstrumented imageだけに付けるlocal tagです。通常のproduction imageやremote registry imageへ置き換えません。Podman、socket許可、crun、imageのmissing prerequisiteごとにnot runと理由を個別記録し、skipをまとめてPASSにしません。
+最初のcommandは必ず検証対象のcheckout直下で実行します。`localhost/agent-family-test:local`はそのcheckoutから構築し、probe commandを実行できる使い捨てinstrumented imageだけに付けるlocal tagです。通常のproduction imageやremote registry imageへ置き換えません。固定期待値はPodman suiteは`Ran 14 tests ... OK`かつunexpected skip 0件です。件数不一致または1件でもskipがあればPASSにせず、Podman、socket許可、crun、imageのmissing prerequisiteごとにnot runと理由を個別記録します。
 
 Family gateではCodex pathとClaude pathの両方について、次を実観測します。
 

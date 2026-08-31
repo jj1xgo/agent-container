@@ -21,7 +21,7 @@ from agent_container.family_pending import create_pending
 from agent_container.family_pending import load_pending
 from agent_container.family_pending import pending_lock
 from agent_container.family_pending import PendingState
-from agent_container.family_pending import transition_pending
+from agent_container.family_pending import _transition_pending as transition_pending
 from agent_container.family_state import FamilyBinding
 from agent_container.family_state import FamilyStateLayout
 from agent_container.family_state import write_family_binding

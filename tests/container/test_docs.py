@@ -791,12 +791,17 @@ class FamilyIssueBrokerDocumentationTest(unittest.TestCase):
         )
         for expected in (
             "Codex suiteは`Ran 21 tests ... OK`",
-            "container suiteは`Ran 927 tests ... OK`",
+            "container suiteは`Ran 929 tests ... OK`",
             "socket suiteは`Ran 17 tests ... OK`",
             "forced-unknown fixtureは`Ran 4 tests ... OK`",
+            "Podman suiteは`Ran 14 tests ... OK`",
             "unexpected skipは0件",
         ):
             self.assertIn(expected, self.smoke)
+        self.assertIn(
+            "bin/agentctl --image localhost/agent-family-test:local build",
+            self.smoke,
+        )
         self.assertIn("Ran 4 tests", self.smoke)
         self.assertIn("missing prerequisiteごとにnot run", self.smoke)
         self.assertNotIn("UNOBSERVED", self.operator + self.smoke)
