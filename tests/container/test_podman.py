@@ -60,6 +60,7 @@ class PodmanCommandTest(unittest.TestCase):
 
         family = mock.Mock()
         family.check.return_value = None
+        family.validate_mount.side_effect = lambda: events.append("revalidated")
         gateway = mock.Mock()
         gateway.wait_failed.return_value = False
         egress = EgressRuntimeMount(
@@ -89,6 +90,7 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertEqual(
             events,
             [
+                "revalidated",
                 ("stopped", 4321, os.WUNTRACED),
                 ("registered", 4321),
                 ("signal", 4321, signal.SIGCONT),
@@ -134,6 +136,54 @@ class PodmanCommandTest(unittest.TestCase):
 
         self.assertEqual(signals, [(4321, signal.SIGKILL)])
 
+    def test_family_health_failure_stops_then_kills_exact_named_container(self) -> None:
+        class Process:
+            pid = 4321
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                self.returncode = -signal.SIGKILL
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    raise subprocess.TimeoutExpired(("podman", "run"), timeout)
+                return self.returncode
+
+        family = mock.Mock()
+        family.container_name = "agent-family-safe"
+        family.check.side_effect = RuntimeError("broker failed")
+        cleanups = []
+        with mock.patch(
+            "agent_container.podman.subprocess.Popen", return_value=Process()
+        ), mock.patch(
+            "agent_container.podman.os.waitpid",
+            return_value=(4321, (signal.SIGSTOP << 8) | 0x7F),
+        ), mock.patch("agent_container.podman.os.kill"), mock.patch(
+            "agent_container.podman.time.sleep"
+        ) as slept, mock.patch(
+            "agent_container.podman.subprocess.run",
+            side_effect=lambda argv, **_kwargs: cleanups.append(tuple(argv))
+            or subprocess.CompletedProcess(argv, 1 if len(cleanups) == 1 else 0),
+        ), self.assertRaisesRegex(RuntimeError, "broker failed"):
+            run_command_supervised(
+                CommandSpec(("podman", "run", "image"), {}), None, None, family
+            )
+
+        self.assertEqual(slept.call_args.args, (0.1,))
+        self.assertEqual(
+            cleanups,
+            [
+                ("podman", "stop", "--ignore", "--time=2", "agent-family-safe"),
+                ("podman", "kill", "--signal=KILL", "agent-family-safe"),
+            ],
+        )
+
     def test_family_runtime_mount_is_exactly_bounded_for_both_agents(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")
         handover = Path("/handovers/agent-container")
@@ -152,16 +202,17 @@ class PodmanCommandTest(unittest.TestCase):
             },
         )
 
-        specs = (
-            run_codex_spec(
-                layout, handover, IMAGE, os.getuid(), os.getgid(),
-                family_mount=family,
-            ),
-            run_claude_spec(
-                layout, handover, IMAGE, os.getuid(), os.getgid(),
-                HANDOVER_BROKER, family_mount=family,
-            ),
-        )
+        with mock.patch.object(FamilyRuntimeMount, "revalidate"):
+            specs = (
+                run_codex_spec(
+                    layout, handover, IMAGE, os.getuid(), os.getgid(),
+                    family_mount=family,
+                ),
+                run_claude_spec(
+                    layout, handover, IMAGE, os.getuid(), os.getgid(),
+                    HANDOVER_BROKER, family_mount=family,
+                ),
+            )
         for spec in specs:
             with self.subTest(agent=spec.argv[-1]):
                 self.assertEqual(

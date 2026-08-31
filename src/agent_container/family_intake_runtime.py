@@ -10,14 +10,14 @@ import socket
 import stat
 import threading
 import time
-from types import MappingProxyType
-from typing import Callable, Mapping
+from typing import Callable
 
 from agent_container.family_intake_broker import FamilyIntakeSession
 from agent_container.family_intake_transport import handle_family_intake_connection
 from agent_container.family_pending import initialize_pending_store
 from agent_container.family_state import FamilyStateLayout
 from agent_container.family_state import load_family_binding
+from agent_container.family_runtime_mount import FamilyRuntimeMount
 from agent_container.state import ensure_private_directory
 
 
@@ -49,30 +49,6 @@ def _private_directory(metadata: os.stat_result) -> bool:
         and stat.S_IMODE(metadata.st_mode) == 0o700
         and metadata.st_uid == os.getuid()
     )
-
-
-@dataclass(frozen=True)
-class FamilyRuntimeMount:
-    socket_dir: Path
-    capability: str = field(repr=False)
-    environment: Mapping[str, str] = field(repr=False)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.socket_dir, Path) or not self.socket_dir.is_absolute():
-            raise ValueError("family runtime mount is invalid")
-        if type(self.capability) is not str or _CAPABILITY.fullmatch(self.capability) is None:
-            raise ValueError("family runtime mount is invalid")
-        expected = {
-            "AGENT_FAMILY_SOCKET": _CONTAINER_SOCKET,
-            "AGENT_FAMILY_CAPABILITY": self.capability,
-        }
-        if dict(self.environment) != expected:
-            raise ValueError("family runtime mount is invalid")
-        object.__setattr__(self, "environment", MappingProxyType(expected))
-
-    @property
-    def socket_path(self) -> Path:
-        return self.socket_dir / "intake.sock"
 
 
 @dataclass
@@ -233,7 +209,9 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
                 "AGENT_FAMILY_SOCKET": _CONTAINER_SOCKET,
                 "AGENT_FAMILY_CAPABILITY": capability,
             }
-            self._mount = FamilyRuntimeMount(run_dir, capability, environment)
+            self._mount = FamilyRuntimeMount.capture(
+                run_dir, capability, environment
+            )
             thread = threading.Thread(
                 target=self._serve,
                 args=(listener,),
@@ -270,6 +248,18 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
         except ValueError:
             raise FamilyIntakeRuntimeError(
                 "family intake runtime registration failed"
+            ) from None
+
+    def validate_mount(self) -> None:
+        if self._mount is None or self._stop.is_set():
+            raise FamilyIntakeRuntimeError(
+                "family intake runtime mount is invalid"
+            )
+        try:
+            self._mount.revalidate()
+        except ValueError:
+            raise FamilyIntakeRuntimeError(
+                "family intake runtime mount is invalid"
             ) from None
 
     def _serve(self, listener: socket.socket) -> None:

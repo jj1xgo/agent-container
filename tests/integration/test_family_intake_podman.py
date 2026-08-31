@@ -13,8 +13,12 @@ from agent_container.family_state import FamilyBinding
 from agent_container.family_state import FamilyStateLayout
 from agent_container.family_state import write_family_binding
 from agent_container.podman import CommandSpec
+from agent_container.podman import run_claude_spec
+from agent_container.podman import run_codex_spec
 from agent_container.podman import run_command_supervised
 from agent_container.state import Repository
+from agent_container.state import StateLayout
+from agent_container.handover_broker_runtime import HandoverRuntimeMount
 
 
 _IMAGE = os.environ.get("AGENT_FAMILY_TEST_IMAGE", "")
@@ -66,25 +70,41 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                 mount = runtime.start()
                 try:
                     payload = (
+                        "test \"$(env | grep -c '^AGENT_FAMILY_')\" -eq 2; "
+                        "! env | grep -E 'family/roadmap|repository_id|private-key|token'; "
+                        "! grep -E 'family/roadmap|private-key|/pending' /proc/self/mountinfo; "
+                        "! find / -xdev -name 'private-key.pem' -print 2>/dev/null | grep .; "
                         "agent-family issue create --title T --summary S "
                         "--context C --acceptance-criterion A; "
                         "agent-family issue create --title T --summary S "
                         "--context C --acceptance-criterion A >/tmp/second 2>&1; "
                         "test $? -ne 0"
                     )
-                    argv = (
-                        "podman", "run", "--rm", "--network=none",
-                        "--read-only", "--cap-drop=all",
-                        "--security-opt=no-new-privileges",
-                        "--userns=keep-id:uid=1000,gid=1000",
-                        "--tmpfs=/tmp:rw,nosuid,nodev,size=16m",
-                        "--label", f"io.agent-container.agent={agent}",
-                        "--mount",
-                        f"type=bind,src={mount.socket_dir},dst=/run/agent-family",
-                        "--env", f"AGENT_FAMILY_SOCKET={mount.environment['AGENT_FAMILY_SOCKET']}",
-                        "--env", f"AGENT_FAMILY_CAPABILITY={mount.capability}",
-                        _IMAGE, "/bin/sh", "-c", payload,
+                    state = StateLayout(root, "demo")
+                    handover = root / "handovers/demo"
+                    for directory in (
+                        state.workspace, state.codex_home, state.cache,
+                        state.gh_dir, state.claude_config, handover,
+                        root / "handover-broker",
+                    ):
+                        directory.mkdir(parents=True, exist_ok=True)
+                    for file_path in (state.codex_auth_file, state.claude_token_file):
+                        file_path.parent.mkdir(parents=True, exist_ok=True)
+                        file_path.write_text("x" * 32, encoding="ascii")
+                    base = (
+                        run_codex_spec(
+                            state, handover, _IMAGE, os.getuid(), os.getgid(),
+                            family_mount=mount,
+                        )
+                        if agent == "codex"
+                        else run_claude_spec(
+                            state, handover, _IMAGE, os.getuid(), os.getgid(),
+                            HandoverRuntimeMount(root / "handover-broker"),
+                            family_mount=mount,
+                        )
                     )
+                    image_index = base.argv.index(_IMAGE)
+                    argv = base.argv[: image_index + 1] + ("/bin/sh", "-c", payload)
 
                     completed = run_command_supervised(
                         CommandSpec(argv, {}), None, None, runtime

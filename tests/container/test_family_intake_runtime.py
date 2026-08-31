@@ -161,6 +161,42 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
         self.assertFalse(run_dir.exists())
         runtime.close()
 
+    def test_mount_revalidation_rejects_socket_inode_replacement(self) -> None:
+        runtime = self.runtime()
+        mount = runtime.start()
+        original = mount.socket_path.with_name("original.sock")
+        mount.socket_path.rename(original)
+        replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            replacement.bind(str(mount.socket_path))
+            os.chmod(mount.socket_path, 0o600)
+            with self.assertRaisesRegex(ValueError, "mount is invalid"):
+                mount.revalidate()
+        finally:
+            replacement.close()
+            mount.socket_path.unlink(missing_ok=True)
+            original.rename(mount.socket_path)
+            runtime.close()
+
+    def test_mount_revalidation_rejects_run_directory_replacement(self) -> None:
+        runtime = self.runtime()
+        mount = runtime.start()
+        original = mount.socket_dir.with_name(mount.socket_dir.name + "-old")
+        mount.socket_dir.rename(original)
+        mount.socket_dir.mkdir(mode=0o700)
+        replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            replacement.bind(str(mount.socket_path))
+            os.chmod(mount.socket_path, 0o600)
+            with self.assertRaisesRegex(ValueError, "mount is invalid"):
+                mount.revalidate()
+        finally:
+            replacement.close()
+            mount.socket_path.unlink(missing_ok=True)
+            mount.socket_dir.rmdir()
+            original.rename(mount.socket_dir)
+            runtime.close()
+
     # Break caught: missing or malformed binding still enabling credential-free intake.
     def test_start_requires_valid_binding_and_leaves_no_live_socket(self) -> None:
         self.layout.family_binding_file.write_text("{}\n", encoding="ascii")

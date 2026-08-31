@@ -4,9 +4,10 @@ from pathlib import Path
 import re
 import signal
 import subprocess
+import time
 
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
-from agent_container.family_intake_runtime import FamilyRuntimeMount
+from agent_container.family_runtime_mount import FamilyRuntimeMount
 from agent_container.egress_broker_runtime import EgressBrokerRuntime
 from agent_container.egress_broker_runtime import EgressBrokerRuntimeError
 from agent_container.egress_broker_runtime import EgressRuntimeMount
@@ -225,7 +226,7 @@ def _handover_broker_args(broker: HandoverRuntimeMount) -> list[str]:
 
 
 def _family_runtime_args(
-    layout: StateLayout, family: FamilyRuntimeMount
+    layout: StateLayout, family: FamilyRuntimeMount, *, named_by_egress: bool
 ) -> list[str]:
     if type(family) is not FamilyRuntimeMount:
         raise ValueError("family runtime mount is invalid")
@@ -249,7 +250,8 @@ def _family_runtime_args(
         or dict(family.environment) != expected_environment
     ):
         raise ValueError("family runtime mount is invalid")
-    return [
+    family.revalidate()
+    arguments = [
         "--mount",
         _mount(socket_dir, _FAMILY_RUNTIME_PATH),
         "--env",
@@ -257,6 +259,9 @@ def _family_runtime_args(
         "--env",
         f"AGENT_FAMILY_CAPABILITY={family.capability}",
     ]
+    if not named_by_egress:
+        arguments[:0] = [f"--name={family.container_name}"]
+    return arguments
 
 
 def build_image_spec(
@@ -621,7 +626,9 @@ def run_codex_spec(
     if egress is not None:
         argv += _egress_args(layout, "codex", egress)
     if family_mount is not None:
-        argv += _family_runtime_args(layout, family_mount)
+        argv += _family_runtime_args(
+            layout, family_mount, named_by_egress=egress is not None
+        )
     argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image]
     if egress is not None:
         argv += ["agent-egress-runtime", "--"]
@@ -674,7 +681,9 @@ def run_claude_spec(
     if egress is not None:
         argv += _egress_args(layout, "claude", egress)
     if family_mount is not None:
-        argv += _family_runtime_args(layout, family_mount)
+        argv += _family_runtime_args(
+            layout, family_mount, named_by_egress=egress is not None
+        )
     argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image]
     if egress is not None:
         argv += ["agent-egress-runtime", "--"]
@@ -737,6 +746,7 @@ def run_command_supervised(
     try:
         launch_argv = spec.argv
         if family_runtime is not None:
+            family_runtime.validate_mount()
             launch_argv = (
                 "/bin/sh",
                 "-c",
@@ -770,6 +780,8 @@ def run_command_supervised(
             if gateway is not None and gateway.wait_failed(0.1):
                 gateway_failed = True
                 break
+            if gateway is None:
+                time.sleep(0.1)
             if family_runtime is not None:
                 family_runtime.check()
     except BaseException as error:
@@ -785,6 +797,8 @@ def run_command_supervised(
         _reap_process(process)
         if egress is not None:
             _stop_egress_container(egress)
+        elif family_runtime is not None:
+            _stop_named_container(family_runtime.container_name)
         if failure is not None:
             raise failure
         raise EgressBrokerRuntimeError("egress gateway failed")
@@ -794,6 +808,8 @@ def run_command_supervised(
         _reap_process(process)
         if egress is not None:
             _stop_egress_container(egress)
+        elif family_runtime is not None:
+            _stop_named_container(family_runtime.container_name)
         raise EgressBrokerRuntimeError("egress gateway failed") from None
     if returncode != 0:
         raise subprocess.CalledProcessError(returncode, spec.argv)
@@ -816,7 +832,15 @@ def _reap_process(process: subprocess.Popen[str]) -> None:
 
 
 def _stop_egress_container(egress: EgressRuntimeMount) -> None:
-    stop = egress_runtime_stop_spec(egress)
+    _stop_named_container(egress.container_name)
+
+
+def _stop_named_container(container_name: str) -> None:
+    if re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,127}", container_name) is None:
+        raise EgressBrokerRuntimeError("runtime cleanup failed")
+    stop = CommandSpec(
+        ("podman", "stop", "--ignore", "--time=2", container_name), {}
+    )
     try:
         completed = subprocess.run(
             stop.argv,
@@ -829,7 +853,9 @@ def _stop_egress_container(egress: EgressRuntimeMount) -> None:
         completed = None
     if completed is not None and completed.returncode == 0:
         return
-    kill = egress_runtime_kill_spec(egress)
+    kill = CommandSpec(
+        ("podman", "kill", "--signal=KILL", container_name), {}
+    )
     try:
         completed = subprocess.run(
             kill.argv,

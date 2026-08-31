@@ -41,8 +41,6 @@ from agent_container.github_broker_runtime import upgrade_legacy_broker_policy
 from agent_container.github_broker_runtime import write_broker_policy
 from agent_container.handover_broker_runtime import HandoverBrokerRuntime
 from agent_container.handover_broker_runtime import HandoverBrokerRuntimeError
-from agent_container.family_intake_runtime import FamilyIntakeRuntime
-from agent_container.family_state import FamilyStateLayout
 from agent_container.github_app import GitHubAppMetadata
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_policy import validate_repository_id
@@ -1380,8 +1378,7 @@ def main(
     family_inventory: object | None = None,
     family_creator: object | None = None,
     family_clock: Callable[[], int] | None = None,
-    family_runtime_factory: Callable[[FamilyStateLayout], FamilyIntakeRuntime]
-    = FamilyIntakeRuntime.create,
+    family_runtime_factory: Callable | None = None,
     runtime_supervisor: Callable | None = None,
 ) -> int:
     try:
@@ -1431,6 +1428,7 @@ def main(
         if arguments.command == "family":
             try:
                 from agent_container.family_cli import dispatch_family
+                from agent_container.family_state import FamilyStateLayout
                 state_layout = StateLayout.from_environment(
                     arguments.project, environment
                 )
@@ -1695,6 +1693,9 @@ def main(
             if runtime_spec_builder is not None:
                 builders = {**builders, "codex": runtime_spec_builder}
             with ExitStack() as stack:
+                from agent_container.family_intake_runtime import FamilyIntakeRuntime
+                from agent_container.family_state import FamilyStateLayout
+
                 family_layout = FamilyStateLayout(layout.root, layout.project_id)
                 try:
                     os.lstat(family_layout.family_binding_file)
@@ -1702,7 +1703,12 @@ def main(
                     family_runtime = None
                     family_mount = None
                 else:
-                    family_runtime = family_runtime_factory(family_layout)
+                    factory = (
+                        FamilyIntakeRuntime.create
+                        if family_runtime_factory is None
+                        else family_runtime_factory
+                    )
+                    family_runtime = factory(family_layout)
                     family_mount = stack.enter_context(family_runtime)
                 egress_runtime = (
                     EgressBrokerRuntime.create(

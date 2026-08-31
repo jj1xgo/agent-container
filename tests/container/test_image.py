@@ -309,6 +309,10 @@ class ContainerImageContractTest(unittest.TestCase):
                 "src/agent_container/family_github_app.py",
                 "src/agent_container/family_issue_create.py",
                 "src/agent_container/family_state.py",
+                "src/agent_container/family_intake_broker.py",
+                "src/agent_container/family_intake_runtime.py",
+                "src/agent_container/family_intake_transport.py",
+                "src/agent_container/family_pending.py",
                 "!profiles/",
                 "!profiles/codex/",
                 "!profiles/codex/**",
@@ -376,6 +380,10 @@ class ContainerImageContractTest(unittest.TestCase):
                 "src/agent_container/family_cli.py",
                 "src/agent_container/family_github_app.py",
                 "src/agent_container/family_state.py",
+                "src/agent_container/family_intake_broker.py",
+                "src/agent_container/family_intake_runtime.py",
+                "src/agent_container/family_intake_transport.py",
+                "src/agent_container/family_pending.py",
             }
             & included,
             set(),
@@ -388,6 +396,15 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertNotIn("family_app_file", image_source)
         self.assertNotIn("family_private_key_file", image_source)
         self.assertNotIn("FamilyInstallationTokenProvider", image_source)
+        for module in ("agentctl.py", "podman.py"):
+            source = (ROOT / "src/agent_container" / module).read_text("utf-8")
+            top_level = source.split("\ndef ", 1)[0]
+            self.assertNotIn(
+                "from agent_container.family_state import", top_level
+            )
+            self.assertNotIn(
+                "from agent_container.family_intake_runtime import", top_level
+            )
 
     def test_containerignore_includes_every_tracked_copy_input(self) -> None:
         patterns = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()
@@ -416,6 +433,10 @@ class ContainerImageContractTest(unittest.TestCase):
                     "src/agent_container/family_github_app.py",
                     "src/agent_container/family_issue_create.py",
                     "src/agent_container/family_state.py",
+                    "src/agent_container/family_intake_broker.py",
+                    "src/agent_container/family_intake_runtime.py",
+                    "src/agent_container/family_intake_transport.py",
+                    "src/agent_container/family_pending.py",
                 }:
                     self.assertFalse(containerignore_includes(path, patterns))
                 else:

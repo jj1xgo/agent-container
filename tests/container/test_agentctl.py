@@ -2117,19 +2117,20 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 self.assertNotIn("family/roadmap", joined)
                 return subprocess.CompletedProcess(spec.argv, 0)
 
-            result = main(
-                ["run", "agent-container"],
-                environment={"AGENT_CONTAINER_HOME": str(root)},
-                runner=successful_podman_result,
-                git_remote_reader=lambda _path: (
-                    "https://github.com/jj1xgo/agent-container.git"
-                ),
-                family_runtime_factory=lambda layout: (
-                    events.append(("factory", layout)) or Runtime()
-                ),
-                runtime_supervisor=supervisor,
-                stdout=StringIO(),
-            )
+            with patch.object(FamilyRuntimeMount, "revalidate"):
+                result = main(
+                    ["run", "agent-container"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=successful_podman_result,
+                    git_remote_reader=lambda _path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    family_runtime_factory=lambda layout: (
+                        events.append(("factory", layout)) or Runtime()
+                    ),
+                    runtime_supervisor=supervisor,
+                    stdout=StringIO(),
+                )
 
             self.assertEqual(result, 0)
             self.assertEqual(events[0][0], "factory")
