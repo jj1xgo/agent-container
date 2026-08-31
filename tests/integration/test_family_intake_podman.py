@@ -509,6 +509,15 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                 os.close(sentinel_descriptor)
                 runtime = FamilyIntakeRuntime.create(layout)
                 mount = runtime.start()
+                process_reads = []
+                assert runtime.session is not None
+                process_reader = runtime.session.process_reader
+
+                def record_process_read(pid):
+                    process_reads.append(pid)
+                    return process_reader(pid)
+
+                runtime.session.process_reader = record_process_read
                 inspector = None
                 marker_paths = ()
                 try:
@@ -579,10 +588,16 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     inspector = threading.Thread(target=inspect_running_container)
                     inspector.start()
                     try:
-                        completed = run_command_supervised(
-                            CommandSpec(argv, {}, base.pass_fds),
-                            None, egress, runtime, mount,
-                        )
+                        try:
+                            completed = run_command_supervised(
+                                CommandSpec(argv, {}, base.pass_fds),
+                                None, egress, runtime, mount,
+                            )
+                        except (RuntimeError, subprocess.CalledProcessError) as error:
+                            raise AssertionError(
+                                "family peer validation process reads: "
+                                + str(len(process_reads))
+                            ) from error
                     finally:
                         _release_marker(done_marker)
                         inspector.join(timeout=10)
