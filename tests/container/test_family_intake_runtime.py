@@ -78,6 +78,25 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
         values.update(changes)
         return FamilyIntakeRuntime.create(**values)  # type: ignore[arg-type]
 
+    # Break caught: first runtime startup requiring callers to pre-create
+    # internal pending and audit directories.
+    def test_start_initializes_fresh_project_storage(self) -> None:
+        self.layout.family_audit_file.parent.rmdir()
+        self.layout.family_pending_dir.rmdir()
+
+        runtime = self.runtime()
+        with patch(
+            "agent_container.family_intake_runtime.initialize_pending_store",
+            side_effect=RuntimeError("controlled recovery stop"),
+        ), self.assertRaises(FamilyIntakeRuntimeError):
+            runtime.start()
+        for directory in (
+            self.layout.family_pending_dir,
+            self.layout.family_audit_file.parent,
+        ):
+            self.assertTrue(directory.is_dir())
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+
     # Break caught: future Podman wiring needing to reconstruct or leak host runtime values.
     def test_mount_contains_only_socket_directory_capability_and_exact_environment(self) -> None:
         mount = FamilyRuntimeMount(

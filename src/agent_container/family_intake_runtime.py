@@ -147,6 +147,11 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
         listener: socket.socket | None = None
         try:
             load_family_binding(self.layout.family_binding_file)
+            for directory in (
+                self.layout.family_pending_dir,
+                self.layout.family_audit_file.parent,
+            ):
+                ensure_private_directory(directory, create=True)
             initialize_pending_store(
                 self.layout.family_pending_dir,
                 self.layout.project_id,
