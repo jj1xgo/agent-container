@@ -355,28 +355,32 @@ class ContainerImageContractTest(unittest.TestCase):
 
     def test_effective_image_source_set_excludes_host_only_family_modules(self) -> None:
         patterns = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()
-        source_files = sorted((ROOT / "src/agent_container").glob("*.py"))
+        source_files = sorted((ROOT / "src/agent_container").rglob("*.py"))
         included = {
-            path.name
+            path.relative_to(ROOT).as_posix()
             for path in source_files
             if containerignore_includes(str(path.relative_to(ROOT)), patterns)
         }
 
         self.assertTrue(
             {
-                "family_intake_client.py",
-                "family_intake_protocol.py",
-                "family_issue.py",
+                "src/agent_container/family_intake_client.py",
+                "src/agent_container/family_intake_protocol.py",
+                "src/agent_container/family_issue.py",
             }.issubset(included)
         )
         self.assertEqual(
-            {"family_github_app.py", "family_state.py"} & included,
+            {
+                "src/agent_container/family_github_app.py",
+                "src/agent_container/family_state.py",
+            }
+            & included,
             set(),
         )
         image_source = "\n".join(
             path.read_text(encoding="utf-8")
             for path in source_files
-            if path.name in included
+            if path.relative_to(ROOT).as_posix() in included
         )
         self.assertNotIn("family_app_file", image_source)
         self.assertNotIn("family_private_key_file", image_source)

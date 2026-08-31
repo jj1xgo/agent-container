@@ -1,3 +1,4 @@
+from base64 import urlsafe_b64encode
 from dataclasses import dataclass, field
 from datetime import datetime
 import http.client
@@ -6,8 +7,9 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import time
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Protocol
 import urllib.error
 import urllib.request
 
@@ -19,10 +21,7 @@ from agent_container.github_app import MAX_RESPONSE_BYTES
 from agent_container.github_app import TOKEN_REFRESH_MARGIN_SECONDS
 from agent_container.github_app import HttpResponse
 from agent_container.github_app import InstallationToken
-from agent_container.github_app import OpenSSLSigner
-from agent_container.github_app import Signer
 from agent_container.github_app import Transport
-from agent_container.github_app import create_app_jwt
 from agent_container.github_app import github_transport
 from agent_container.github_values import validate_repository_id
 from agent_container.state import Repository
@@ -34,6 +33,13 @@ _REPOSITORY_INVENTORY_URL = (
     f"{GITHUB_API}/installation/repositories?per_page=100"
 )
 _USER_AGENT = "agent-container-family-approval"
+_METADATA_PROVENANCE = object()
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+MAX_APP_METADATA_BYTES = 4096
+MAX_PRIVATE_KEY_BYTES = 65_536
+OPENSSL = "/usr/bin/openssl"
 
 
 def _object_without_duplicates(
@@ -47,82 +53,402 @@ def _object_without_duplicates(
     return result
 
 
-def _ensure_exact_private_file(path: Path) -> Path:
-    if not path.is_absolute():
-        raise ValueError("family GitHub App private path is invalid")
-    try:
-        resolved = path.resolve(strict=True)
-        metadata = path.stat()
-    except (OSError, RuntimeError):
-        raise ValueError("family GitHub App private path is invalid") from None
-    if resolved != path or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-        raise ValueError("family GitHub App private path is invalid")
-    if stat.S_IMODE(metadata.st_mode) != 0o600:
-        raise PermissionError("family GitHub App private file is not private")
-    if metadata.st_uid != os.getuid():
-        raise PermissionError("family GitHub App private file is not private")
-    return resolved
+FileIdentity = tuple[int, int]
 
 
-def _ensure_exact_private_directory(path: Path) -> Path:
-    if not path.is_absolute():
-        raise ValueError("family GitHub App private path is invalid")
-    try:
-        resolved = path.resolve(strict=True)
-        metadata = path.stat()
-    except (OSError, RuntimeError):
-        raise ValueError("family GitHub App private path is invalid") from None
-    if resolved != path or not stat.S_ISDIR(metadata.st_mode):
-        raise ValueError("family GitHub App private path is invalid")
+def _same_identity(metadata: os.stat_result) -> FileIdentity:
+    return metadata.st_dev, metadata.st_ino
+
+
+def _validate_private_directory(metadata: os.stat_result) -> None:
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError("family GitHub App metadata is invalid")
     if stat.S_IMODE(metadata.st_mode) != 0o700 or metadata.st_uid != os.getuid():
         raise PermissionError("family GitHub App private directory is not private")
-    return resolved
 
 
-@dataclass(frozen=True)
+def _validate_private_file(metadata: os.stat_result) -> None:
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise ValueError("family GitHub App metadata is invalid")
+    if stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_uid != os.getuid():
+        raise PermissionError("family GitHub App private file is not private")
+
+
+def _open_directory(path: Path) -> tuple[int, FileIdentity]:
+    if not path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts[1:]):
+        raise ValueError("family GitHub App metadata is invalid")
+    descriptor = os.open(os.sep, os.O_RDONLY | _DIRECTORY | _NOFOLLOW | _CLOEXEC)
+    try:
+        for component in path.parts[1:]:
+            before = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+            child = os.open(
+                component,
+                os.O_RDONLY | _DIRECTORY | _NOFOLLOW | _CLOEXEC,
+                dir_fd=descriptor,
+            )
+            try:
+                opened = os.fstat(child)
+                if _same_identity(before) != _same_identity(opened):
+                    raise ValueError("family GitHub App metadata is invalid")
+            except BaseException:
+                os.close(child)
+                raise
+            os.close(descriptor)
+            descriptor = child
+        opened = os.fstat(descriptor)
+        _validate_private_directory(opened)
+        return descriptor, _same_identity(opened)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_family_directory(
+    layout: FamilyStateLayout,
+) -> tuple[int, FileIdentity, FileIdentity]:
+    root_descriptor, root_identity = _open_directory(layout.root)
+    try:
+        before = os.stat("family", dir_fd=root_descriptor, follow_symlinks=False)
+        family_descriptor = os.open(
+            "family",
+            os.O_RDONLY | _DIRECTORY | _NOFOLLOW | _CLOEXEC,
+            dir_fd=root_descriptor,
+        )
+        try:
+            opened = os.fstat(family_descriptor)
+            if _same_identity(before) != _same_identity(opened):
+                raise ValueError("family GitHub App metadata is invalid")
+            _validate_private_directory(opened)
+        except BaseException:
+            os.close(family_descriptor)
+            raise
+        return family_descriptor, root_identity, _same_identity(opened)
+    finally:
+        os.close(root_descriptor)
+
+
+def _read_all(descriptor: int, maximum_bytes: int) -> bytes:
+    body = bytearray()
+    while len(body) <= maximum_bytes:
+        chunk = os.read(descriptor, min(4096, maximum_bytes + 1 - len(body)))
+        if not chunk:
+            break
+        body.extend(chunk)
+    if len(body) > maximum_bytes:
+        raise ValueError("family GitHub App metadata is invalid")
+    return bytes(body)
+
+
+def _entry_stat(parent_descriptor: int, name: str) -> os.stat_result:
+    metadata = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    _validate_private_file(metadata)
+    return metadata
+
+
+def _open_private_entry(
+    parent_descriptor: int,
+    name: str,
+    *,
+    maximum_bytes: int,
+) -> tuple[int, bytes, FileIdentity]:
+    before = _entry_stat(parent_descriptor, name)
+    if before.st_size > maximum_bytes:
+        raise ValueError("family GitHub App metadata is invalid")
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | _NOFOLLOW | _CLOEXEC,
+        dir_fd=parent_descriptor,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        _validate_private_file(opened)
+        identity = _same_identity(opened)
+        if _same_identity(before) != identity:
+            raise ValueError("family GitHub App metadata is invalid")
+        body = _read_all(descriptor, maximum_bytes)
+        current = _entry_stat(parent_descriptor, name)
+        if _same_identity(current) != identity:
+            raise ValueError("family GitHub App metadata is invalid")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return descriptor, body, identity
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _decode_metadata(body: bytes) -> tuple[str, int]:
+    try:
+        payload = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_object_without_duplicates,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+        )
+        if not isinstance(payload, dict) or set(payload) != {
+            "client_id",
+            "installation_id",
+        }:
+            raise ValueError()
+        client_id = payload["client_id"]
+        installation_id = payload["installation_id"]
+        if (
+            not isinstance(client_id, str)
+            or _CLIENT_ID.fullmatch(client_id) is None
+            or isinstance(installation_id, bool)
+            or not isinstance(installation_id, int)
+            or installation_id <= 0
+        ):
+            raise ValueError()
+        return client_id, installation_id
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        RecursionError,
+        TypeError,
+        ValueError,
+    ):
+        raise ValueError("family GitHub App metadata is invalid") from None
+
+
+@dataclass(frozen=True, init=False)
 class FamilyAppMetadata:
     client_id: str
     installation_id: int
     private_key: Path = field(repr=False)
+    _layout: FamilyStateLayout = field(repr=False)
+    _root: Path = field(repr=False)
+    _app_path: Path = field(repr=False)
+    _root_identity: FileIdentity = field(repr=False)
+    _family_identity: FileIdentity = field(repr=False)
+    _app_identity: FileIdentity = field(repr=False)
+    _key_identity: FileIdentity = field(repr=False)
+    _provenance: object = field(repr=False)
 
     @classmethod
     def load(cls, layout: FamilyStateLayout) -> "FamilyAppMetadata":
-        if type(layout) is not FamilyStateLayout:
+        if cls is not FamilyAppMetadata or type(layout) is not FamilyStateLayout:
             raise ValueError("family GitHub App metadata is invalid")
-        _ensure_exact_private_directory(layout.root)
-        _ensure_exact_private_directory(layout.family_root)
-        metadata_path = _ensure_exact_private_file(layout.family_app_file)
-        private_key = _ensure_exact_private_file(layout.family_private_key_file)
         try:
-            payload = json.loads(
-                metadata_path.read_text(encoding="utf-8"),
-                object_pairs_hook=_object_without_duplicates,
-                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+            family_descriptor, root_identity, family_identity = (
+                _open_family_directory(layout)
             )
-            if not isinstance(payload, dict) or set(payload) != {
-                "client_id",
-                "installation_id",
-            }:
+            try:
+                app_descriptor, app_body, app_identity = _open_private_entry(
+                    family_descriptor,
+                    "app.json",
+                    maximum_bytes=MAX_APP_METADATA_BYTES,
+                )
+                os.close(app_descriptor)
+                key_descriptor, key_body, key_identity = _open_private_entry(
+                    family_descriptor,
+                    "private-key.pem",
+                    maximum_bytes=MAX_PRIVATE_KEY_BYTES,
+                )
+                os.close(key_descriptor)
+            finally:
+                os.close(family_descriptor)
+            if not key_body:
                 raise ValueError()
-            client_id = payload["client_id"]
-            installation_id = payload["installation_id"]
-            if (
-                not isinstance(client_id, str)
-                or _CLIENT_ID.fullmatch(client_id) is None
-                or isinstance(installation_id, bool)
-                or not isinstance(installation_id, int)
-                or installation_id <= 0
-            ):
-                raise ValueError()
-        except (
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-            RecursionError,
-            TypeError,
-            ValueError,
-        ):
+            client_id, installation_id = _decode_metadata(app_body)
+        except PermissionError:
+            raise
+        except (OSError, RuntimeError, TypeError, ValueError):
             raise ValueError("family GitHub App metadata is invalid") from None
-        return cls(client_id, installation_id, private_key)
+        loaded = object.__new__(cls)
+        object.__setattr__(loaded, "client_id", client_id)
+        object.__setattr__(loaded, "installation_id", installation_id)
+        object.__setattr__(loaded, "private_key", layout.family_private_key_file)
+        object.__setattr__(loaded, "_layout", layout)
+        object.__setattr__(loaded, "_root", layout.root)
+        object.__setattr__(loaded, "_app_path", layout.family_app_file)
+        object.__setattr__(loaded, "_root_identity", root_identity)
+        object.__setattr__(loaded, "_family_identity", family_identity)
+        object.__setattr__(loaded, "_app_identity", app_identity)
+        object.__setattr__(loaded, "_key_identity", key_identity)
+        object.__setattr__(loaded, "_provenance", _METADATA_PROVENANCE)
+        return loaded
+
+
+def _validate_metadata_shape(metadata: object) -> FamilyAppMetadata:
+    try:
+        if (
+            type(metadata) is not FamilyAppMetadata
+            or metadata._provenance is not _METADATA_PROVENANCE
+            or type(metadata._layout) is not FamilyStateLayout
+            or metadata._root != metadata._layout.root
+            or metadata._app_path != metadata._layout.family_app_file
+            or metadata.private_key != metadata._layout.family_private_key_file
+            or not isinstance(metadata._root_identity, tuple)
+            or not isinstance(metadata._family_identity, tuple)
+            or not isinstance(metadata._app_identity, tuple)
+            or not isinstance(metadata._key_identity, tuple)
+            or not isinstance(metadata.client_id, str)
+            or _CLIENT_ID.fullmatch(metadata.client_id) is None
+            or isinstance(metadata.installation_id, bool)
+            or not isinstance(metadata.installation_id, int)
+            or metadata.installation_id <= 0
+        ):
+            raise ValueError()
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError("family GitHub App metadata is invalid") from None
+    return metadata
+
+
+def _open_current_material(
+    metadata: object,
+) -> tuple[FamilyAppMetadata, int, int, FileIdentity]:
+    validated = _validate_metadata_shape(metadata)
+    try:
+        family_descriptor, root_identity, family_identity = _open_family_directory(
+            validated._layout
+        )
+        if (
+            root_identity != validated._root_identity
+            or family_identity != validated._family_identity
+        ):
+            raise ValueError()
+        app_descriptor, app_body, app_identity = _open_private_entry(
+            family_descriptor,
+            "app.json",
+            maximum_bytes=MAX_APP_METADATA_BYTES,
+        )
+        os.close(app_descriptor)
+        if app_identity != validated._app_identity:
+            raise ValueError()
+        client_id, installation_id = _decode_metadata(app_body)
+        if (
+            client_id != validated.client_id
+            or installation_id != validated.installation_id
+        ):
+            raise ValueError()
+        key_descriptor, key_body, key_identity = _open_private_entry(
+            family_descriptor,
+            "private-key.pem",
+            maximum_bytes=MAX_PRIVATE_KEY_BYTES,
+        )
+        if key_identity != validated._key_identity or not key_body:
+            os.close(key_descriptor)
+            raise ValueError()
+        return validated, family_descriptor, key_descriptor, key_identity
+    except BaseException:
+        if "family_descriptor" in locals():
+            os.close(family_descriptor)
+        raise
+
+
+def _close_material(key_descriptor: int, family_descriptor: int) -> None:
+    failed = False
+    for descriptor in (key_descriptor, family_descriptor):
+        try:
+            os.close(descriptor)
+        except OSError:
+            failed = True
+    if failed:
+        raise ValueError("family GitHub App metadata is invalid")
+
+
+def _revalidate_metadata(metadata: object) -> None:
+    try:
+        _, family_descriptor, key_descriptor, _ = _open_current_material(metadata)
+        _close_material(key_descriptor, family_descriptor)
+    except PermissionError:
+        raise ValueError("family GitHub App metadata is invalid") from None
+    except (OSError, RuntimeError, TypeError, ValueError):
+        raise ValueError("family GitHub App metadata is invalid") from None
+
+
+class FamilySigner(Protocol):
+    def sign(self, content: bytes, private_key_descriptor: int) -> bytes: ...
+
+
+@dataclass(frozen=True)
+class FamilyOpenSSLSigner:
+    executable: str = OPENSSL
+
+    def sign(self, content: bytes, private_key_descriptor: int) -> bytes:
+        if self.executable != OPENSSL:
+            raise ValueError("family GitHub App signing failed")
+        try:
+            metadata = os.fstat(private_key_descriptor)
+            _validate_private_file(metadata)
+            completed = subprocess.run(
+                (
+                    self.executable,
+                    "dgst",
+                    "-sha256",
+                    "-sign",
+                    f"/proc/self/fd/{private_key_descriptor}",
+                ),
+                input=content,
+                capture_output=True,
+                check=False,
+                pass_fds=(private_key_descriptor,),
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "LANG": "C",
+                    "LC_ALL": "C",
+                    "OPENSSL_CONF": "/dev/null",
+                },
+            )
+        except (OSError, TypeError, ValueError):
+            raise RuntimeError("family GitHub App signing failed") from None
+        if (
+            completed.returncode != 0
+            or not completed.stdout
+            or len(completed.stdout) > 16_384
+        ):
+            raise RuntimeError("family GitHub App signing failed")
+        return completed.stdout
+
+
+def _b64url(value: bytes) -> str:
+    return urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _create_family_jwt(
+    metadata: FamilyAppMetadata,
+    signer: FamilySigner,
+    private_key_descriptor: int,
+    *,
+    now: int,
+) -> str:
+    if isinstance(now, bool) or not isinstance(now, int) or now < 0:
+        raise ValueError("family GitHub App clock is invalid")
+    header = json.dumps(
+        {"alg": "RS256", "typ": "JWT"}, separators=(",", ":"), sort_keys=True
+    ).encode("ascii")
+    claims = json.dumps(
+        {"exp": now + 540, "iat": now - 60, "iss": metadata.client_id},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    signing_input = f"{_b64url(header)}.{_b64url(claims)}".encode("ascii")
+    signature = signer.sign(signing_input, private_key_descriptor)
+    if not signature:
+        raise RuntimeError("family GitHub App signing failed")
+    return f"{signing_input.decode('ascii')}.{_b64url(signature)}"
+
+
+def _verify_material_after_sign(
+    metadata: FamilyAppMetadata,
+    family_descriptor: int,
+    key_identity: FileIdentity,
+) -> None:
+    if (
+        _same_identity(_entry_stat(family_descriptor, "app.json"))
+        != metadata._app_identity
+        or _same_identity(_entry_stat(family_descriptor, "private-key.pem"))
+        != key_identity
+    ):
+        raise ValueError("family GitHub App metadata is invalid")
+    current_family, root_identity, family_identity = _open_family_directory(
+        metadata._layout
+    )
+    os.close(current_family)
+    if (
+        root_identity != metadata._root_identity
+        or family_identity != metadata._family_identity
+    ):
+        raise ValueError("family GitHub App metadata is invalid")
 
 
 def _parse_expiry(value: object) -> int:
@@ -191,19 +517,49 @@ def _parse_token_response(
 @dataclass
 class FamilyInstallationTokenProvider:
     metadata: FamilyAppMetadata
-    signer: Signer = field(default_factory=OpenSSLSigner)
+    signer: FamilySigner = field(default_factory=FamilyOpenSSLSigner)
     transport: Transport = github_transport
     clock: Callable[[], float] = time.time
     _cached: InstallationToken | None = field(default=None, init=False, repr=False)
 
+    def __post_init__(self) -> None:
+        _revalidate_metadata(self.metadata)
+
     def get(self) -> InstallationToken:
         now = int(self.clock())
-        if (
-            self._cached is not None
-            and self._cached.expires_at > now + TOKEN_REFRESH_MARGIN_SECONDS
-        ):
-            return self._cached
-        jwt = create_app_jwt(self.metadata, self.signer, now=now)  # type: ignore[arg-type]
+        try:
+            metadata, family_descriptor, key_descriptor, key_identity = (
+                _open_current_material(self.metadata)
+            )
+        except PermissionError:
+            raise ValueError("family GitHub App metadata is invalid") from None
+        except (OSError, RuntimeError, TypeError, ValueError):
+            raise ValueError("family GitHub App metadata is invalid") from None
+        try:
+            if (
+                self._cached is not None
+                and self._cached.expires_at > now + TOKEN_REFRESH_MARGIN_SECONDS
+            ):
+                return self._cached
+            try:
+                jwt = _create_family_jwt(
+                    metadata,
+                    self.signer,
+                    key_descriptor,
+                    now=now,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError):
+                raise RuntimeError("family GitHub App signing failed") from None
+            try:
+                _verify_material_after_sign(
+                    metadata,
+                    family_descriptor,
+                    key_identity,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError):
+                raise ValueError("family GitHub App metadata is invalid") from None
+        finally:
+            _close_material(key_descriptor, family_descriptor)
         body = json.dumps(
             {"permissions": _TOKEN_PERMISSIONS},
             separators=(",", ":"),

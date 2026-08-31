@@ -1,13 +1,20 @@
 from base64 import urlsafe_b64decode
 from copy import deepcopy
+from datetime import datetime, timezone
+from email.message import Message
 import http.client
+from io import BytesIO
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
+import urllib.request
+import urllib.response
 
+import agent_container.family_github_app as family_github_app
 import agent_container.github_app as development_github_app
 from agent_container.family_github_app import FamilyAppMetadata
 from agent_container.family_github_app import FamilyInstallationTokenProvider
@@ -22,6 +29,36 @@ from agent_container.state import Repository
 
 API_VERSION = "2026-03-10"
 MAX_RESPONSE_BYTES = 1_048_576
+
+
+def redirecting_opener_factory(
+    requests: list[tuple[str, str, str | None]],
+):  # type: ignore[no-untyped-def]
+    real_build_opener = urllib.request.build_opener
+
+    class RedirectingHTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, request):  # type: ignore[no-untyped-def]
+            requests.append(
+                (
+                    request.get_method(),
+                    request.full_url,
+                    request.get_header("Authorization"),
+                )
+            )
+            headers = Message()
+            status = 200 if request.full_url.endswith("/redirect-target") else 302
+            if status == 302:
+                headers["Location"] = "https://api.github.com/redirect-target"
+            response = urllib.response.addinfourl(
+                BytesIO(b""), headers, request.full_url, status
+            )
+            response.msg = "OK" if status == 200 else "Found"
+            return response
+
+    def factory(*handlers):  # type: ignore[no-untyped-def]
+        return real_build_opener(*handlers, RedirectingHTTPSHandler())
+
+    return factory
 
 
 def decode_segment(value: str) -> dict[str, object]:
@@ -266,7 +303,7 @@ class FamilyGitHubAppTest(unittest.TestCase):
 
         hard_link = self.root / "app-hard-link.json"
         os.link(self.layout.family_app_file, hard_link)
-        with self.assertRaisesRegex(ValueError, "family GitHub App private path"):
+        with self.assertRaisesRegex(ValueError, "family GitHub App metadata"):
             self.metadata()
         hard_link.unlink()
 
@@ -282,7 +319,7 @@ class FamilyGitHubAppTest(unittest.TestCase):
         key_target.chmod(0o600)
         self.layout.family_private_key_file.unlink()
         self.layout.family_private_key_file.symlink_to(key_target)
-        with self.assertRaisesRegex(ValueError, "family GitHub App private path"):
+        with self.assertRaisesRegex(ValueError, "family GitHub App metadata"):
             self.metadata()
 
     def test_rejects_family_layout_with_symlinked_ancestor(self) -> None:
@@ -298,8 +335,301 @@ class FamilyGitHubAppTest(unittest.TestCase):
         self.layout.family_root.rmdir()
         self.layout.family_root.symlink_to(real_family, target_is_directory=True)
 
-        with self.assertRaisesRegex(ValueError, "family GitHub App private path"):
+        with self.assertRaisesRegex(ValueError, "family GitHub App metadata"):
             self.metadata()
+
+    def test_rejects_oversized_flat_or_deep_metadata_before_json_parse(self) -> None:
+        valid = json.dumps(
+            {"client_id": "Iv1familyabcdefgh", "installation_id": 123}
+        ).encode("ascii")
+        cases = (
+            valid + b" " * (4097 - len(valid)),
+            (b'{"nested":' * 455) + b"0" + (b"}" * 455),
+        )
+        for body in cases:
+            with self.subTest(size=len(body)):
+                self.layout.family_app_file.write_bytes(body)
+                self.layout.family_app_file.chmod(0o600)
+                with mock.patch(
+                    "agent_container.family_github_app.json.loads",
+                    side_effect=AssertionError("oversized metadata reached JSON"),
+                ) as loads:
+                    with self.assertRaises((ValueError, AssertionError)):
+                        self.metadata()
+                loads.assert_not_called()
+
+    def test_rejects_oversized_private_key_before_signing(self) -> None:
+        self.layout.family_private_key_file.write_bytes(b"K" * 65_537)
+        self.layout.family_private_key_file.chmod(0o600)
+
+        with self.assertRaisesRegex(ValueError, "family GitHub App metadata"):
+            self.metadata()
+
+    def test_descriptor_reader_completes_partial_metadata_and_key_reads(self) -> None:
+        real_read = os.read
+
+        def partial_read(descriptor: int, maximum: int) -> bytes:
+            return real_read(descriptor, min(maximum, 3))
+
+        with mock.patch(
+            "agent_container.family_github_app.os.read", side_effect=partial_read
+        ):
+            metadata = self.metadata()
+
+        self.assertEqual(metadata.client_id, "Iv1familyabcdefgh")
+        self.assertEqual(metadata.installation_id, 123)
+
+    @mock.patch("agent_container.family_github_app.subprocess.run")
+    def test_family_openssl_signer_uses_only_the_pinned_fd_and_fixed_process(
+        self, run: mock.Mock
+    ) -> None:
+        run.return_value = subprocess.CompletedProcess([], 0, b"signature", b"")
+        descriptor = os.open(
+            self.layout.family_private_key_file,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            signature = family_github_app.FamilyOpenSSLSigner().sign(
+                b"content", descriptor
+            )
+        finally:
+            os.close(descriptor)
+
+        self.assertEqual(signature, b"signature")
+        call = run.call_args
+        self.assertEqual(
+            call.args[0],
+            (
+                "/usr/bin/openssl",
+                "dgst",
+                "-sha256",
+                "-sign",
+                f"/proc/self/fd/{descriptor}",
+            ),
+        )
+        self.assertEqual(call.kwargs["pass_fds"], (descriptor,))
+        self.assertEqual(call.kwargs["input"], b"content")
+        self.assertEqual(
+            call.kwargs["env"],
+            {
+                "PATH": "/usr/bin:/bin",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "OPENSSL_CONF": "/dev/null",
+            },
+        )
+        self.assertTrue(call.kwargs["capture_output"])
+        self.assertFalse(call.kwargs["check"])
+
+    def test_rejects_app_entry_swap_before_descriptor_open(self) -> None:
+        replacement = self.layout.family_root / ".replacement-app.json"
+        replacement.write_bytes(self.layout.family_app_file.read_bytes())
+        replacement.chmod(0o600)
+        real_open = os.open
+        swapped = False
+
+        def swap_before_open(path, flags, *args, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal swapped
+            if path == "app.json" and not swapped:
+                swapped = True
+                os.replace(replacement, self.layout.family_app_file)
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch(
+            "agent_container.family_github_app.os.open", side_effect=swap_before_open
+        ):
+            with self.assertRaisesRegex(ValueError, "family GitHub App metadata"):
+                self.metadata()
+
+        self.assertTrue(swapped)
+
+    def test_rejects_app_entry_swap_during_descriptor_read(self) -> None:
+        replacement = self.layout.family_root / ".replacement-app.json"
+        replacement.write_bytes(self.layout.family_app_file.read_bytes())
+        replacement.chmod(0o600)
+        real_read = os.read
+        swapped = False
+
+        def swap_after_read(descriptor: int, maximum: int) -> bytes:
+            nonlocal swapped
+            chunk = real_read(descriptor, maximum)
+            if chunk and not swapped:
+                swapped = True
+                os.replace(replacement, self.layout.family_app_file)
+            return chunk
+
+        with mock.patch(
+            "agent_container.family_github_app.os.read", side_effect=swap_after_read
+        ):
+            with self.assertRaisesRegex(ValueError, "family GitHub App metadata"):
+                self.metadata()
+
+        self.assertTrue(swapped)
+
+    def test_rejects_key_entry_swap_during_descriptor_read(self) -> None:
+        replacement = self.layout.family_root / ".replacement-private-key.pem"
+        replacement.write_bytes(self.layout.family_private_key_file.read_bytes())
+        replacement.chmod(0o600)
+        real_read = os.read
+        swapped = False
+
+        def swap_key_after_read(descriptor: int, maximum: int) -> bytes:
+            nonlocal swapped
+            chunk = real_read(descriptor, maximum)
+            target = os.readlink(f"/proc/self/fd/{descriptor}")
+            if target.endswith("/private-key.pem") and chunk and not swapped:
+                swapped = True
+                os.replace(replacement, self.layout.family_private_key_file)
+            return chunk
+
+        with mock.patch(
+            "agent_container.family_github_app.os.read",
+            side_effect=swap_key_after_read,
+        ):
+            with self.assertRaisesRegex(ValueError, "family GitHub App metadata"):
+                self.metadata()
+
+        self.assertTrue(swapped)
+
+    def test_filesystem_errors_are_fixed_and_do_not_echo_paths(self) -> None:
+        marker = f"filesystem-secret:{self.layout.family_private_key_file}"
+        with mock.patch(
+            "agent_container.family_github_app.os.open",
+            side_effect=OSError(marker),
+        ):
+            with self.assertRaises(ValueError) as raised:
+                self.metadata()
+
+        self.assertEqual(str(raised.exception), "family GitHub App metadata is invalid")
+        self.assertNotIn(marker, repr(raised.exception))
+
+    def test_provider_rejects_replaced_app_or_key_before_side_effects(self) -> None:
+        for replaced in ("app", "key"):
+            with self.subTest(replaced=replaced):
+                metadata = self.metadata()
+                signer = FakeSigner()
+                transport_calls: list[object] = []
+                provider = FamilyInstallationTokenProvider(
+                    metadata,
+                    signer=signer,
+                    transport=lambda *call: (
+                        transport_calls.append(call) or token_response()
+                    ),
+                    clock=lambda: 1_800_000_000,
+                )
+                target = (
+                    self.layout.family_app_file
+                    if replaced == "app"
+                    else self.layout.family_private_key_file
+                )
+                replacement = self.layout.family_root / f".{replaced}-replacement"
+                replacement.write_bytes(target.read_bytes())
+                replacement.chmod(0o600)
+                os.replace(replacement, target)
+
+                with self.assertRaisesRegex(
+                    ValueError, "family GitHub App metadata"
+                ):
+                    provider.get()
+
+                self.assertEqual(signer.calls, [])
+                self.assertEqual(transport_calls, [])
+
+                if replaced == "app":
+                    self.layout.family_app_file.write_text(
+                        json.dumps(
+                            {
+                                "client_id": "Iv1familyabcdefgh",
+                                "installation_id": 123,
+                            }
+                        ),
+                        encoding="ascii",
+                    )
+                else:
+                    self.layout.family_private_key_file.write_text(
+                        "family-private-key-marker", encoding="ascii"
+                    )
+                target.chmod(0o600)
+
+    def test_key_fd_stays_pinned_and_swap_during_sign_fails_before_network(
+        self,
+    ) -> None:
+        metadata = self.metadata()
+        transport_calls: list[object] = []
+
+        class SwappingSigner:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.received_descriptor = False
+                self.pinned_body = b""
+
+            def sign(self, content, private_key):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                self.received_descriptor = isinstance(private_key, int)
+                if self.received_descriptor:
+                    self.pinned_body = os.pread(private_key, 4096, 0)
+                replacement = self.layout.family_root / ".key-during-sign"
+                replacement.write_text("replacement-key-marker", encoding="ascii")
+                replacement.chmod(0o600)
+                os.replace(replacement, self.layout.family_private_key_file)
+                if self.received_descriptor:
+                    self.assertEqual(
+                        os.pread(private_key, 4096, 0), self.pinned_body
+                    )
+                return b"family-binary-signature"
+
+        signer = SwappingSigner()
+        signer.layout = self.layout
+        signer.assertEqual = self.assertEqual
+        provider = FamilyInstallationTokenProvider(
+            metadata,
+            signer=signer,  # type: ignore[arg-type]
+            transport=lambda *call: transport_calls.append(call) or token_response(),
+            clock=lambda: 1_800_000_000,
+        )
+
+        with self.assertRaisesRegex(ValueError, "family GitHub App metadata"):
+            provider.get()
+
+        self.assertEqual(signer.calls, 1)
+        self.assertTrue(signer.received_descriptor)
+        self.assertEqual(signer.pinned_body, b"family-private-key-marker")
+        self.assertEqual(transport_calls, [])
+
+    def test_provider_sanitizes_descriptor_close_failure_before_network(self) -> None:
+        signer = FakeSigner()
+        transport_calls: list[object] = []
+        provider = FamilyInstallationTokenProvider(
+            self.metadata(),
+            signer=signer,
+            transport=lambda *call: transport_calls.append(call) or token_response(),
+            clock=lambda: 1_800_000_000,
+        )
+        marker = "descriptor-close-secret-marker"
+        real_close = os.close
+        injected = False
+
+        def fail_key_close(descriptor: int) -> None:
+            nonlocal injected
+            try:
+                target = os.readlink(f"/proc/self/fd/{descriptor}")
+            except OSError:
+                target = ""
+            real_close(descriptor)
+            if target.endswith("/private-key.pem") and not injected:
+                injected = True
+                raise OSError(marker)
+
+        with mock.patch(
+            "agent_container.family_github_app.os.close", side_effect=fail_key_close
+        ):
+            with self.assertRaises(ValueError) as raised:
+                provider.get()
+
+        self.assertTrue(injected)
+        self.assertEqual(str(raised.exception), "family GitHub App metadata is invalid")
+        self.assertNotIn(marker, repr(raised.exception))
+        self.assertEqual(transport_calls, [])
 
     def test_uses_a_distinct_family_identity_and_provider_boundary(self) -> None:
         self.assertIsNot(FamilyAppMetadata, development_github_app.GitHubAppMetadata)
@@ -316,6 +646,69 @@ class FamilyGitHubAppTest(unittest.TestCase):
                 development_github_app.InstallationTokenProvider,
             )
         )
+        with self.assertRaises(TypeError):
+            FamilyAppMetadata(  # type: ignore[call-arg]
+                "Iv1familyabcdefgh",
+                123,
+                self.layout.family_private_key_file,
+            )
+
+    def test_provider_rejects_cross_wired_or_forged_metadata_before_side_effects(
+        self,
+    ) -> None:
+        development = development_github_app.GitHubAppMetadata(
+            client_id="Iv1developmentabc",
+            installation_id=999,
+            repository_id=42,
+            private_key=self.layout.family_private_key_file,
+        )
+        forged = object.__new__(FamilyAppMetadata)
+        object.__setattr__(forged, "client_id", "Iv1familyabcdefgh")
+        object.__setattr__(forged, "installation_id", 123)
+        object.__setattr__(forged, "private_key", self.root / "arbitrary-key.pem")
+
+        for metadata in (development, forged):
+            with self.subTest(metadata_type=type(metadata).__name__):
+                signer = FakeSigner()
+                transport_calls: list[object] = []
+                with self.assertRaisesRegex(ValueError, "family GitHub App metadata"):
+                    provider = FamilyInstallationTokenProvider(
+                        metadata,  # type: ignore[arg-type]
+                        signer=signer,
+                        transport=lambda *call: (
+                            transport_calls.append(call) or token_response()
+                        ),
+                        clock=lambda: 1_800_000_000,
+                    )
+                    provider.get()
+                self.assertEqual(signer.calls, [])
+                self.assertEqual(transport_calls, [])
+
+    def test_provider_rejects_tampered_layout_identity_before_side_effects(
+        self,
+    ) -> None:
+        metadata = self.metadata()
+        object.__setattr__(
+            metadata,
+            "_layout",
+            FamilyStateLayout(self.root / "arbitrary", "demo"),
+        )
+        signer = FakeSigner()
+        transport_calls: list[object] = []
+
+        with self.assertRaisesRegex(ValueError, "family GitHub App metadata"):
+            provider = FamilyInstallationTokenProvider(
+                metadata,
+                signer=signer,
+                transport=lambda *call: (
+                    transport_calls.append(call) or token_response()
+                ),
+                clock=lambda: 1_800_000_000,
+            )
+            provider.get()
+
+        self.assertEqual(signer.calls, [])
+        self.assertEqual(transport_calls, [])
 
     def test_requests_exact_permissions_at_the_fixed_endpoint_and_caches(self) -> None:
         calls: list[tuple[str, dict[str, str], bytes]] = []
@@ -366,7 +759,95 @@ class FamilyGitHubAppTest(unittest.TestCase):
             {"exp": 1_800_000_540, "iat": 1_799_999_940, "iss": "Iv1familyabcdefgh"},
         )
         self.assertTrue(signature)
-        self.assertEqual(signer.calls[0][1], self.layout.family_private_key_file)
+        self.assertIsInstance(signer.calls[0][1], int)
+
+    def test_refreshes_at_the_exact_margin_and_after_invalidation(self) -> None:
+        current = [1_800_000_000]
+        calls = 0
+
+        def transport(*_):  # type: ignore[no-untyped-def]
+            nonlocal calls
+            calls += 1
+            expires_at = datetime.fromtimestamp(
+                current[0] + 3600, tz=timezone.utc
+            ).isoformat().replace("+00:00", "Z")
+            payload = json.loads(token_response().body)
+            payload["token"] = f"family-installation-token-{calls:02d}"
+            payload["expires_at"] = expires_at
+            return HttpResponse(
+                201,
+                {"Content-Type": "application/json"},
+                json.dumps(payload).encode("ascii"),
+            )
+
+        signer = FakeSigner()
+        provider = FamilyInstallationTokenProvider(
+            self.metadata(),
+            signer=signer,
+            transport=transport,
+            clock=lambda: current[0],
+        )
+        first = provider.get()
+        current[0] = first.expires_at - 301
+        self.assertIs(provider.get(), first)
+        self.assertEqual(calls, 1)
+
+        current[0] += 1
+        second = provider.get()
+        self.assertEqual(second.token, "family-installation-token-02")
+        self.assertEqual(calls, 2)
+
+        provider.invalidate()
+        third = provider.get()
+        self.assertEqual(third.token, "family-installation-token-03")
+        self.assertEqual(calls, 3)
+        self.assertEqual(len(signer.calls), 3)
+
+    def test_token_and_inventory_transports_do_not_follow_real_redirects(self) -> None:
+        requests: list[tuple[str, str, str | None]] = []
+        with mock.patch(
+            "agent_container.github_app.urllib.request.build_opener",
+            side_effect=redirecting_opener_factory(requests),
+        ):
+            token_redirect = development_github_app.github_transport(
+                "https://api.github.com/app/installations/123/access_tokens",
+                {"Authorization": "Bearer jwt-secret-marker"},
+                b"{}",
+            )
+        self.assertEqual(token_redirect.status, 302)
+        self.assertEqual(
+            requests,
+            [
+                (
+                    "POST",
+                    "https://api.github.com/app/installations/123/access_tokens",
+                    "Bearer jwt-secret-marker",
+                )
+            ],
+        )
+
+        requests.clear()
+        with mock.patch(
+            "agent_container.family_github_app.urllib.request.build_opener",
+            side_effect=redirecting_opener_factory(requests),
+        ):
+            inventory_redirect = family_repository_transport(
+                "GET",
+                "https://api.github.com/installation/repositories?per_page=100",
+                {"Authorization": "Bearer installation-secret-marker"},
+                None,
+            )
+        self.assertEqual(inventory_redirect.status, 302)
+        self.assertEqual(
+            requests,
+            [
+                (
+                    "GET",
+                    "https://api.github.com/installation/repositories?per_page=100",
+                    "Bearer installation-secret-marker",
+                )
+            ],
+        )
 
     def test_rejects_every_missing_extra_or_changed_permission(self) -> None:
         baseline = json.loads(token_response().body)
