@@ -37,6 +37,17 @@ _IMAGE = os.environ.get("AGENT_FAMILY_TEST_IMAGE", "")
 _ANCESTOR_DEPTH = 8
 
 
+def _private_temporary_directory() -> TemporaryDirectory:
+    root = Path("/tmp")
+    details = os.lstat(root)
+    if (
+        not stat.S_ISDIR(details.st_mode)
+        or stat.S_IMODE(details.st_mode) != 0o1777
+    ):
+        raise ValueError("family fixture temporary root is unsafe")
+    return TemporaryDirectory(dir=root)
+
+
 def _ancestor_sentinel_reachable(
     descriptors: tuple[int, ...], sentinel_name: str
 ) -> bool:
@@ -337,6 +348,15 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
 
     def test_marker_paths_are_unique_workspace_local_and_reject_collisions(self) -> None:
+        with TemporaryDirectory() as environment_temp, mock.patch.dict(
+            os.environ,
+            {"TMPDIR": environment_temp},
+        ):
+            with _private_temporary_directory() as selected:
+                selected_path = Path(selected)
+                self.assertEqual(selected_path.parent, Path("/tmp"))
+                self.assertEqual(stat.S_IMODE(selected_path.stat().st_mode), 0o700)
+
         with TemporaryDirectory() as temp:
             workspace = Path(temp).resolve()
             ready, done = _marker_paths(workspace, "fedcba9876543210")
@@ -498,8 +518,8 @@ class FamilyIntakePodmanTest(unittest.TestCase):
         for agent, with_egress in variants:
             with (
                 self.subTest(agent=agent, with_egress=with_egress),
-                TemporaryDirectory() as temp,
-                TemporaryDirectory() as handover_temp,
+                _private_temporary_directory() as temp,
+                _private_temporary_directory() as handover_temp,
             ):
                 root = Path(temp)
                 root.chmod(0o700)
