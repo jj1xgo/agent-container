@@ -32,6 +32,7 @@ from agent_container.podman import podman_stats_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.podman import run_command_supervised
+from agent_container.podman import _wait_for_stopped_container
 from agent_container.family_intake_runtime import FamilyRuntimeMount
 from agent_container.family_intake_runtime import FamilyIntakeRuntime
 from agent_container.egress_broker_runtime import EgressBrokerRuntimeError
@@ -49,6 +50,70 @@ HANDOVER_BROKER = HandoverRuntimeMount(Path("/state/handover-broker/one"))
 
 
 class PodmanCommandTest(unittest.TestCase):
+    def test_family_handoff_reports_podman_early_exit(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = 125
+
+        with mock.patch(
+            "agent_container.podman.time.monotonic", side_effect=[0, 0]
+        ), self.assertRaisesRegex(RuntimeError, "podman exited"):
+            _wait_for_stopped_container(Path("/secret/container.pid"), process)
+
+    def test_family_handoff_timeout_reports_last_safe_observation(self) -> None:
+        class Process:
+            def poll(self):
+                return None
+
+        cases = (
+            (FileNotFoundError(), "pidfile missing"),
+            ("not-a-pid", "pidfile invalid"),
+        )
+        for pidfile_result, expected in cases:
+            with self.subTest(expected=expected), mock.patch.object(
+                Path, "read_text", side_effect=[pidfile_result]
+            ), mock.patch(
+                "agent_container.podman.time.monotonic", side_effect=[0, 0, 11]
+            ), mock.patch("agent_container.podman.time.sleep"):
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    _wait_for_stopped_container(
+                        Path("/secret/container.pid"), Process()
+                    )
+
+    def test_family_handoff_timeout_reports_unreadable_process_state(self) -> None:
+        class Process:
+            def poll(self):
+                return None
+
+        with mock.patch.object(
+            Path,
+            "read_text",
+            side_effect=["123", FileNotFoundError()],
+        ), mock.patch(
+            "agent_container.podman.time.monotonic", side_effect=[0, 0, 11]
+        ), mock.patch("agent_container.podman.time.sleep"), self.assertRaisesRegex(
+            RuntimeError, "process state unavailable"
+        ) as raised:
+            _wait_for_stopped_container(Path("/secret/container.pid"), Process())
+
+        self.assertNotIn("123", str(raised.exception))
+        self.assertNotIn("/secret", str(raised.exception))
+
+    def test_family_handoff_timeout_reports_process_not_stopped(self) -> None:
+        class Process:
+            def poll(self):
+                return None
+
+        with mock.patch.object(
+            Path,
+            "read_text",
+            side_effect=["123", "123 (agent-runtime) S 1 2 3"],
+        ), mock.patch(
+            "agent_container.podman.time.monotonic", side_effect=[0, 0, 11]
+        ), mock.patch("agent_container.podman.time.sleep"), self.assertRaisesRegex(
+            RuntimeError, "process not stopped"
+        ):
+            _wait_for_stopped_container(Path("/secret/container.pid"), Process())
+
     def test_preserved_fd_reaches_fake_podman_and_oci_child(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp)

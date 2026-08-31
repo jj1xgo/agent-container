@@ -289,29 +289,41 @@ def _wait_for_stopped_container(
     process: subprocess.Popen[str],
 ) -> int:
     deadline = time.monotonic() + 10
+    observation = "pidfile missing"
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError("family runtime launch handoff failed")
+            raise RuntimeError(
+                "family runtime launch handoff failed: podman exited"
+            )
         try:
             rendered_pid = pidfile.read_text("ascii").strip()
-        except (OSError, UnicodeError):
+        except OSError:
+            observation = "pidfile missing"
+            time.sleep(0.05)
+            continue
+        except UnicodeError:
             rendered_pid = ""
-        if rendered_pid.isdigit():
-            pid = int(rendered_pid)
-            try:
-                process_stat = Path(f"/proc/{pid}/stat").read_text("ascii")
-            except (OSError, UnicodeError):
-                pass
+        if not rendered_pid.isdigit() or int(rendered_pid) <= 0:
+            observation = "pidfile invalid"
+            time.sleep(0.05)
+            continue
+        pid = int(rendered_pid)
+        try:
+            process_stat = Path(f"/proc/{pid}/stat").read_text("ascii")
+        except OSError:
+            observation = "process state unavailable"
+        except UnicodeError:
+            observation = "process state invalid"
+        else:
+            closing = process_stat.rfind(")")
+            if closing < 0:
+                observation = "process state invalid"
+            elif process_stat[closing + 2 : closing + 3] == "T":
+                return pid
             else:
-                closing = process_stat.rfind(")")
-                if (
-                    pid > 0
-                    and closing >= 0
-                    and process_stat[closing + 2 : closing + 3] == "T"
-                ):
-                    return pid
+                observation = "process not stopped"
         time.sleep(0.05)
-    raise RuntimeError("family runtime launch handoff failed")
+    raise RuntimeError(f"family runtime launch handoff failed: {observation}")
 
 
 def build_image_spec(
