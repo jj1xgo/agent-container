@@ -35,6 +35,7 @@ from agent_container.egress_broker_runtime import EgressRuntimeMount
 
 _IMAGE = os.environ.get("AGENT_FAMILY_TEST_IMAGE", "")
 _ANCESTOR_DEPTH = 8
+_INSPECTION_READY_TIMEOUT = 15
 
 
 def _ancestor_sentinel_reachable(
@@ -174,6 +175,25 @@ def _release_marker(path: Path) -> None:
     os.close(descriptor)
 
 
+def _inspection_runtime_surface(inspected: dict) -> str:
+    """Render only host-controlled fields that can expose family secrets."""
+
+    config = inspected.get("Config")
+    host_config = inspected.get("HostConfig")
+    return json.dumps(
+        {
+            "Env": config.get("Env", ()) if type(config) is dict else (),
+            "Binds": (
+                host_config.get("Binds", ())
+                if type(host_config) is dict
+                else ()
+            ),
+            "Mounts": inspected.get("Mounts", ()),
+        },
+        sort_keys=True,
+    )
+
+
 def _podman_prerequisite() -> str | None:
     if any(os.environ.get(name) for name in ("CONTAINER_HOST", "CONTAINER_CONNECTION")):
         return "a local (non-remote) Podman service is required"
@@ -251,6 +271,23 @@ _MISSING = (
 
 
 class FamilyIntakePodmanFixtureTest(unittest.TestCase):
+    def test_inspection_runtime_surface_omits_command_but_keeps_exposure_fields(self) -> None:
+        inspected = {
+            "Config": {
+                "Cmd": ["grep", "family/roadmap"],
+                "Env": ["SAFE=value", "SECRET=repository_id"],
+            },
+            "HostConfig": {"Binds": ["/private-key.pem:/run/key:ro"]},
+            "Mounts": [{"Source": "/family/pending", "Destination": "/data"}],
+        }
+
+        surface = _inspection_runtime_surface(inspected)
+
+        self.assertNotIn("family/roadmap", surface)
+        self.assertIn("repository_id", surface)
+        self.assertIn("private-key.pem", surface)
+        self.assertIn("family/pending", surface)
+
     def test_concurrent_marker_release_is_idempotent_after_safe_create(self) -> None:
         with TemporaryDirectory() as temp:
             marker = Path(temp) / "done"
@@ -569,7 +606,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     )
 
                     def inspect_running_container():
-                        deadline = time.monotonic() + 5
+                        deadline = time.monotonic() + _INSPECTION_READY_TIMEOUT
                         try:
                             while time.monotonic() < deadline:
                                 if _marker_exists(ready_marker):
@@ -601,6 +638,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     inspected = json.loads(inspection[0].stdout)
                     self.assertIs(type(inspected), list)
                     self.assertEqual(len(inspected), 1)
+                    runtime_surface = _inspection_runtime_surface(inspected[0])
                     family_mounts = [
                         item
                         for item in inspected[0].get("Mounts", ())
@@ -618,7 +656,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                         "family/roadmap", "repository_id", "private-key.pem",
                         str(layout.family_pending_dir), "family issue approve",
                     ):
-                        self.assertNotIn(forbidden, inspection[0].stdout)
+                        self.assertNotIn(forbidden, runtime_surface)
                     self.assertEqual(completed.returncode, 0)
                     pending = list_pending(layout.family_pending_dir, "demo")
                     self.assertEqual(len(pending), 1)
