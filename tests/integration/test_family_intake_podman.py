@@ -720,14 +720,19 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                 failed_argv = failed_base.argv[: failed_launcher_end + 1] + (
                     "/bin/sh", "-c", "sleep 30",
                 )
+                failed_container_name = (
+                    egress.container_name
+                    if egress is not None
+                    else failed_mount.container_name
+                )
 
                 def fail_live_broker():
-                    deadline = time.monotonic() + 5
+                    deadline = time.monotonic() + _INSPECTION_READY_TIMEOUT
                     while time.monotonic() < deadline:
                         exists = subprocess.run(
                             (
                                 "podman", "container", "exists",
-                                failed_mount.container_name,
+                                failed_container_name,
                             ),
                             check=False,
                             timeout=5,
