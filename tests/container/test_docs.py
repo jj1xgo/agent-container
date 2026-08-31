@@ -698,6 +698,96 @@ class Phase3DocumentationTest(unittest.TestCase):
         self.assertNotIn("GH_CONFIG_DIR=", containerfile)
 
 
+class FamilyIssueBrokerDocumentationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.operator = (ROOT / "docs/family-issue-create-broker.md").read_text(
+            encoding="utf-8"
+        )
+        self.smoke = (
+            ROOT / "docs/family-issue-create-broker-smoke-test.md"
+        ).read_text(encoding="utf-8")
+
+    def test_operator_contract_covers_permissions_limits_and_lifecycle(self) -> None:
+        for required in (
+            "開発用GitHub Appとは別の専用App",
+            "Metadata: Read-only",
+            "Issues: Read and write",
+            "選択したfamily repository 1件だけ",
+            "24時間",
+            "未完了requestは最大10件",
+            "approve <request-id>",
+            "bin/agentctl family issue preview PROJECT REQUEST_ID",
+            "bin/agentctl family issue approve PROJECT REQUEST_ID",
+            "bin/agentctl family issue resolve-created PROJECT REQUEST_ID ISSUE_NUMBER",
+            "bin/agentctl family issue resolve-not-created PROJECT REQUEST_ID",
+            "作成済みIssueを自動でclose、edit、deleteしません",
+            "PASS",
+            "PARTIAL",
+            "FAIL",
+            "not run",
+        ):
+            self.assertIn(required, self.operator)
+
+    def test_operator_contract_prioritizes_short_japanese_host_codex_handoff(self) -> None:
+        for required in (
+            "ホスト側Codex",
+            "最新handover",
+            "長いcommandや英語出力を利用者にcopy-pasteさせない",
+            "GitHub UIでの承認",
+            "秘密値はchatやhandoverへ貼らない",
+            "実Issueごとの日本語確認",
+            "unbound projectは従来どおり",
+        ):
+            self.assertIn(required, self.operator)
+
+    def test_smoke_contract_stops_before_every_external_mutation(self) -> None:
+        for required in (
+            "STOP: 実Issue作成の直前承認",
+            "exact target repository",
+            "canonical title",
+            "canonical body",
+            "purpose",
+            "external effect",
+            "承認がなければnot run",
+            "duplicate denial",
+            "content-free audit",
+            "credential non-exposure",
+            "terminal cleanup",
+            "forced unknown",
+            "created / not-created",
+            "rollbackで作成済みIssueを変更しない",
+        ):
+            self.assertIn(required, self.smoke)
+
+    def test_smoke_contract_keeps_real_podman_as_a_non_fungible_gate(self) -> None:
+        for required in (
+            "Podman 5.8以降",
+            "local rootless Podman",
+            "crun",
+            "socket-file bind",
+            "launcher後のpinned fd不在",
+            "ancestor sentinelへ到達不能",
+            "actual conmon ancestry",
+            "Codex path",
+            "Claude path",
+            "前提不足はnot run",
+            "PASSへ読み替えない",
+        ):
+            self.assertIn(required, self.smoke)
+
+    def test_readme_and_changelog_advertise_shipped_scope_without_stale_claim(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        unreleased = changelog.split("## [0.4.0]", 1)[0]
+        self.assertIn("family Issue作成broker", readme)
+        self.assertIn("docs/family-issue-create-broker.md", readme)
+        self.assertIn("family専用GitHub App", unreleased)
+        self.assertNotIn(
+            "family Issue create/commentは開発repository brokerと権限を共有しない将来Phaseへ延期します。",
+            unreleased,
+        )
+
+
 class Phase4DocumentationTest(unittest.TestCase):
     def test_current_broker_commands_omit_obsolete_ruleset_confirmation(
         self,
@@ -955,7 +1045,8 @@ class Phase4DocumentationTest(unittest.TestCase):
         )
 
         self.assertIn("Current release: `v0.4.0`", readme)
-        self.assertIn("## [Unreleased]\n\n## [0.4.0] - 2026-08-29", changelog)
+        self.assertIn("## [Unreleased]", changelog)
+        self.assertIn("## [0.4.0] - 2026-08-29", changelog)
         self.assertIn(
             "[0.4.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.4.0",
             changelog,

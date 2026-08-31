@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -83,14 +84,34 @@ def _marker_exists(path: Path) -> bool:
     return True
 
 
+def _validate_released_marker(path: Path) -> None:
+    try:
+        details = os.lstat(path)
+    except FileNotFoundError as error:
+        raise ValueError("inspection marker is unsafe") from error
+    if (
+        not stat.S_ISREG(details.st_mode)
+        or stat.S_IMODE(details.st_mode) != 0o600
+        or details.st_uid != os.getuid()
+        or details.st_nlink != 1
+        or details.st_size != 0
+    ):
+        raise ValueError("inspection marker is unsafe")
+
+
 def _release_marker(path: Path) -> None:
     if _marker_exists(path):
+        _validate_released_marker(path)
         return
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-        0o600,
-    )
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+        )
+    except FileExistsError:
+        _validate_released_marker(path)
+        return
     os.close(descriptor)
 
 
@@ -167,6 +188,54 @@ _MISSING = _podman_prerequisite()
 
 
 class FamilyIntakePodmanFixtureTest(unittest.TestCase):
+    def test_concurrent_marker_release_is_idempotent_after_safe_create(self) -> None:
+        with TemporaryDirectory() as temp:
+            marker = Path(temp) / "done"
+            barrier = threading.Barrier(2)
+            real_open = os.open
+            failures = []
+
+            def synchronized_open(path, flags, mode=0o777):
+                if Path(path) == marker and flags & os.O_EXCL:
+                    barrier.wait(timeout=5)
+                return real_open(path, flags, mode)
+
+            def release() -> None:
+                try:
+                    _release_marker(marker)
+                except Exception as error:
+                    failures.append(error)
+
+            with mock.patch.object(os, "open", side_effect=synchronized_open):
+                threads = [threading.Thread(target=release) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=5)
+
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(failures, [])
+            details = marker.lstat()
+            self.assertTrue(stat.S_ISREG(details.st_mode))
+            self.assertEqual(stat.S_IMODE(details.st_mode), 0o600)
+            self.assertEqual(details.st_nlink, 1)
+
+    def test_marker_release_rejects_existing_symlink_and_nonregular_entry(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            target.write_text("", encoding="ascii")
+            symlink = root / "symlink"
+            symlink.symlink_to(target)
+            directory = root / "directory"
+            directory.mkdir()
+
+            for unsafe in (symlink, directory):
+                with self.subTest(kind=unsafe.name), self.assertRaisesRegex(
+                    ValueError, "marker is unsafe"
+                ):
+                    _release_marker(unsafe)
+
     def test_remote_environment_skips_before_any_podman_probe(self) -> None:
         with mock.patch.dict(
             os.environ,
