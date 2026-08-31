@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+PYTHONPATH=/opt/agent-container/src exec python3 -P -c \
+  'from agent_container.family_intake_client import main; raise SystemExit(main())' "$@"

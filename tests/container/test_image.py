@@ -221,6 +221,10 @@ class ContainerImageContractTest(unittest.TestCase):
             body,
         )
         self.assertIn(
+            "COPY --chmod=0755 container/bin/agent-family /usr/local/bin/agent-family",
+            body,
+        )
+        self.assertIn(
             "COPY --chmod=0755 container/bin/agent-egress-adapter /usr/local/bin/agent-egress-adapter",
             body,
         )
@@ -265,6 +269,22 @@ class ContainerImageContractTest(unittest.TestCase):
             "exec python3 -m agent_container.git_remote_helper_cli",
             broker_wrapper,
         )
+
+        family_wrapper = (ROOT / "container/bin/agent-family").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("agent_container.family_intake_client", family_wrapper)
+        self.assertIn("main()", family_wrapper)
+        self.assertNotIn("agentctl", family_wrapper)
+        self.assertNotIn("approve", family_wrapper)
+        self.assertNotIn("credential", family_wrapper)
+
+    def test_image_omits_family_approval_and_credential_material(self) -> None:
+        body = (ROOT / "Containerfile").read_text(encoding="utf-8")
+
+        self.assertNotIn("agentctl family", body)
+        self.assertNotIn("private-key.pem", body)
+        self.assertNotIn("family-app", body)
 
     def test_image_creates_fixed_agent_identity(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")

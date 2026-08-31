@@ -82,6 +82,7 @@ COPY --chmod=0755 container/bin/claude /usr/local/bin/claude
 COPY --chmod=0755 container/bin/git-remote-agent-broker /usr/local/bin/git-remote-agent-broker
 COPY --chmod=0755 container/bin/agent-github /usr/local/bin/agent-github
 COPY --chmod=0755 container/bin/agent-handover /usr/local/bin/agent-handover
+COPY --chmod=0755 container/bin/agent-family /usr/local/bin/agent-family
 COPY --chmod=0755 container/bin/agent-egress-adapter /usr/local/bin/agent-egress-adapter
 COPY --chmod=0755 container/bin/agent-egress-runtime /usr/local/bin/agent-egress-runtime
 COPY container/profile.d/10-agent-node.sh /etc/profile.d/10-agent-node.sh
