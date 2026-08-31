@@ -24,6 +24,7 @@ src/agent_container/family_pending.py
 !container/bin/claude
 !container/bin/git-remote-agent-broker
 !container/bin/agent-handover
+!container/bin/agent-runtime-launcher
 !container/profile.d/
 !container/profile.d/10-agent-node.sh
 **/auth.json

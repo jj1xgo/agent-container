@@ -42,6 +42,8 @@ _BROKER_RUNTIME_PATH = "/run/agent-broker"
 _HANDOVER_BROKER_RUNTIME_PATH = "/run/agent-handover"
 _EGRESS_RUNTIME_PATH = "/run/agent-egress"
 _FAMILY_RUNTIME_PATH = "/run/agent-family"
+_FAMILY_SOCKET_TARGET = f"{_FAMILY_RUNTIME_PATH}/intake.sock"
+_RUNTIME_LAUNCHER = "agent-runtime-launcher"
 _FAMILY_RUN_ID = re.compile(r"^[0-9a-f]{16}$")
 _CONTAINER_ID = re.compile(r"^[0-9a-f]{12,64}$")
 _RESOURCE_AGENTS = frozenset({"codex", "claude"})
@@ -259,7 +261,7 @@ def _family_runtime_args(
     arguments = [
         f"--preserve-fd={preserved_fds[0]}",
         "--mount",
-        _mount(family.mount_source, _FAMILY_RUNTIME_PATH),
+        _mount(family.mount_source, _FAMILY_SOCKET_TARGET),
         "--env",
         f"AGENT_FAMILY_SOCKET={expected_environment['AGENT_FAMILY_SOCKET']}",
         "--env",
@@ -267,6 +269,16 @@ def _family_runtime_args(
     ]
     if not named_by_egress:
         arguments[:0] = [f"--name={family.container_name}"]
+    return arguments
+
+
+def _runtime_launcher_args(
+    family: FamilyRuntimeMount | None,
+) -> list[str]:
+    arguments = [_RUNTIME_LAUNCHER]
+    if family is not None:
+        arguments.append(f"--close-fd={family.pass_fds[0]}")
+    arguments.append("--")
     return arguments
 
 
@@ -636,6 +648,7 @@ def run_codex_spec(
             layout, family_mount, named_by_egress=egress is not None
         )
     argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image]
+    argv += _runtime_launcher_args(family_mount)
     if egress is not None:
         argv += ["agent-egress-runtime", "--"]
     argv += [
@@ -693,6 +706,7 @@ def run_claude_spec(
             layout, family_mount, named_by_egress=egress is not None
         )
     argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image]
+    argv += _runtime_launcher_args(family_mount)
     if egress is not None:
         argv += ["agent-egress-runtime", "--"]
     argv += _CLAUDE_LAUNCHER_PREFIX
@@ -708,6 +722,18 @@ def podman_version_spec() -> CommandSpec:
 def podman_rootless_spec() -> CommandSpec:
     return CommandSpec(
         ("podman", "info", "--format", "{{.Host.Security.Rootless}}"), {}
+    )
+
+
+def podman_oci_runtime_spec() -> CommandSpec:
+    return CommandSpec(
+        ("podman", "info", "--format", "{{.Host.OCIRuntime.Name}}"), {}
+    )
+
+
+def podman_connections_spec() -> CommandSpec:
+    return CommandSpec(
+        ("podman", "system", "connection", "list", "--format", "json"), {}
     )
 
 

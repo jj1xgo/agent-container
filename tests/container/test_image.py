@@ -1,6 +1,7 @@
 from fnmatch import fnmatchcase
 from pathlib import Path
 import json
+import os
 import re
 import subprocess
 import shutil
@@ -23,6 +24,30 @@ def containerignore_includes(path: str, patterns: list[str]) -> bool:
 
 
 class ContainerImageContractTest(unittest.TestCase):
+    def test_runtime_launcher_closes_exact_fd_before_agent_exec(self) -> None:
+        with TemporaryDirectory() as temp:
+            descriptor = os.open(temp, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                launched = subprocess.run(
+                    (
+                        str(ROOT / "container/bin/agent-runtime-launcher"),
+                        f"--close-fd={descriptor}",
+                        "--",
+                        sys.executable,
+                        "-c",
+                        (
+                            "import os,sys; "
+                            "sys.exit(1 if os.path.exists('/proc/self/fd/' + sys.argv[1]) else 0)"
+                        ),
+                        str(descriptor),
+                    ),
+                    pass_fds=(descriptor,),
+                    check=False,
+                )
+            finally:
+                os.close(descriptor)
+        self.assertEqual(launched.returncode, 0)
+
     def test_image_installs_exact_managed_claude_handover_instructions(self) -> None:
         instructions_path = ROOT / "profiles/claude/CLAUDE.md"
         instructions = instructions_path.read_text(encoding="utf-8")
@@ -65,6 +90,7 @@ class ContainerImageContractTest(unittest.TestCase):
             "COPY --chmod=0644 profiles/claude/CLAUDE.md /etc/claude-code/CLAUDE.md",
             body,
         )
+        self.assertIn("RUN install -d -m 0755 /run/agent-family", body)
 
     def test_image_copies_exact_claude_managed_policy(self) -> None:
         settings_path = ROOT / "profiles/claude/managed-settings.json"
@@ -236,6 +262,17 @@ class ContainerImageContractTest(unittest.TestCase):
             body,
         )
         self.assertIn(
+            "COPY --chmod=0755 container/bin/agent-runtime-launcher "
+            "/usr/local/bin/agent-runtime-launcher",
+            body,
+        )
+        launcher = (ROOT / "container/bin/agent-runtime-launcher").read_text(
+            "utf-8"
+        )
+        self.assertIn("os.close", launcher)
+        self.assertIn("os.execvp", launcher)
+        self.assertNotIn("os.environ", launcher)
+        self.assertIn(
             "COPY container/profile.d/10-agent-node.sh /etc/profile.d/10-agent-node.sh",
             body,
         )
@@ -329,6 +366,7 @@ class ContainerImageContractTest(unittest.TestCase):
                 "!container/bin/claude",
                 "!container/bin/git-remote-agent-broker",
                 "!container/bin/agent-handover",
+                "!container/bin/agent-runtime-launcher",
                 "!container/profile.d/",
                 "!container/profile.d/10-agent-node.sh",
                 "**/auth.json",

@@ -61,6 +61,12 @@ from agent_container.state import Repository
 def successful_podman_result(spec):
     if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
         return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+    if spec.argv == ("podman", "info", "--format", "{{.Host.OCIRuntime.Name}}"):
+        return subprocess.CompletedProcess(spec.argv, 0, stdout="crun\n")
+    if spec.argv == (
+        "podman", "system", "connection", "list", "--format", "json"
+    ):
+        return subprocess.CompletedProcess(spec.argv, 0, stdout="[]\n")
     return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
 
 
@@ -2063,8 +2069,14 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(len(calls), 4)
             self.assertIn("codex", calls[-1].argv)
             self.assertEqual(
-                calls[-1].argv[-5:-2],
-                ("localhost/agent-container:dev", "codex", "--approve-for-me"),
+                calls[-1].argv[-7:-2],
+                (
+                    "localhost/agent-container:dev",
+                    "agent-runtime-launcher",
+                    "--",
+                    "codex",
+                    "--approve-for-me",
+                ),
             )
             self.assertIn("AGENT_PROJECT_ID=agent-container", calls[-1].argv)
             self.assertIn(
@@ -2104,6 +2116,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 },
             )
             object.__setattr__(mount, "_directory_descriptor", 77)
+            object.__setattr__(mount, "_socket_descriptor", 78)
             events = []
 
             class Runtime:
@@ -2118,7 +2131,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 self.assertIs(observed_mount, mount)
                 events.append(("supervise", gateway, egress, runtime))
                 joined = " ".join(spec.argv)
-                self.assertIn("/proc/self/fd/77", joined)
+                self.assertIn("/proc/self/fd/78", joined)
                 self.assertNotIn("family/roadmap", joined)
                 return subprocess.CompletedProcess(spec.argv, 0)
 
@@ -4247,6 +4260,79 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
 
 
 class AgentCtlFamilyRuntimeTest(unittest.TestCase):
+    def test_bound_run_rejects_non_crun_remote_and_malformed_connection_state(self) -> None:
+        scenarios = (
+            ("runc", "[]", False),
+            ("crun", '[{"Name":"remote","Default":true}]', False),
+            ("crun", "garbage", False),
+            ("crun", "[]", True),
+        )
+        for runtime, connections, remote_env in scenarios:
+            with self.subTest(runtime=runtime, connections=connections, remote_env=remote_env), TemporaryDirectory() as temp:
+                root, _environment = self._state(temp)
+                self._bind(root)
+
+                def runner(spec):
+                    if spec.argv == ("podman", "info", "--format", "{{.Host.OCIRuntime.Name}}"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout=runtime)
+                    if spec.argv == ("podman", "system", "connection", "list", "--format", "json"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout=connections)
+                    return successful_podman_result(spec)
+
+                environment = {"AGENT_CONTAINER_HOME": str(root)}
+                if remote_env:
+                    environment["CONTAINER_HOST"] = "ssh://example.invalid/run/podman.sock"
+                result = main(
+                    ["run", "agent-container"],
+                    environment=environment,
+                    runner=runner,
+                    git_remote_reader=lambda _path: "https://github.com/jj1xgo/agent-container.git",
+                    family_runtime_factory=lambda _layout: self.fail("family runtime started"),
+                    stdout=StringIO(),
+                    stderr=StringIO(),
+                )
+                self.assertEqual(result, 1)
+
+    def test_bound_doctor_reports_version_runtime_and_local_prerequisites(self) -> None:
+        scenarios = (
+            ("podman version 5.7.2\n", "crun\n", "[]", False, ("FAIL", "PASS", "PASS")),
+            ("podman version 5.8.0\n", "runc\n", "[]", False, ("PASS", "FAIL", "PASS")),
+            ("podman version 5.8.0\n", "crun\n", '[{"Default":true}]', False, ("PASS", "PASS", "FAIL")),
+            ("podman version 5.8.0\n", "crun\n", "garbage", False, ("PASS", "PASS", "FAIL")),
+            ("podman version 5.8.0\n", "crun\n", "[]", True, ("PASS", "PASS", "FAIL")),
+            ("podman version 5.8.0\n", "crun\n", "[]", False, ("PASS", "PASS", "PASS")),
+        )
+        for version, runtime, connections, remote_env, expected in scenarios:
+            with self.subTest(version=version, runtime=runtime, connections=connections, remote_env=remote_env), TemporaryDirectory() as temp:
+                root, _environment = self._state(temp)
+                self._bind(root)
+                output = StringIO()
+
+                def runner(spec):
+                    if spec.argv == ("podman", "--version"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout=version)
+                    if spec.argv == ("podman", "info", "--format", "{{.Host.OCIRuntime.Name}}"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout=runtime)
+                    if spec.argv == ("podman", "system", "connection", "list", "--format", "json"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout=connections)
+                    return AgentCtlRunDoctorTest()._successful_doctor_runner(spec)
+
+                environment = {"AGENT_CONTAINER_HOME": str(root)}
+                if remote_env:
+                    environment["CONTAINER_CONNECTION"] = "remote"
+                main(
+                    ["doctor", "agent-container"],
+                    environment=environment,
+                    runner=runner,
+                    git_remote_reader=lambda _path: "https://github.com/jj1xgo/agent-container.git",
+                    stdout=output,
+                )
+                rendered = output.getvalue()
+                for status, name in zip(expected, (
+                    "family-podman-version", "family-podman-runtime", "family-podman-local"
+                )):
+                    self.assertIn(f"{status}  {name}:", rendered)
+
     def test_podman_without_preserve_fd_support_fails_before_family_start(self) -> None:
         with TemporaryDirectory() as temp:
             root, _environment = self._state(temp)

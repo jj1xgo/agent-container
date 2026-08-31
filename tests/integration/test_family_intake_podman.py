@@ -1,7 +1,9 @@
 """Opt-in rootless Podman evidence for the family intake runtime boundary."""
 
+import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import threading
@@ -36,7 +38,9 @@ _PROBE_SCRIPT = (
     "agent-family issue create --title T --summary S "
     "--context C --acceptance-criterion A; "
     ": > /run/agent-family/inspect-ready; "
-    "while ! test -e /run/agent-family/inspect-done; do sleep 0.05; done; "
+    "deadline=100; while ! test -e /run/agent-family/inspect-done; do "
+    "deadline=$((deadline - 1)); test \"$deadline\" -gt 0 || exit 92; "
+    "sleep 0.05; done; "
     "rm -f /run/agent-family/inspect-ready /run/agent-family/inspect-done; "
     "if agent-family issue create --title T --summary S "
     "--context C --acceptance-criterion A >/tmp/second 2>&1; "
@@ -47,19 +51,56 @@ _PROBE_SCRIPT = (
 def _podman_prerequisite() -> str | None:
     if shutil.which("podman") is None:
         return "rootless Podman executable is unavailable"
-    probe = subprocess.run(
-        ("podman", "info", "--format", "{{.Host.Security.Rootless}}"),
-        text=True,
-        capture_output=True,
-        check=False,
+    try:
+        version = subprocess.run(
+            ("podman", "--version"), text=True, capture_output=True,
+            check=False, timeout=5,
+        )
+        probe = subprocess.run(
+            ("podman", "info", "--format", "{{.Host.Security.Rootless}}"),
+            text=True, capture_output=True, check=False, timeout=5,
+        )
+        runtime = subprocess.run(
+            ("podman", "info", "--format", "{{.Host.OCIRuntime.Name}}"),
+            text=True, capture_output=True, check=False, timeout=5,
+        )
+        connections = subprocess.run(
+            ("podman", "system", "connection", "list", "--format", "json"),
+            text=True, capture_output=True, check=False, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "Podman prerequisite probes did not complete"
+    match = re.fullmatch(
+        r"podman version ([0-9]+)\.([0-9]+)(?:\.[0-9]+)?",
+        version.stdout.strip(),
     )
+    if version.returncode != 0 or match is None or (
+        int(match.group(1)), int(match.group(2))
+    ) < (5, 8):
+        return "local Podman 5.8 or newer is required"
     if probe.returncode != 0 or probe.stdout.strip() != "true":
         return "a working rootless Podman service is unavailable"
+    if runtime.returncode != 0 or runtime.stdout.strip() != "crun":
+        return "the local crun OCI runtime is required"
+    try:
+        decoded = json.loads(connections.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return "Podman local connection state is unavailable"
+    if connections.returncode != 0 or type(decoded) is not list or any(
+        type(item) is not dict
+        or type(item.get("Default", item.get("default", False))) is not bool
+        or item.get("Default", item.get("default", False))
+        for item in decoded
+    ):
+        return "a local (non-remote) Podman service is required"
     if not _IMAGE:
         return "AGENT_FAMILY_TEST_IMAGE is not configured"
-    image = subprocess.run(
-        ("podman", "image", "exists", _IMAGE), check=False
-    )
+    try:
+        image = subprocess.run(
+            ("podman", "image", "exists", _IMAGE), check=False, timeout=5
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "instrumented image prerequisite probe did not complete"
     if image.returncode != 0:
         return "the instrumented family intake image is unavailable"
     return None
@@ -75,6 +116,7 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
             text=True,
             capture_output=True,
             check=False,
+            timeout=5,
         )
         self.assertEqual((checked.returncode, checked.stderr), (0, ""))
         self.assertTrue(_PROBE_SCRIPT.startswith("set -eu;"))
@@ -83,6 +125,8 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
         self.assertIn("inspect-done", _PROBE_SCRIPT)
         self.assertNotIn("; test $?", _PROBE_SCRIPT)
         self.assertNotIn("sleep 2", _PROBE_SCRIPT)
+        self.assertIn("deadline=", _PROBE_SCRIPT)
+        self.assertIn("exit 92", _PROBE_SCRIPT)
 
     def test_both_real_specs_have_pinned_fd_shape_without_podman(self) -> None:
         state = StateLayout(Path("/state"), "demo")
@@ -101,6 +145,7 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
         object.__setattr__(mount, "_directory_identity", (1, 2))
         object.__setattr__(mount, "_socket_identity", (1, 3))
         object.__setattr__(mount, "_directory_descriptor", 77)
+        object.__setattr__(mount, "_socket_descriptor", 78)
         with mock.patch.object(type(mount), "revalidate"):
             specs = (
                 run_codex_spec(
@@ -114,15 +159,16 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
                 ),
             )
         for spec in specs:
-            self.assertEqual(spec.pass_fds, (77,))
-            self.assertEqual(spec.argv.count("--preserve-fd=77"), 1)
+            self.assertEqual(spec.pass_fds, (78,))
+            self.assertEqual(spec.argv.count("--preserve-fd=78"), 1)
             self.assertEqual(
                 spec.argv.count(
-                    "type=bind,src=/proc/self/fd/77,dst=/run/agent-family"
+                    "type=bind,src=/proc/self/fd/78,"
+                    "dst=/run/agent-family/intake.sock"
                 ),
                 1,
             )
-            self.assertLess(spec.argv.index("--preserve-fd=77"), spec.argv.index("image"))
+            self.assertLess(spec.argv.index("--preserve-fd=78"), spec.argv.index("image"))
 
 
 @unittest.skipIf(_MISSING is not None, _MISSING or "Podman prerequisite missing")
@@ -150,7 +196,10 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                 runtime = FamilyIntakeRuntime.create(layout)
                 mount = runtime.start()
                 try:
-                    payload = _PROBE_SCRIPT
+                    payload = (
+                        f"test ! -e /proc/self/fd/{mount.pass_fds[0]}; "
+                        + _PROBE_SCRIPT
+                    )
                     state = StateLayout(root, "demo")
                     handover = Path(handover_temp) / "demo"
                     for directory in (
@@ -175,25 +224,29 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                         )
                     )
                     image_index = base.argv.index(_IMAGE)
-                    argv = base.argv[: image_index + 1] + ("/bin/sh", "-c", payload)
+                    launcher_end = base.argv.index("--", image_index + 1)
+                    argv = base.argv[: launcher_end + 1] + (
+                        "/bin/sh", "-c", payload,
+                    )
 
                     inspection = []
 
                     def inspect_running_container():
                         deadline = time.monotonic() + 5
-                        while time.monotonic() < deadline:
-                            if (mount.socket_dir / "inspect-ready").exists():
-                                inspection.append(
-                                    subprocess.run(
-                                        ("podman", "inspect", mount.container_name),
-                                        text=True,
-                                        capture_output=True,
-                                        check=False,
+                        try:
+                            while time.monotonic() < deadline:
+                                if (mount.socket_dir / "inspect-ready").exists():
+                                    inspection.append(
+                                        subprocess.run(
+                                            ("podman", "inspect", mount.container_name),
+                                            text=True, capture_output=True,
+                                            check=False, timeout=5,
+                                        )
                                     )
-                                )
-                                (mount.socket_dir / "inspect-done").touch()
-                                return
-                            time.sleep(0.05)
+                                    return
+                                time.sleep(0.05)
+                        finally:
+                            (mount.socket_dir / "inspect-done").touch()
 
                     inspector = threading.Thread(target=inspect_running_container)
                     inspector.start()
@@ -233,6 +286,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     subprocess.run(
                         ("podman", "container", "exists", mount.container_name),
                         check=False,
+                        timeout=5,
                     ).returncode,
                     0,
                 )
@@ -266,7 +320,10 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     )
                 )
                 failed_image_index = failed_base.argv.index(_IMAGE)
-                failed_argv = failed_base.argv[: failed_image_index + 1] + (
+                failed_launcher_end = failed_base.argv.index(
+                    "--", failed_image_index + 1
+                )
+                failed_argv = failed_base.argv[: failed_launcher_end + 1] + (
                     "/bin/sh", "-c", "sleep 30",
                 )
 
@@ -279,6 +336,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                                 failed_mount.container_name,
                             ),
                             check=False,
+                            timeout=5,
                         )
                         if exists.returncode == 0:
                             failed_runtime._fail_runtime()
@@ -310,6 +368,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                             failed_mount.container_name,
                         ),
                         check=False,
+                        timeout=5,
                     ).returncode,
                     0,
                 )

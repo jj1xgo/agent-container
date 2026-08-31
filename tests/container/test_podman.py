@@ -1,6 +1,8 @@
 from pathlib import Path
 import os
 import signal
+import socket
+import stat
 import subprocess
 from tempfile import TemporaryDirectory
 import unittest
@@ -54,15 +56,25 @@ class PodmanCommandTest(unittest.TestCase):
             fake_podman.write_text(
                 "#!/bin/sh\n"
                 "case \"$1\" in --preserve-fd=*) fd=${1#*=} ;; *) exit 81 ;; esac\n"
-                "exec python3 -c 'import os,sys; os.fstat(int(sys.argv[1]))' \"$fd\"\n",
+                "exec python3 -c 'import os,stat,sys; "
+                "assert stat.S_ISSOCK(os.fstat(int(sys.argv[1])).st_mode)' \"$fd\"\n",
                 encoding="ascii",
             )
             fake_podman.chmod(0o755)
-            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            socket_path = root / "intake.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(socket_path))
+            descriptor = os.open(
+                socket_path,
+                getattr(os, "O_PATH", os.O_RDONLY) | os.O_NOFOLLOW,
+            )
             family = mock.create_autospec(FamilyIntakeRuntime, instance=True)
             mount = mock.create_autospec(FamilyRuntimeMount, instance=True)
             mount.container_name = "agent-family-safe"
             try:
+                self.assertTrue(stat.S_ISSOCK(os.fstat(descriptor).st_mode))
+                with self.assertRaises((NotADirectoryError, OSError)):
+                    os.open("..", os.O_RDONLY, dir_fd=descriptor)
                 completed = run_command_supervised(
                     CommandSpec(
                         (str(fake_podman), f"--preserve-fd={descriptor}"),
@@ -76,6 +88,7 @@ class PodmanCommandTest(unittest.TestCase):
                 )
             finally:
                 os.close(descriptor)
+                listener.close()
 
         self.assertEqual(completed.returncode, 0)
 
@@ -248,6 +261,7 @@ class PodmanCommandTest(unittest.TestCase):
             },
         )
         object.__setattr__(family, "_directory_descriptor", 77)
+        object.__setattr__(family, "_socket_descriptor", 78)
 
         with mock.patch.object(FamilyRuntimeMount, "revalidate"):
             specs = (
@@ -264,7 +278,8 @@ class PodmanCommandTest(unittest.TestCase):
             with self.subTest(agent=spec.argv[-1]):
                 self.assertEqual(
                     spec.argv.count(
-                        "type=bind,src=/proc/self/fd/77,dst=/run/agent-family"
+                        "type=bind,src=/proc/self/fd/78,"
+                        "dst=/run/agent-family/intake.sock"
                     ),
                     1,
                 )
@@ -277,10 +292,10 @@ class PodmanCommandTest(unittest.TestCase):
                 self.assertEqual(
                     spec.argv.count(f"AGENT_FAMILY_CAPABILITY={capability}"), 1
                 )
-                self.assertEqual(spec.argv.count("--preserve-fd=77"), 1)
-                self.assertEqual(spec.pass_fds, (77,))
+                self.assertEqual(spec.argv.count("--preserve-fd=78"), 1)
+                self.assertEqual(spec.pass_fds, (78,))
                 self.assertLess(
-                    spec.argv.index("--preserve-fd=77"), spec.argv.index(IMAGE)
+                    spec.argv.index("--preserve-fd=78"), spec.argv.index(IMAGE)
                 )
                 rendered = " ".join(spec.argv)
                 for forbidden in (
@@ -679,11 +694,14 @@ class PodmanCommandTest(unittest.TestCase):
                     self.assertEqual(spec.argv.count(f"{variable}={value}"), 1)
                 image_index = spec.argv.index(IMAGE)
                 self.assertEqual(
-                    spec.argv[image_index + 1 : image_index + 3],
-                    ("agent-egress-runtime", "--"),
+                    spec.argv[image_index + 1 : image_index + 5],
+                    (
+                        "agent-runtime-launcher", "--",
+                        "agent-egress-runtime", "--",
+                    ),
                 )
                 original = "codex" if agent == "codex" else "python3"
-                self.assertEqual(spec.argv[image_index + 3], original)
+                self.assertEqual(spec.argv[image_index + 5], original)
 
     def test_egress_mount_rejects_relative_or_wrong_project_agent(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")
@@ -1208,9 +1226,11 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertNotIn("/vault,dst=", joined)
         self.assertNotIn("token", joined.lower())
         self.assertEqual(
-            spec.argv[-5:],
+            spec.argv[-7:],
             (
                 IMAGE,
+                "agent-runtime-launcher",
+                "--",
                 "codex",
                 "--approve-for-me",
                 "-c",
@@ -1335,9 +1355,11 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertNotIn("/vault/handovers/other-project", joined)
         self.assertNotIn("capability-secret-value", joined)
         self.assertEqual(
-            spec.argv[-7:],
+            spec.argv[-9:],
             (
                 IMAGE,
+                "agent-runtime-launcher",
+                "--",
                 "python3",
                 "-m",
                 "agent_container.claude_launcher",

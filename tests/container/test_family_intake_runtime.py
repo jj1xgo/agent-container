@@ -183,6 +183,25 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
                 fcntl.fcntl(mount.pass_fds[0], fcntl.F_GETFD)
                 & fcntl.FD_CLOEXEC
             )
+            self.assertTrue(stat.S_ISSOCK(os.fstat(mount.pass_fds[0]).st_mode))
+            with self.assertRaises(OSError):
+                os.open(
+                    "../..",
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=mount.pass_fds[0],
+                )
+            try:
+                pinned_socket = socket.fromfd(
+                    mount.pass_fds[0], socket.AF_UNIX, socket.SOCK_STREAM
+                )
+            except OSError:
+                pass
+            else:
+                try:
+                    with self.assertRaises(OSError):
+                        pinned_socket.accept()
+                finally:
+                    pinned_socket.close()
 
         self.assertFalse(run_dir.exists())
         runtime.close()

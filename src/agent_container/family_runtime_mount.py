@@ -14,6 +14,7 @@ _CONTAINER_SOCKET = "/run/agent-family/intake.sock"
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_PATH = getattr(os, "O_PATH", 0)
 
 
 class FamilyRuntimeError(Exception):
@@ -90,6 +91,7 @@ class FamilyRuntimeMount:
     )
     _socket_identity: tuple[int, int] | None = field(default=None, repr=False)
     _directory_descriptor: int = field(default=-1, repr=False)
+    _socket_descriptor: int = field(default=-1, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.socket_dir, Path) or not self.socket_dir.is_absolute():
@@ -109,8 +111,22 @@ class FamilyRuntimeMount:
         cls, socket_dir: Path, capability: str, environment: Mapping[str, str]
     ) -> "FamilyRuntimeMount":
         descriptor = _open_directory(socket_dir)
+        socket_descriptor = -1
         try:
             directory_identity, socket_identity = _snapshot_descriptor(descriptor)
+            if _O_PATH == 0:
+                raise ValueError("family runtime mount is invalid")
+            socket_descriptor = os.open(
+                "intake.sock",
+                _O_PATH | _NOFOLLOW | _CLOEXEC,
+                dir_fd=descriptor,
+            )
+            socket_opened = os.fstat(socket_descriptor)
+            if (
+                _identity(socket_opened) != socket_identity
+                or not stat.S_ISSOCK(socket_opened.st_mode)
+            ):
+                raise ValueError("family runtime mount is invalid")
             return cls(
                 socket_dir,
                 capability,
@@ -118,8 +134,11 @@ class FamilyRuntimeMount:
                 directory_identity,
                 socket_identity,
                 descriptor,
+                socket_descriptor,
             )
         except BaseException:
+            if socket_descriptor >= 0:
+                os.close(socket_descriptor)
             os.close(descriptor)
             raise
 
@@ -128,32 +147,46 @@ class FamilyRuntimeMount:
             self._directory_identity is None
             or self._socket_identity is None
             or self._directory_descriptor < 0
+            or self._socket_descriptor < 0
         ):
             raise ValueError("family runtime mount is invalid")
         try:
             pinned = _snapshot_descriptor(self._directory_descriptor)
+            pinned_socket = os.fstat(self._socket_descriptor)
             observed = _snapshot(self.socket_dir)
         except (OSError, ValueError):
             raise ValueError("family runtime mount is invalid") from None
         expected = (self._directory_identity, self._socket_identity)
-        if pinned != expected or observed != expected:
+        if (
+            pinned != expected
+            or observed != expected
+            or _identity(pinned_socket) != self._socket_identity
+            or not stat.S_ISSOCK(pinned_socket.st_mode)
+        ):
             raise ValueError("family runtime mount is invalid")
 
     @property
     def pass_fds(self) -> tuple[int, ...]:
-        if self._directory_descriptor < 3:
+        if self._socket_descriptor < 3:
             raise ValueError("family runtime mount is invalid")
-        return (self._directory_descriptor,)
+        return (self._socket_descriptor,)
 
     @property
     def mount_source(self) -> Path:
         return Path(f"/proc/self/fd/{self.pass_fds[0]}")
 
     def close(self) -> None:
-        descriptor = self._directory_descriptor
-        if descriptor >= 0:
-            os.close(descriptor)
-            object.__setattr__(self, "_directory_descriptor", -1)
+        failed = False
+        for attribute in ("_socket_descriptor", "_directory_descriptor"):
+            descriptor = getattr(self, attribute)
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    failed = True
+                object.__setattr__(self, attribute, -1)
+        if failed:
+            raise OSError("family runtime mount close failed")
 
     @property
     def socket_path(self) -> Path:

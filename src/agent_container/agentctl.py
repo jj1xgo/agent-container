@@ -71,6 +71,8 @@ from agent_container.podman import podman_image_id_spec
 from agent_container.podman import podman_project_images_spec
 from agent_container.podman import podman_running_agent_containers_spec
 from agent_container.podman import podman_rootless_spec
+from agent_container.podman import podman_oci_runtime_spec
+from agent_container.podman import podman_connections_spec
 from agent_container.podman import podman_stats_spec
 from agent_container.podman import podman_version_spec
 from agent_container.podman import project_node_version_spec
@@ -816,6 +818,87 @@ def _podman_preflight(
         _required_probe_run(runner, podman_image_exists_spec(image_required))
 
 
+def _family_podman_preflight(
+    runner: Callable[[CommandSpec], subprocess.CompletedProcess],
+    environment: Mapping[str, str] | None = None,
+) -> None:
+    effective_environment = os.environ if environment is None else environment
+    if any(
+        effective_environment.get(name)
+        for name in ("CONTAINER_HOST", "CONTAINER_CONNECTION")
+    ):
+        raise ValueError("local Podman with crun is required for family intake")
+    runtime = _required_probe_run(runner, podman_oci_runtime_spec())
+    if (runtime.stdout or "").strip() != "crun":
+        raise ValueError("local Podman with crun is required for family intake")
+    connections = _required_probe_run(runner, podman_connections_spec())
+    try:
+        decoded = json.loads(connections.stdout or "")
+    except (json.JSONDecodeError, TypeError):
+        raise ValueError("local Podman with crun is required for family intake") from None
+    if type(decoded) is not list:
+        raise ValueError("local Podman with crun is required for family intake")
+    for entry in decoded:
+        if type(entry) is not dict:
+            raise ValueError("local Podman with crun is required for family intake")
+        default = entry.get("Default", entry.get("default", False))
+        if type(default) is not bool or default:
+            raise ValueError("local Podman with crun is required for family intake")
+
+
+def _family_podman_doctor_checks(
+    runner: Callable[[CommandSpec], subprocess.CompletedProcess],
+    version: subprocess.CompletedProcess,
+    environment: Mapping[str, str] | None,
+) -> list[CheckResult]:
+    version_text = (version.stdout or "").strip()
+    match = re.fullmatch(
+        r"podman version ([0-9]+)\.([0-9]+)(?:\.[0-9]+)?", version_text
+    )
+    version_ok = (
+        version.returncode == 0
+        and match is not None
+        and (int(match.group(1)), int(match.group(2))) >= (5, 8)
+    )
+    runtime = _doctor_run(runner, podman_oci_runtime_spec())
+    runtime_ok = runtime.returncode == 0 and (runtime.stdout or "").strip() == "crun"
+    connections = _doctor_run(runner, podman_connections_spec())
+    effective_environment = os.environ if environment is None else environment
+    environment_local = not any(
+        effective_environment.get(name)
+        for name in ("CONTAINER_HOST", "CONTAINER_CONNECTION")
+    )
+    local_ok = False
+    if connections.returncode == 0:
+        try:
+            decoded = json.loads(connections.stdout or "")
+            local_ok = environment_local and type(decoded) is list and all(
+                type(entry) is dict
+                and type(entry.get("Default", entry.get("default", False))) is bool
+                and not entry.get("Default", entry.get("default", False))
+                for entry in decoded
+            )
+        except (json.JSONDecodeError, TypeError):
+            local_ok = False
+    return [
+        CheckResult(
+            "PASS" if version_ok else "FAIL",
+            "family-podman-version",
+            ">= 5.8 required",
+        ),
+        CheckResult(
+            "PASS" if runtime_ok else "FAIL",
+            "family-podman-runtime",
+            "crun required",
+        ),
+        CheckResult(
+            "PASS" if local_ok else "FAIL",
+            "family-podman-local",
+            "local service required",
+        ),
+    ]
+
+
 def _resolve_project_image(
     layout: StateLayout,
     base_image: str,
@@ -902,6 +985,16 @@ def _doctor(
             "available" if version.returncode == 0 else "unavailable",
         )
     )
+
+    from agent_container.family_state import FamilyStateLayout
+
+    family_layout = FamilyStateLayout(layout.root, layout.project_id)
+    try:
+        os.lstat(family_layout.family_binding_file)
+    except FileNotFoundError:
+        pass
+    else:
+        checks.extend(_family_podman_doctor_checks(runner, version, environment))
 
     rootless = _doctor_run(runner, podman_rootless_spec())
     rootless_value = (rootless.stdout or "").strip().lower()
@@ -1714,6 +1807,7 @@ def main(
                     family_runtime = None
                     family_mount = None
                 else:
+                    _family_podman_preflight(runner, environment)
                     factory = (
                         FamilyIntakeRuntime.create
                         if family_runtime_factory is None
