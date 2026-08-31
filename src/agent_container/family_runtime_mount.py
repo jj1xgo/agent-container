@@ -167,13 +167,13 @@ class FamilyRuntimeMount:
 
     @property
     def pass_fds(self) -> tuple[int, ...]:
-        if self._socket_descriptor < 3:
+        if self._directory_descriptor < 3:
             raise ValueError("family runtime mount is invalid")
-        return (self._socket_descriptor,)
+        return (self._directory_descriptor,)
 
     @property
     def mount_source(self) -> Path:
-        return Path(f"/proc/self/fd/{self.pass_fds[0]}")
+        return Path(f"/proc/self/fd/{self.pass_fds[0]}/intake.sock")
 
     def close(self) -> None:
         failed = False

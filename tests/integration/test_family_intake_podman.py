@@ -405,21 +405,21 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
                 ),
             )
         for spec in specs:
-            self.assertEqual(spec.pass_fds, (78,))
-            self.assertEqual(spec.argv.count("--preserve-fd=78"), 1)
+            self.assertEqual(spec.pass_fds, (77,))
+            self.assertEqual(spec.argv.count("--preserve-fd=77"), 1)
             self.assertEqual(
                 spec.argv.count(
-                    "type=bind,src=/proc/self/fd/78,"
+                    "type=bind,src=/proc/self/fd/77/intake.sock,"
                     "dst=/run/agent-family/intake.sock"
                 ),
                 1,
             )
-            self.assertLess(spec.argv.index("--preserve-fd=78"), spec.argv.index("image"))
-            self.assertNotIn(77, spec.pass_fds)
+            self.assertLess(spec.argv.index("--preserve-fd=77"), spec.argv.index("image"))
+            self.assertNotIn(78, spec.pass_fds)
             image_index = spec.argv.index("image")
             self.assertEqual(
                 spec.argv[image_index + 1 : image_index + 4],
-                ("agent-runtime-launcher", "--close-fd=78", "--"),
+                ("agent-runtime-launcher", "--close-fd=77", "--"),
             )
             if "agent-egress-runtime" in spec.argv:
                 self.assertGreater(
