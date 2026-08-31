@@ -192,6 +192,13 @@ class FamilyIssueTest(unittest.TestCase):
         self.assertNotIn("- [ ]", body)
         self.assertNotIn("- [x]", body)
 
+    def test_literalizes_compact_reference_and_footnote_definitions(self) -> None:
+        payload = valid_payload()
+        payload.update({"summary": "[docs]:https://example.invalid", "context": "[^secret]:hidden"})
+        body = render_family_issue_body(parse_family_issue_draft(payload))
+        self.assertIn("\\[docs\\]\\:https://example.invalid", body)
+        self.assertIn("\\[^secret\\]\\:hidden", body)
+
     # Break caught: a non-string, empty, or structurally wrong required value being accepted.
     def test_rejects_wrong_types_empty_values_and_non_list_criteria(self) -> None:
         cases: list[dict[str, object]] = []

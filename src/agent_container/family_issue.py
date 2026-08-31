@@ -84,7 +84,7 @@ def _escape_markdown_literal(value: str) -> str:
         leading_spaces = 0
     block_value = value[leading_spaces:]
     task = re.match(r"\[(?: |x|X)\](?: |$)", block_value)
-    definition = re.match(r"\[[^\]]+\]:(?: |$)", block_value)
+    definition = re.match(r"\[[^\]]+\]:", block_value)
     if task:
         escaped.add(leading_spaces)
         escaped.add(leading_spaces + 2)
