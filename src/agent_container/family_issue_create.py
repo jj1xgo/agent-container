@@ -42,15 +42,6 @@ _POST_HEADER_NAMES = frozenset(
     }
 )
 _GET_HEADER_NAMES = _POST_HEADER_NAMES - {"Content-Type"}
-_KNOWN_TRANSPORT_ERRORS = (
-    ValueError,
-    RuntimeError,
-    TimeoutError,
-    OSError,
-    http.client.HTTPException,
-)
-
-
 @dataclass(frozen=True)
 class CreatedIssue:
     number: int
@@ -183,6 +174,122 @@ def _fixed_reconciliation_failure() -> RuntimeError:
     return RuntimeError("family Issue reconciliation failed")
 
 
+def _is_clean_domain_error(
+    error: Exception,
+    expected_type: type[SendNotStarted] | type[SendOutcomeUnknown],
+    expected_stage: str,
+) -> bool:
+    return (
+        type(error) is expected_type
+        and error.stage == expected_stage  # type: ignore[attr-defined]
+        and error.__cause__ is None
+        and error.__context__ is None
+    )
+
+
+def _response_header_values(
+    pairs: tuple[tuple[str, str], ...],
+    expected_name: str,
+) -> list[str]:
+    values: list[str] = []
+    for pair in pairs:
+        if (
+            type(pair) is not tuple
+            or len(pair) != 2
+            or type(pair[0]) is not str
+            or type(pair[1]) is not str
+        ):
+            raise ValueError("family GitHub Issue response is invalid")
+        if pair[0].lower() == expected_name:
+            values.append(pair[1])
+    return values
+
+
+def _validated_response_header_pairs(
+    pairs: tuple[tuple[str, str], ...],
+) -> int | None:
+    content_types = _response_header_values(pairs, "content-type")
+    if (
+        len(content_types) != 1
+        or content_types[0].split(";", 1)[0].strip() != "application/json"
+    ):
+        raise ValueError("family GitHub Issue response is invalid")
+    lengths = _response_header_values(pairs, "content-length")
+    if not lengths:
+        return None
+    if len(lengths) != 1:
+        raise ValueError("family GitHub Issue response is invalid")
+    value = lengths[0]
+    if (
+        not value
+        or len(value) > 10
+        or not value.isascii()
+        or not value.isdecimal()
+    ):
+        raise ValueError("family GitHub Issue response is invalid")
+    length = int(value)
+    if length > MAX_ISSUE_RESPONSE_BYTES:
+        raise ValueError("family GitHub Issue response is invalid")
+    return length
+
+
+def _read_framed_response(
+    response: http.client.HTTPResponse,
+    declared_length: int | None,
+) -> bytes:
+    initial_length = response.length
+    chunked = response.chunked
+    if (
+        type(chunked) is not bool
+        or isinstance(initial_length, bool)
+        or (initial_length is not None and not isinstance(initial_length, int))
+        or (declared_length is not None and chunked)
+        or (
+            declared_length is not None
+            and initial_length != declared_length
+        )
+        or (
+            declared_length is None
+            and not chunked
+            and initial_length is not None
+        )
+    ):
+        raise ValueError("family GitHub Issue response is invalid")
+
+    remaining = MAX_ISSUE_RESPONSE_BYTES + 1
+    chunks: list[bytes] = []
+    while remaining:
+        chunk = response.read(remaining)
+        if type(chunk) is not bytes:
+            raise ValueError("family GitHub Issue response is invalid")
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+        if response.isclosed():
+            break
+    body = b"".join(chunks)
+    if len(body) > MAX_ISSUE_RESPONSE_BYTES:
+        raise ValueError("family GitHub Issue response is invalid")
+
+    final_length = response.length
+    if (
+        isinstance(final_length, bool)
+        or (final_length is not None and not isinstance(final_length, int))
+        or not response.isclosed()
+        or (
+            declared_length is not None
+            and (len(body) != declared_length or final_length != 0)
+        )
+        or (
+            declared_length is None
+            and final_length is not None
+        )
+    ):
+        raise ValueError("family GitHub Issue response is invalid")
+    return body
+
+
 def family_issue_transport(
     method: str,
     url: str,
@@ -196,6 +303,8 @@ def family_issue_transport(
     response: http.client.HTTPResponse | None = None
     body_send_begun = False
     response_phase = False
+    result: HttpResponse | None = None
+    failure: Exception | None = None
     try:
         connection = http.client.HTTPSConnection(_API_HOST, timeout=30)
         connection.connect()
@@ -216,36 +325,45 @@ def family_issue_transport(
             connection.send(body)
         response_phase = True
         response = connection.getresponse()
-        response_body = response.read(MAX_ISSUE_RESPONSE_BYTES + 1)
-        if len(response_body) > MAX_ISSUE_RESPONSE_BYTES:
-            if method == "POST":
-                raise SendOutcomeUnknown("response")
-            raise _fixed_reconciliation_failure()
-        return HttpResponse(
+        raw_headers = tuple(response.getheaders())
+        declared_length = _validated_response_header_pairs(raw_headers)
+        response_body = _read_framed_response(response, declared_length)
+        result = HttpResponse(
             status=response.status,
-            headers=dict(response.getheaders()),
+            headers=dict(raw_headers),
             body=response_body,
         )
-    except (SendNotStarted, SendOutcomeUnknown):
-        raise
-    except _KNOWN_TRANSPORT_ERRORS:
+    except Exception as error:
         if method == "POST":
             if not body_send_begun:
-                raise SendNotStarted("send") from None
-            stage = "response" if response_phase else "send"
-            raise SendOutcomeUnknown(stage) from None
-        raise _fixed_reconciliation_failure() from None
+                if _is_clean_domain_error(error, SendNotStarted, "send"):
+                    failure = error
+                else:
+                    failure = SendNotStarted("send")
+            else:
+                stage = "response" if response_phase else "send"
+                if _is_clean_domain_error(error, SendOutcomeUnknown, stage):
+                    failure = error
+                else:
+                    failure = SendOutcomeUnknown(stage)
+        else:
+            failure = _fixed_reconciliation_failure()
     finally:
         if response is not None:
             try:
                 response.close()
-            except _KNOWN_TRANSPORT_ERRORS:
+            except Exception:
                 pass
         if connection is not None:
             try:
                 connection.close()
-            except _KNOWN_TRANSPORT_ERRORS:
+            except Exception:
                 pass
+    if failure is not None:
+        raise failure
+    if result is None:
+        raise AssertionError("family GitHub Issue transport has no result")
+    return result
 
 
 def _validate_binding(binding: FamilyBinding) -> FamilyBinding:
@@ -297,23 +415,22 @@ def _installation_token(
             or token.expires_at <= 0
         ):
             raise ValueError()
+    except Exception:
+        pass
+    else:
         return token
-    except (ValueError, RuntimeError, OSError, http.client.HTTPException):
-        raise SendNotStarted("token") from None
+    raise SendNotStarted("token")
 
 
-def _content_type(headers: Mapping[str, str]) -> str:
+def _validated_response_headers(headers: Mapping[str, str]) -> int | None:
     if not isinstance(headers, Mapping):
         raise ValueError("family GitHub Issue response is invalid")
-    values: list[object] = []
+    pairs: list[tuple[str, str]] = []
     for name, value in headers.items():
-        if type(name) is not str:
+        if type(name) is not str or type(value) is not str:
             raise ValueError("family GitHub Issue response is invalid")
-        if name.lower() == "content-type":
-            values.append(value)
-    if len(values) != 1 or not isinstance(values[0], str):
-        raise ValueError("family GitHub Issue response is invalid")
-    return values[0].split(";", 1)[0].strip()
+        pairs.append((name, value))
+    return _validated_response_header_pairs(tuple(pairs))
 
 
 def _parse_issue(
@@ -330,10 +447,12 @@ def _parse_issue(
         isinstance(response.status, bool)
         or not isinstance(response.status, int)
         or response.status != expected_status
+        or type(response.body) is not bytes
         or len(response.body) > MAX_ISSUE_RESPONSE_BYTES
     ):
         raise ValueError("family GitHub Issue response is invalid")
-    if _content_type(response.headers) != "application/json":
+    declared_length = _validated_response_headers(response.headers)
+    if declared_length is not None and declared_length != len(response.body):
         raise ValueError("family GitHub Issue response is invalid")
     payload = _strict_json(response.body, ascii_only=False)
     if type(payload) is not dict:
@@ -402,6 +521,8 @@ class FamilyIssueCreator:
             ensure_ascii=True,
             separators=(",", ":"),
         ).encode("ascii")
+        response: HttpResponse | None = None
+        transport_failure: Exception | None = None
         try:
             response = self.transport(
                 "POST",
@@ -409,14 +530,28 @@ class FamilyIssueCreator:
                 _headers(token, content=True),
                 body,
             )
-        except (SendNotStarted, SendOutcomeUnknown):
-            raise
-        except _KNOWN_TRANSPORT_ERRORS:
-            raise SendOutcomeUnknown("send") from None
+        except Exception as error:
+            if _is_clean_domain_error(error, SendNotStarted, "send"):
+                transport_failure = error
+            elif any(
+                _is_clean_domain_error(error, SendOutcomeUnknown, stage)
+                for stage in ("send", "response")
+            ):
+                transport_failure = error
+            else:
+                transport_failure = SendOutcomeUnknown("send")
+        if transport_failure is not None:
+            raise transport_failure
+        if response is None:
+            raise SendOutcomeUnknown("send")
+        response_failure = False
         try:
             return _parse_issue(response, binding, expected_status=201)
-        except (TypeError, ValueError, RuntimeError):
-            raise SendOutcomeUnknown("response") from None
+        except Exception:
+            response_failure = True
+        if response_failure:
+            raise SendOutcomeUnknown("response")
+        raise AssertionError("unreachable")
 
     def verify_existing(
         self,
@@ -428,6 +563,7 @@ class FamilyIssueCreator:
         binding = _validate_binding(binding)
         canonical = _validate_canonical(canonical)
         issue_number = validate_issue_number(issue_number)
+        failure = False
         try:
             token = _installation_token(tokens)
             response = self.transport(
@@ -446,13 +582,8 @@ class FamilyIssueCreator:
                 expected_number=issue_number,
                 canonical=canonical,
             )
-        except (
-            SendNotStarted,
-            SendOutcomeUnknown,
-            TypeError,
-            ValueError,
-            RuntimeError,
-            OSError,
-            http.client.HTTPException,
-        ):
-            raise _fixed_reconciliation_failure() from None
+        except Exception:
+            failure = True
+        if failure:
+            raise _fixed_reconciliation_failure()
+        raise AssertionError("unreachable")

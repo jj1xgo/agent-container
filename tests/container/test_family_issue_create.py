@@ -1,4 +1,5 @@
 import http.client
+from io import BytesIO
 import json
 import unittest
 from unittest import mock
@@ -118,6 +119,18 @@ def issue_response(
     )
 
 
+def framed_issue_response() -> HttpResponse:
+    body = issue_response().body
+    return HttpResponse(
+        201,
+        {
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Length": str(len(body)),
+        },
+        body,
+    )
+
+
 class FakeTokens:
     def __init__(self) -> None:
         self.get_calls = 0
@@ -135,6 +148,16 @@ class FailingTokens(FakeTokens):
     def get(self) -> InstallationToken:
         self.get_calls += 1
         raise RuntimeError("family-token-secret-marker")
+
+
+class UnexpectedFailingTokens(FakeTokens):
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    def get(self) -> InstallationToken:
+        self.get_calls += 1
+        raise self.error
 
 
 def creator_subject(
@@ -226,6 +249,31 @@ class FamilyIssueCreatorTest(unittest.TestCase):
                 issue_response().body + b"\n",
             ),
             HttpResponse(201, {"Content-Type": "application/json"}, duplicate_number),
+            HttpResponse(
+                201,
+                {
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(issue_response().body) + 1),
+                },
+                issue_response().body,
+            ),
+            HttpResponse(
+                201,
+                {
+                    "Content-Type": "application/json",
+                    "content-type": "application/json",
+                },
+                issue_response().body,
+            ),
+            HttpResponse(
+                201,
+                {
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(issue_response().body)),
+                    "content-length": str(len(issue_response().body)),
+                },
+                issue_response().body,
+            ),
             issue_response(payload=[]),
             issue_response(payload={key: value for key, value in exact.items() if key != "state"}),
             issue_response(payload=exact | {"number": True}),
@@ -258,6 +306,7 @@ class FamilyIssueCreatorTest(unittest.TestCase):
                 self.assertNotIn("secret-marker", str(raised.exception))
                 self.assertNotIn("secret-marker", repr(raised.exception))
                 self.assertIsNone(raised.exception.__cause__)
+                self.assertIsNone(raised.exception.__context__)
 
     # Break caught: a token failure being mistaken for an ambiguous Issue POST.
     def test_token_failure_is_proven_not_started_and_never_calls_transport(self) -> None:
@@ -273,6 +322,50 @@ class FamilyIssueCreatorTest(unittest.TestCase):
         self.assertNotIn("secret", str(raised.exception))
         self.assertNotIn("secret", repr(raised.exception))
         self.assertIsNone(raised.exception.__cause__)
+
+    # Break caught: an ordinary provider exception escaping before the Issue POST.
+    def test_every_ordinary_token_failure_is_sanitized_before_http(self) -> None:
+        for failure in (
+            TypeError("token-type-secret-marker"),
+            AttributeError("token-attribute-secret-marker"),
+            LookupError("token-lookup-secret-marker"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                creator, calls = creator_subject(issue_response())
+                tokens = UnexpectedFailingTokens(failure)
+
+                with self.assertRaises(SendNotStarted) as raised:
+                    creator.create(self.binding, CANONICAL, tokens)  # type: ignore[arg-type]
+
+                self.assertEqual(raised.exception.stage, "token")
+                self.assertEqual(tokens.get_calls, 1)
+                self.assertEqual(calls, [])
+                self.assertNotIn("secret-marker", str(raised.exception))
+                self.assertNotIn("secret-marker", repr(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
+                self.assertIsNone(raised.exception.__context__)
+
+    # Break caught: an unexpected transport exception inviting caller retry.
+    def test_create_sanitizes_unexpected_transport_failure_as_unknown_once(self) -> None:
+        calls = 0
+
+        def transport(*_arguments):  # type: ignore[no-untyped-def]
+            nonlocal calls
+            calls += 1
+            raise LookupError("unexpected-transport-secret-marker")
+
+        creator = FamilyIssueCreator(transport=transport)
+
+        with self.assertRaises(SendOutcomeUnknown) as raised:
+            creator.create(self.binding, CANONICAL, self.tokens)  # type: ignore[arg-type]
+
+        self.assertEqual(raised.exception.stage, "send")
+        self.assertEqual(calls, 1)
+        self.assertEqual(self.tokens.get_calls, 1)
+        self.assertNotIn("secret-marker", str(raised.exception))
+        self.assertNotIn("secret-marker", repr(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertIsNone(raised.exception.__context__)
 
     # Break caught: forged inputs reaching token acquisition or a remote endpoint.
     def test_rejects_forged_binding_and_canonical_before_side_effects(self) -> None:
@@ -408,17 +501,49 @@ class FailureContractTest(unittest.TestCase):
 class FakeHTTPResponse:
     status = 201
 
-    def __init__(self, body: bytes | None = None) -> None:
+    def __init__(
+        self,
+        body: bytes | None = None,
+        *,
+        headers: list[tuple[str, str]] | None = None,
+        length: int | None = None,
+        chunked: bool = False,
+        complete: bool = True,
+    ) -> None:
         self.body = issue_response().body if body is None else body
+        self.headers = (
+            [
+                ("Content-Type", "application/json; charset=utf-8"),
+                ("Content-Length", str(len(self.body))),
+            ]
+            if headers is None
+            else headers
+        )
+        self.length = len(self.body) if length is None and not chunked else length
+        self.chunked = chunked
+        self.complete = complete
+        self.closed_by_read = False
         self.closed = 0
+        self.offset = 0
         self.read_maximum: int | None = None
 
     def getheaders(self) -> list[tuple[str, str]]:
-        return [("Content-Type", "application/json; charset=utf-8")]
+        return list(self.headers)
 
     def read(self, maximum: int) -> bytes:
         self.read_maximum = maximum
-        return self.body[:maximum]
+        chunk = self.body[self.offset : self.offset + maximum]
+        self.offset += len(chunk)
+        if self.length is not None:
+            self.length -= len(chunk)
+            if self.length == 0 and self.complete:
+                self.closed_by_read = True
+        elif self.complete:
+            self.closed_by_read = True
+        return chunk
+
+    def isclosed(self) -> bool:
+        return self.closed_by_read
 
     def close(self) -> None:
         self.closed += 1
@@ -427,6 +552,8 @@ class FakeHTTPResponse:
 class InstrumentedHTTPSConnection:
     response = FakeHTTPResponse()
     failure_stage: str | None = None
+    failure: Exception = ConnectionResetError("socket-secret-marker")
+    close_failure: Exception | None = None
     instances: list["InstrumentedHTTPSConnection"] = []
 
     def __init__(self, host: str, *, timeout: int) -> None:
@@ -438,7 +565,7 @@ class InstrumentedHTTPSConnection:
 
     def _fail(self, stage: str) -> None:
         if self.failure_stage == stage:
-            raise ConnectionResetError("socket-secret-marker")
+            raise self.failure
 
     def connect(self) -> None:
         self.events.append("connect")
@@ -476,12 +603,18 @@ class InstrumentedHTTPSConnection:
 
     def close(self) -> None:
         self.closed += 1
+        if self.close_failure is not None:
+            raise self.close_failure
 
 
 class FamilyIssueTransportTest(unittest.TestCase):
     def setUp(self) -> None:
         InstrumentedHTTPSConnection.instances = []
         InstrumentedHTTPSConnection.failure_stage = None
+        InstrumentedHTTPSConnection.failure = ConnectionResetError(
+            "socket-secret-marker"
+        )
+        InstrumentedHTTPSConnection.close_failure = None
         InstrumentedHTTPSConnection.response = FakeHTTPResponse()
         self.headers = {
             "Accept": "application/vnd.github+json",
@@ -504,7 +637,7 @@ class FamilyIssueTransportTest(unittest.TestCase):
     def test_real_transport_uses_one_explicit_body_send_at_the_fixed_origin(self) -> None:
         response = self.call_transport()
 
-        self.assertEqual(response, issue_response())
+        self.assertEqual(response, framed_issue_response())
         self.assertEqual(len(InstrumentedHTTPSConnection.instances), 1)
         connection = InstrumentedHTTPSConnection.instances[0]
         self.assertEqual(connection.host, "api.github.com")
@@ -598,6 +731,131 @@ class FamilyIssueTransportTest(unittest.TestCase):
         self.assertEqual(connection.closed, 1)
         self.assertIsNone(raised.exception.__cause__)
 
+    # Break caught: ordinary exceptions bypassing the phase-only safety funnel.
+    def test_every_ordinary_http_phase_exception_is_fixed_and_one_attempt(self) -> None:
+        cases = (
+            ("connect", TypeError("connect-secret-marker"), SendNotStarted, "send"),
+            ("send", AttributeError("send-secret-marker"), SendOutcomeUnknown, "send"),
+            (
+                "getresponse",
+                TypeError("response-secret-marker"),
+                SendOutcomeUnknown,
+                "response",
+            ),
+        )
+        for stage, failure, error_type, expected_stage in cases:
+            with self.subTest(stage=stage, failure=type(failure).__name__):
+                InstrumentedHTTPSConnection.instances = []
+                InstrumentedHTTPSConnection.failure_stage = stage
+                InstrumentedHTTPSConnection.failure = failure
+
+                with self.assertRaises(error_type) as raised:
+                    self.call_transport()
+
+                self.assertEqual(raised.exception.stage, expected_stage)
+                self.assertEqual(len(InstrumentedHTTPSConnection.instances), 1)
+                self.assertNotIn("secret-marker", str(raised.exception))
+                self.assertNotIn("secret-marker", repr(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
+                self.assertIsNone(raised.exception.__context__)
+
+    # Break caught: read and cleanup exceptions escaping or overriding outcome proof.
+    def test_read_and_cleanup_exceptions_are_sanitized_without_retry(self) -> None:
+        class ExplodingResponse(FakeHTTPResponse):
+            def read(self, maximum: int) -> bytes:
+                self.read_maximum = maximum
+                raise TypeError("read-secret-marker")
+
+            def close(self) -> None:
+                self.closed += 1
+                raise AttributeError("response-close-secret-marker")
+
+        InstrumentedHTTPSConnection.response = ExplodingResponse()
+        InstrumentedHTTPSConnection.close_failure = TypeError(
+            "connection-close-secret-marker"
+        )
+
+        with self.assertRaises(SendOutcomeUnknown) as raised:
+            self.call_transport()
+
+        self.assertEqual(raised.exception.stage, "response")
+        self.assertEqual(len(InstrumentedHTTPSConnection.instances), 1)
+        self.assertEqual(InstrumentedHTTPSConnection.response.closed, 1)
+        self.assertEqual(InstrumentedHTTPSConnection.instances[0].closed, 1)
+        self.assertNotIn("secret-marker", str(raised.exception))
+        self.assertNotIn("secret-marker", repr(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertIsNone(raised.exception.__context__)
+
+    # Break caught: a close-only failure overriding a fully captured response.
+    def test_cleanup_type_and_attribute_errors_do_not_override_success(self) -> None:
+        class CloseFailingResponse(FakeHTTPResponse):
+            def close(self) -> None:
+                self.closed += 1
+                raise TypeError("response-close-secret-marker")
+
+        InstrumentedHTTPSConnection.response = CloseFailingResponse()
+        InstrumentedHTTPSConnection.close_failure = AttributeError(
+            "connection-close-secret-marker"
+        )
+
+        response = self.call_transport()
+
+        self.assertEqual(response, framed_issue_response())
+        self.assertEqual(len(InstrumentedHTTPSConnection.instances), 1)
+        self.assertEqual(InstrumentedHTTPSConnection.response.closed, 1)
+        self.assertEqual(InstrumentedHTTPSConnection.instances[0].closed, 1)
+
+    # Break caught: trusting a domain error whose stage contradicts send progress.
+    def test_domain_errors_are_preserved_only_when_phase_consistent(self) -> None:
+        cases = (
+            ("connect", SendOutcomeUnknown("response"), SendNotStarted, "send"),
+            ("send", SendNotStarted("send"), SendOutcomeUnknown, "send"),
+            (
+                "getresponse",
+                SendOutcomeUnknown("send"),
+                SendOutcomeUnknown,
+                "response",
+            ),
+        )
+        for stage, failure, error_type, expected_stage in cases:
+            with self.subTest(stage=stage, failure=type(failure).__name__):
+                InstrumentedHTTPSConnection.instances = []
+                InstrumentedHTTPSConnection.failure_stage = stage
+                InstrumentedHTTPSConnection.failure = failure
+
+                with self.assertRaises(error_type) as raised:
+                    self.call_transport()
+
+                self.assertEqual(raised.exception.stage, expected_stage)
+                self.assertEqual(len(InstrumentedHTTPSConnection.instances), 1)
+                self.assertIsNone(raised.exception.__cause__)
+
+    # Break caught: creator downgrading a proven default-transport pre-send failure.
+    def test_creator_preserves_default_transport_pre_body_classification(self) -> None:
+        InstrumentedHTTPSConnection.failure_stage = "connect"
+        InstrumentedHTTPSConnection.failure = TypeError(
+            "connect-secret-marker"
+        )
+        creator = FamilyIssueCreator()
+        tokens = FakeTokens()
+        binding = FamilyBinding(Repository("family", "roadmap"), 42)
+
+        with mock.patch(
+            "agent_container.family_issue_create.http.client.HTTPSConnection",
+            InstrumentedHTTPSConnection,
+        ):
+            with self.assertRaises(SendNotStarted) as raised:
+                creator.create(binding, CANONICAL, tokens)  # type: ignore[arg-type]
+
+        self.assertEqual(raised.exception.stage, "send")
+        self.assertEqual(tokens.get_calls, 1)
+        self.assertEqual(len(InstrumentedHTTPSConnection.instances), 1)
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertIsNone(raised.exception.__context__)
+        self.assertNotIn("secret-marker", str(raised.exception))
+        self.assertNotIn("secret-marker", repr(raised.exception))
+
     # Break caught: a partial response body escaping as a generic, retryable error.
     def test_partial_response_failure_after_send_has_unknown_outcome(self) -> None:
         class PartialResponse(FakeHTTPResponse):
@@ -650,6 +908,119 @@ class FamilyIssueTransportTest(unittest.TestCase):
             ),
             1,
         )
+
+    # Break caught: bounded read() returning valid JSON before declared EOF.
+    def test_real_http_response_short_read_with_remaining_length_is_unknown(self) -> None:
+        body = issue_response().body
+        raw = (
+            b"HTTP/1.1 201 Created\r\n"
+            b"Content-Type: application/json\r\n"
+            + f"Content-Length: {len(body) + 17}\r\n".encode("ascii")
+            + b"\r\n"
+            + body
+        )
+
+        class MemorySocket:
+            def makefile(self, mode: str):
+                self.mode = mode
+                return BytesIO(raw)
+
+        response = http.client.HTTPResponse(MemorySocket())  # type: ignore[arg-type]
+        response.begin()
+        self.assertEqual(response.length, len(body) + 17)
+        InstrumentedHTTPSConnection.response = response  # type: ignore[assignment]
+
+        with self.assertRaises(SendOutcomeUnknown) as raised:
+            self.call_transport()
+
+        self.assertEqual(raised.exception.stage, "response")
+        self.assertEqual(len(InstrumentedHTTPSConnection.instances), 1)
+        self.assertNotIn(body.decode("ascii")[:20], str(raised.exception))
+
+    # Break caught: completeness checks rejecting a fully terminated chunked body.
+    def test_real_complete_chunked_response_remains_accepted(self) -> None:
+        body = issue_response().body
+        raw = (
+            b"HTTP/1.1 201 Created\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            + f"{len(body):x}\r\n".encode("ascii")
+            + body
+            + b"\r\n0\r\n\r\n"
+        )
+
+        class MemorySocket:
+            def makefile(self, mode: str):
+                self.mode = mode
+                return BytesIO(raw)
+
+        response = http.client.HTTPResponse(MemorySocket())  # type: ignore[arg-type]
+        response.begin()
+        self.assertTrue(response.chunked)
+        InstrumentedHTTPSConnection.response = response  # type: ignore[assignment]
+
+        captured = self.call_transport()
+
+        self.assertEqual(
+            captured,
+            HttpResponse(
+                201,
+                {
+                    "Content-Type": "application/json",
+                    "Transfer-Encoding": "chunked",
+                },
+                body,
+            ),
+        )
+
+    # Break caught: raw mixed-case duplicate framing headers collapsing in dict().
+    def test_raw_duplicate_content_type_and_length_headers_are_unknown(self) -> None:
+        body = issue_response().body
+        cases = (
+            [
+                ("Content-Type", "application/json"),
+                ("content-type", "application/json"),
+                ("Content-Length", str(len(body))),
+            ],
+            [
+                ("Content-Type", "application/json"),
+                ("Content-Length", str(len(body))),
+                ("content-length", str(len(body))),
+            ],
+            [
+                ("Content-Type", "application/json"),
+                ("Content-Length", str(len(body))),
+                ("content-length", str(len(body) + 1)),
+            ],
+        )
+        for headers in cases:
+            with self.subTest(headers=headers):
+                InstrumentedHTTPSConnection.instances = []
+                InstrumentedHTTPSConnection.response = FakeHTTPResponse(
+                    headers=headers,
+                    length=len(body),
+                )
+
+                with self.assertRaises(SendOutcomeUnknown) as raised:
+                    self.call_transport()
+
+                self.assertEqual(raised.exception.stage, "response")
+                self.assertEqual(len(InstrumentedHTTPSConnection.instances), 1)
+
+    # Break caught: incomplete chunk framing being mistaken for a complete JSON body.
+    def test_unfinished_chunked_response_state_is_unknown(self) -> None:
+        InstrumentedHTTPSConnection.response = FakeHTTPResponse(
+            headers=[("Content-Type", "application/json")],
+            chunked=True,
+            complete=False,
+        )
+
+        with self.assertRaises(SendOutcomeUnknown) as raised:
+            self.call_transport()
+
+        self.assertEqual(raised.exception.stage, "response")
+        self.assertEqual(len(InstrumentedHTTPSConnection.instances), 1)
 
     # Break caught: reconciliation transport using a collection/search/mutation route.
     def test_transport_permits_only_exact_positive_issue_get_without_body(self) -> None:
