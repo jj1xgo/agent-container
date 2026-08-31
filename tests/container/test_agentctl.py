@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+from contextlib import redirect_stderr
 from io import StringIO
 import hmac
 import json
@@ -8,9 +10,11 @@ import subprocess
 import threading
 from tempfile import TemporaryDirectory
 import unittest
+from unittest import mock
 from unittest.mock import patch
 
 import agent_container.agentctl as agentctl
+import agent_container.family_cli as family_cli
 import agent_container.handover_broker_client as handover_broker_client
 from agent_container import __version__
 from agent_container.agentctl import main
@@ -19,8 +23,26 @@ from agent_container.egress_policy import enable_egress_policy
 from agent_container.egress_policy import load_egress_policy
 from agent_container.egress_broker_runtime import EgressRuntimeMount
 from agent_container.egress_broker_runtime import EgressBrokerRuntimeError
+from agent_container.family_issue import CanonicalFamilyIssue
+from agent_container.family_issue_create import CreatedIssue
+from agent_container.family_issue_create import SendNotStarted
+from agent_container.family_issue_create import SendOutcomeUnknown
+from agent_container.family_intake_runtime import FamilyRuntimeMount
+from agent_container.family_runtime_mount import FamilyRuntimeError
+from agent_container.family_pending import create_pending
+from agent_container.family_pending import append_family_audit
+from agent_container.family_pending import load_pending
+from agent_container.family_pending import pending_lock
+from agent_container.family_pending import PendingState
+from agent_container.family_pending import _transition_pending as transition_pending
+from agent_container.family_state import FamilyBinding
+from agent_container.family_state import FamilyStateLayout
+from agent_container.family_state import load_family_binding
+from agent_container.family_state import write_family_binding
 from agent_container.handover_broker_runtime import HandoverBrokerRuntimeError
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
+from agent_container.github_app import HttpResponse
+from agent_container.github_app import InstallationToken
 from agent_container.podman import CommandSpec
 from agent_container.podman import handover_broker_client_status_spec
 from agent_container.podman import run_codex_spec
@@ -39,6 +61,12 @@ from agent_container.state import Repository
 def successful_podman_result(spec):
     if spec.argv == ("podman", "info", "--format", "{{.Host.Security.Rootless}}"):
         return subprocess.CompletedProcess(spec.argv, 0, stdout="true\n")
+    if spec.argv == ("podman", "info", "--format", "{{.Host.OCIRuntime.Name}}"):
+        return subprocess.CompletedProcess(spec.argv, 0, stdout="crun\n")
+    if spec.argv == (
+        "podman", "system", "connection", "list", "--format", "json"
+    ):
+        return subprocess.CompletedProcess(spec.argv, 0, stdout="[]\n")
     return subprocess.CompletedProcess(spec.argv, 0, stdout="podman version 5.8\n")
 
 
@@ -771,6 +799,7 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
             podman.write_text(
                 "#!/bin/sh\n"
                 "case \"$*\" in\n"
+                "  '--version') echo 'podman version 5.8.0' ;;\n"
                 "  'info --format {{.Host.Security.Rootless}}') echo true ;;\n"
                 "  *'auth status') echo status-output-private; "
                 "echo runner-stderr-private >&2 ;;\n"
@@ -2040,8 +2069,14 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertEqual(len(calls), 4)
             self.assertIn("codex", calls[-1].argv)
             self.assertEqual(
-                calls[-1].argv[-5:-2],
-                ("localhost/agent-container:dev", "codex", "--approve-for-me"),
+                calls[-1].argv[-7:-2],
+                (
+                    "localhost/agent-container:dev",
+                    "agent-runtime-launcher",
+                    "--",
+                    "codex",
+                    "--approve-for-me",
+                ),
             )
             self.assertIn("AGENT_PROJECT_ID=agent-container", calls[-1].argv)
             self.assertIn(
@@ -2053,6 +2088,73 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             )
             self.assertNotIn(str(root / "shared-auth/codex/auth.json"), output.getvalue())
             self.assertEqual(os.getuid(), root.stat().st_uid)
+
+    def test_bound_run_starts_family_runtime_and_uses_pid_supervisor(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _handover_project = self._runtime_state(temp)
+            family_layout = FamilyStateLayout(root, "agent-container")
+            for directory in (
+                family_layout.family_root,
+                family_layout.family_root / "projects",
+                family_layout.family_project_dir,
+            ):
+                directory.mkdir(mode=0o700)
+            write_family_binding(
+                family_layout.family_binding_file,
+                FamilyBinding(Repository.parse("family/roadmap"), 42),
+            )
+            run_dir = (
+                family_layout.family_intake_run_root / "0123456789abcdef"
+            )
+            capability = "A" * 43
+            mount = FamilyRuntimeMount(
+                run_dir,
+                capability,
+                {
+                    "AGENT_FAMILY_SOCKET": "/run/agent-family/intake.sock",
+                    "AGENT_FAMILY_CAPABILITY": capability,
+                },
+            )
+            object.__setattr__(mount, "_directory_descriptor", 77)
+            object.__setattr__(mount, "_socket_descriptor", 78)
+            events = []
+
+            class Runtime:
+                def __enter__(self):
+                    events.append("start")
+                    return mount
+
+                def __exit__(self, *_args):
+                    events.append("stop")
+
+            def supervisor(spec, gateway, egress, runtime, observed_mount):
+                self.assertIs(observed_mount, mount)
+                events.append(("supervise", gateway, egress, runtime))
+                joined = " ".join(spec.argv)
+                self.assertIn("/proc/self/fd/78", joined)
+                self.assertNotIn("family/roadmap", joined)
+                return subprocess.CompletedProcess(spec.argv, 0)
+
+            with patch.object(FamilyRuntimeMount, "revalidate"):
+                result = main(
+                    ["run", "agent-container"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=successful_podman_result,
+                    git_remote_reader=lambda _path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    family_runtime_factory=lambda layout: (
+                        events.append(("factory", layout)) or Runtime()
+                    ),
+                    runtime_supervisor=supervisor,
+                    stdout=StringIO(),
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(events[0][0], "factory")
+            self.assertEqual(events[1], "start")
+            self.assertEqual(events[2][0], "supervise")
+            self.assertEqual(events[-1], "stop")
 
     def test_run_builds_and_uses_missing_project_image(self) -> None:
         with TemporaryDirectory() as temp:
@@ -4157,6 +4259,399 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             )
 
 
+class AgentCtlFamilyRuntimeTest(unittest.TestCase):
+    def test_unbound_run_keeps_legacy_podman_57_contract(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _environment = self._state(temp)
+            calls = []
+
+            def runner(spec):
+                calls.append(spec.argv)
+                if spec.argv == ("podman", "--version"):
+                    return subprocess.CompletedProcess(
+                        spec.argv, 0, stdout="podman version 5.7.2\n"
+                    )
+                return successful_podman_result(spec)
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda _path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 0)
+            self.assertNotIn(
+                ("podman", "info", "--format", "{{.Host.OCIRuntime.Name}}"),
+                calls,
+            )
+
+    def test_bound_remote_environment_runs_no_podman_command(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _environment = self._state(temp)
+            self._bind(root)
+            calls = []
+
+            result = main(
+                ["run", "agent-container"],
+                environment={
+                    "AGENT_CONTAINER_HOME": str(root),
+                    "CONTAINER_HOST": "ssh://example.invalid/run/podman.sock",
+                },
+                runner=lambda spec: calls.append(spec) or successful_podman_result(spec),
+                git_remote_reader=lambda _path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(calls, [])
+
+    def test_bound_run_rejects_non_crun_remote_and_malformed_connection_state(self) -> None:
+        scenarios = (
+            ("runc", "[]", False),
+            ("crun", '[{"Name":"remote","Default":true}]', False),
+            ("crun", "garbage", False),
+            ("crun", "[]", True),
+        )
+        for runtime, connections, remote_env in scenarios:
+            with self.subTest(runtime=runtime, connections=connections, remote_env=remote_env), TemporaryDirectory() as temp:
+                root, _environment = self._state(temp)
+                self._bind(root)
+
+                def runner(spec):
+                    if spec.argv == ("podman", "info", "--format", "{{.Host.OCIRuntime.Name}}"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout=runtime)
+                    if spec.argv == ("podman", "system", "connection", "list", "--format", "json"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout=connections)
+                    return successful_podman_result(spec)
+
+                environment = {"AGENT_CONTAINER_HOME": str(root)}
+                if remote_env:
+                    environment["CONTAINER_HOST"] = "ssh://example.invalid/run/podman.sock"
+                result = main(
+                    ["run", "agent-container"],
+                    environment=environment,
+                    runner=runner,
+                    git_remote_reader=lambda _path: "https://github.com/jj1xgo/agent-container.git",
+                    family_runtime_factory=lambda _layout: self.fail("family runtime started"),
+                    stdout=StringIO(),
+                    stderr=StringIO(),
+                )
+                self.assertEqual(result, 1)
+
+    def test_bound_doctor_reports_version_runtime_and_local_prerequisites(self) -> None:
+        scenarios = (
+            ("podman version 5.7.2\n", "crun\n", "[]", False, ("FAIL", "PASS", "PASS")),
+            ("podman version 5.8.0\n", "runc\n", "[]", False, ("PASS", "FAIL", "PASS")),
+            ("podman version 5.8.0\n", "crun\n", '[{"Default":true}]', False, ("PASS", "PASS", "FAIL")),
+            ("podman version 5.8.0\n", "crun\n", "garbage", False, ("PASS", "PASS", "FAIL")),
+            ("podman version 5.8.0\n", "crun\n", "[]", True, ("PASS", "PASS", "FAIL")),
+            ("podman version 5.8.0\n", "crun\n", "[]", False, ("PASS", "PASS", "PASS")),
+        )
+        for version, runtime, connections, remote_env, expected in scenarios:
+            with self.subTest(version=version, runtime=runtime, connections=connections, remote_env=remote_env), TemporaryDirectory() as temp:
+                root, _environment = self._state(temp)
+                self._bind(root)
+                output = StringIO()
+
+                def runner(spec):
+                    if spec.argv == ("podman", "--version"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout=version)
+                    if spec.argv == ("podman", "info", "--format", "{{.Host.OCIRuntime.Name}}"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout=runtime)
+                    if spec.argv == ("podman", "system", "connection", "list", "--format", "json"):
+                        return subprocess.CompletedProcess(spec.argv, 0, stdout=connections)
+                    return AgentCtlRunDoctorTest()._successful_doctor_runner(spec)
+
+                environment = {"AGENT_CONTAINER_HOME": str(root)}
+                if remote_env:
+                    environment["CONTAINER_CONNECTION"] = "remote"
+                main(
+                    ["doctor", "agent-container"],
+                    environment=environment,
+                    runner=runner,
+                    git_remote_reader=lambda _path: "https://github.com/jj1xgo/agent-container.git",
+                    stdout=output,
+                )
+                rendered = output.getvalue()
+                for status, name in zip(expected, (
+                    "family-podman-version", "family-podman-runtime", "family-podman-local"
+                )):
+                    self.assertIn(f"{status}  {name}:", rendered)
+
+    def test_podman_without_preserve_fd_support_fails_before_family_start(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _environment = self._state(temp)
+            self._bind(root)
+
+            def runner(spec):
+                if spec.argv == ("podman", "--version"):
+                    return subprocess.CompletedProcess(
+                        spec.argv, 0, stdout="podman version 5.7.2\n"
+                    )
+                return successful_podman_result(spec)
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda _path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                family_runtime_factory=lambda _layout: self.fail(
+                    "family runtime started"
+                ),
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 1)
+
+    def _state(self, temp: str) -> tuple[Path, dict[str, str]]:
+        helper = AgentCtlRunDoctorTest()
+        root, _handover = helper._runtime_state(temp)
+        return root, {"AGENT_CONTAINER_HOME": str(root)}
+
+    def _bind(self, root: Path) -> FamilyStateLayout:
+        layout = FamilyStateLayout(root, "agent-container")
+        for directory in (
+            layout.family_root,
+            layout.family_root / "projects",
+            layout.family_project_dir,
+        ):
+            directory.mkdir(mode=0o700)
+        write_family_binding(
+            layout.family_binding_file,
+            FamilyBinding(Repository.parse("family/roadmap"), 42),
+        )
+        return layout
+
+    def _run(
+        self,
+        root: Path,
+        *,
+        agent: str,
+        factory=None,
+        supervisor=None,
+        builders=None,
+    ) -> tuple[int, list[CommandSpec], StringIO]:
+        calls: list[CommandSpec] = []
+        stderr = StringIO()
+        argv = ["run", "agent-container", "--agent", agent]
+        with patch(
+            "agent_container.agentctl.HandoverBrokerRuntime.create",
+            return_value=nullcontext(
+                HandoverRuntimeMount(root / "handover-broker/runtime")
+            ),
+        ):
+            result = main(
+                argv,
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec)
+                or successful_podman_result(spec),
+                git_remote_reader=lambda _path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                runtime_spec_builders=builders,
+                family_runtime_factory=factory,
+                runtime_supervisor=supervisor,
+                stdout=StringIO(),
+                stderr=stderr,
+            )
+        return result, calls, stderr
+
+    def test_unbound_codex_and_claude_never_start_family_runtime(self) -> None:
+        for agent in ("codex", "claude"):
+            with self.subTest(agent=agent), TemporaryDirectory() as temp:
+                root, _environment = self._state(temp)
+                built = []
+
+                def builder(*args, **kwargs):
+                    built.append((args, kwargs))
+                    return CommandSpec(("podman", "run", agent), {})
+
+                result, _calls, stderr = self._run(
+                    root,
+                    agent=agent,
+                    factory=lambda _layout: self.fail("family runtime started"),
+                    builders={agent: builder},
+                )
+
+                self.assertEqual((result, stderr.getvalue()), (0, ""))
+                self.assertEqual(len(built), 1)
+                self.assertNotIn("family_mount", built[0][1])
+
+    def test_bound_codex_and_claude_use_one_supervised_runtime_and_cleanup(self) -> None:
+        for agent in ("codex", "claude"):
+            with self.subTest(agent=agent), TemporaryDirectory() as temp:
+                root, _environment = self._state(temp)
+                layout = self._bind(root)
+                capability = "A" * 43
+                mount = FamilyRuntimeMount(
+                    layout.family_intake_run_root / "0123456789abcdef",
+                    capability,
+                    {
+                        "AGENT_FAMILY_SOCKET": "/run/agent-family/intake.sock",
+                        "AGENT_FAMILY_CAPABILITY": capability,
+                    },
+                )
+                events = []
+
+                class Runtime:
+                    def __enter__(self):
+                        events.append("start")
+                        return mount
+
+                    def __exit__(self, *_args):
+                        events.append("cleanup")
+
+                    def register_runtime(self, pid):
+                        events.append(("register", pid))
+
+                    def check(self):
+                        events.append("health")
+
+                runtime = Runtime()
+
+                def builder(*args, **kwargs):
+                    self.assertIs(kwargs["family_mount"], mount)
+                    events.append(("spec", agent))
+                    return CommandSpec(("podman", "run", agent), {})
+
+                def supervisor(
+                    spec, gateway, egress, observed_runtime, observed_mount
+                ):
+                    self.assertIs(observed_runtime, runtime)
+                    self.assertIs(observed_mount, mount)
+                    events.append(("supervise", spec.argv[-1], gateway, egress))
+                    observed_runtime.register_runtime(4321)
+                    observed_runtime.check()
+                    return subprocess.CompletedProcess(spec.argv, 0)
+
+                result, calls, stderr = self._run(
+                    root,
+                    agent=agent,
+                    factory=lambda _layout: runtime,
+                    supervisor=supervisor,
+                    builders={agent: builder},
+                )
+
+                self.assertEqual((result, stderr.getvalue()), (0, ""))
+                self.assertEqual(
+                    events,
+                    [
+                        "start", ("spec", agent),
+                        ("supervise", agent, None, None),
+                        ("register", 4321), "health", "cleanup",
+                    ],
+                )
+                self.assertFalse(any(call.argv == ("podman", "run", agent) for call in calls))
+
+    def test_startup_and_spec_failure_cleanup_without_fallback(self) -> None:
+        for agent in ("codex", "claude"):
+            for stage in ("startup", "spec"):
+                with self.subTest(agent=agent, stage=stage), TemporaryDirectory() as temp:
+                    root, _environment = self._state(temp)
+                    self._bind(root)
+                    events = []
+
+                    class Runtime:
+                        def __enter__(self):
+                            events.append("start")
+                            if stage == "startup":
+                                raise FamilyRuntimeError("start failed")
+                            return mock.sentinel.mount
+
+                        def __exit__(self, *_args):
+                            events.append("cleanup")
+
+                    def builder(*_args, **_kwargs):
+                        events.append("spec")
+                        raise ValueError("spec failed")
+
+                    result, calls, stderr = self._run(
+                        root,
+                        agent=agent,
+                        factory=lambda _layout: Runtime(),
+                        supervisor=lambda *_args: self.fail("supervisor called"),
+                        builders={agent: builder},
+                    )
+
+                    self.assertEqual(result, 1)
+                    self.assertNotEqual(stderr.getvalue(), "")
+                    self.assertFalse(
+                        any(call.argv == ("podman", "run", agent) for call in calls)
+                    )
+                    self.assertEqual(
+                        events,
+                        ["start"]
+                        if stage == "startup"
+                        else ["start", "spec", "cleanup"],
+                    )
+
+    def test_register_health_and_supervision_failure_cleanup_without_fallback(self) -> None:
+        for agent in ("codex", "claude"):
+            for stage in ("register", "health", "supervision"):
+                with self.subTest(agent=agent, stage=stage), TemporaryDirectory() as temp:
+                    root, _environment = self._state(temp)
+                    self._bind(root)
+                    events = []
+
+                    class Runtime:
+                        def __enter__(self):
+                            events.append("start")
+                            return mock.sentinel.mount
+
+                        def __exit__(self, *_args):
+                            events.append("cleanup")
+
+                        def register_runtime(self, _pid):
+                            events.append("register")
+                            if stage == "register":
+                                raise FamilyRuntimeError("register failed")
+
+                        def check(self):
+                            events.append("health")
+                            if stage == "health":
+                                raise FamilyRuntimeError("health failed")
+
+                    runtime = Runtime()
+
+                    def supervisor(spec, _gateway, _egress, observed, _mount):
+                        observed.register_runtime(4321)
+                        if stage != "register":
+                            observed.check()
+                        if stage == "supervision":
+                            raise FamilyRuntimeError("supervision failed")
+                        return subprocess.CompletedProcess(spec.argv, 0)
+
+                    result, calls, stderr = self._run(
+                        root,
+                        agent=agent,
+                        factory=lambda _layout: runtime,
+                        supervisor=supervisor,
+                        builders={
+                            agent: lambda *_args, **_kwargs: CommandSpec(
+                                ("podman", "run", agent), {}
+                            )
+                        },
+                    )
+
+                    self.assertEqual(result, 1)
+                    self.assertNotEqual(stderr.getvalue(), "")
+                    self.assertEqual(events[-1], "cleanup")
+                    self.assertFalse(
+                        any(call.argv == ("podman", "run", agent) for call in calls)
+                    )
+
+
 class AgentCtlMigrationTest(unittest.TestCase):
     def _migration_state(self, temp: str) -> tuple[Path, Path]:
         base = Path(temp).resolve()
@@ -4547,6 +5042,1893 @@ class AgentCtlEgressConfigurationTest(unittest.TestCase):
             self.assertEqual(calls, [])
             self.assertEqual(policy_path.read_bytes(), before)
             self.assertNotIn(str(root), error)
+
+class _FamilyProvider:
+    def get(self):
+        return object()
+
+
+class _FamilyInventory:
+    def __init__(self, binding: FamilyBinding) -> None:
+        self.binding = binding
+        self.resolved = []
+        self.verified = []
+
+    def resolve(self, repository, provider):
+        self.resolved.append((repository, provider))
+        if repository != self.binding.repository:
+            raise ValueError("inventory mismatch secret-marker")
+        return self.binding
+
+    def verify(self, binding, provider):
+        self.verified.append((binding, provider))
+        if binding != self.binding:
+            raise ValueError("inventory mismatch secret-marker")
+
+
+class _SpoofedTTY(StringIO):
+    def __init__(self, value: str, before_read=None) -> None:
+        super().__init__(value)
+        self.before_read = before_read
+
+    def isatty(self) -> bool:
+        return True
+
+    def readline(self, *args, **kwargs):
+        if self.before_read is not None:
+            callback = self.before_read
+            self.before_read = None
+            callback()
+        return super().readline(*args, **kwargs)
+
+
+class _NoFilenoTTY:
+    def isatty(self) -> bool:
+        return True
+
+    def readline(self, _size: int = -1) -> str:
+        raise AssertionError("confirmation read without a terminal fd")
+
+
+class _PtyTTY:
+    """A real terminal-backed input stream with an optional prompt race hook."""
+
+    def __init__(self, value: str, before_read=None) -> None:
+        self._value = value
+        self._master, slave = os.openpty()
+        self._stream = os.fdopen(slave, "r", encoding="utf-8", newline="")
+        self.before_read = before_read
+        self.read_sizes = []
+        os.write(self._master, value.encode("utf-8") if value else b"\x04")
+
+    def fileno(self) -> int:
+        return self._stream.fileno()
+
+    def isatty(self) -> bool:
+        return os.isatty(self.fileno())
+
+    def readline(self, size: int = -1) -> str:
+        self.read_sizes.append(size)
+        if self.before_read is not None:
+            callback = self.before_read
+            self.before_read = None
+            callback()
+        return self._stream.readline(size)
+
+    def getvalue(self) -> str:
+        return self._value
+
+    def close(self) -> None:
+        self._stream.close()
+        os.close(self._master)
+
+
+class _FabricatedReadlineTTY:
+    """Expose a real PTY fd while lying through the high-level stream API."""
+
+    def __init__(self, terminal: _PtyTTY, fabricated: str) -> None:
+        self._terminal = terminal
+        self._fabricated = fabricated
+
+    def fileno(self) -> int:
+        return self._terminal.fileno()
+
+    def readline(self, _size: int = -1) -> str:
+        return self._fabricated
+
+
+class _RawPtyTTY:
+    def __init__(self, value: bytes) -> None:
+        self._master, self._slave = os.openpty()
+        os.write(self._master, value)
+
+    def fileno(self) -> int:
+        return self._slave
+
+    def abandon_slave(self) -> int:
+        descriptor = self._slave
+        os.close(descriptor)
+        self._slave = -1
+        return descriptor
+
+    def close(self) -> None:
+        if self._slave >= 0:
+            os.close(self._slave)
+        os.close(self._master)
+
+
+class _FamilyCreator:
+    def __init__(self, outcome=None, before_create=None) -> None:
+        self.outcome = outcome
+        self.before_create = before_create
+        self.create_calls = []
+        self.verify_calls = []
+
+    def create(self, binding, issue, provider):
+        self.create_calls.append((binding, issue, provider))
+        if self.before_create is not None:
+            self.before_create()
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+    def verify_existing(self, binding, issue, issue_number, provider):
+        self.verify_calls.append((binding, issue, issue_number, provider))
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+class AgentCtlFamilyTest(unittest.TestCase):
+    request_id = "11" * 16
+    issue = CanonicalFamilyIssue("Private title sentinel", "Private body sentinel")
+    binding = FamilyBinding(Repository("family", "roadmap"), 42)
+
+    def _tty(self, value: str, before_read=None) -> _PtyTTY:
+        stream = _PtyTTY(value, before_read)
+        self.addCleanup(stream.close)
+        return stream
+
+    def _registered_state(self, temporary: str) -> tuple[Path, dict[str, str]]:
+        root = Path(temporary)
+        root.chmod(0o700)
+        (root / "projects").mkdir(mode=0o700, exist_ok=True)
+        project_dir = root / "projects/demo"
+        project_dir.mkdir(mode=0o700)
+        ProjectRecord(
+            Repository("example", "demo"), root / "handovers"
+        ).write(project_dir / "project.json")
+        return root, {"AGENT_CONTAINER_HOME": str(root)}
+
+    def _family_state(self, root: Path) -> FamilyStateLayout:
+        layout = FamilyStateLayout(root, "demo")
+        for directory in (
+            layout.family_root,
+            layout.family_root / "projects",
+            layout.family_project_dir,
+            layout.family_pending_dir,
+            layout.family_audit_file.parent,
+        ):
+            directory.mkdir(mode=0o700, exist_ok=True)
+        write_family_binding(layout.family_binding_file, self.binding)
+        return layout
+
+    def _pending(self, layout: FamilyStateLayout, *, now: int = 2_000_000_000):
+        return create_pending(
+            layout.family_pending_dir,
+            "demo",
+            self.issue,
+            now=now,
+            random_bytes=lambda _: bytes.fromhex(self.request_id),
+        )
+
+    def _run_family(
+        self,
+        environment,
+        operation,
+        *,
+        creator=None,
+        inventory=None,
+        stdin=None,
+        now=200,
+        clock=None,
+        extra=(),
+    ):
+        stdout = StringIO()
+        stderr = StringIO()
+        provider = _FamilyProvider()
+        result = main(
+            ["family", "issue", operation, "demo", self.request_id, *extra],
+            environment=environment,
+            stdin=StringIO() if stdin is None else stdin,
+            stdout=stdout,
+            stderr=stderr,
+            family_token_provider_factory=lambda _layout: provider,
+            family_inventory=(
+                _FamilyInventory(self.binding) if inventory is None else inventory
+            ),
+            family_creator=creator,
+            family_clock=(lambda: now) if clock is None else clock,
+        )
+        return result, stdout.getvalue(), stderr.getvalue(), provider
+
+    def _unknown(self, layout: FamilyStateLayout) -> None:
+        with pending_lock(
+            layout.family_pending_dir, self.request_id, "demo"
+        ) as locked:
+            transition_pending(locked, PendingState.SENDING)
+            transition_pending(locked, PendingState.UNKNOWN)
+
+    def _audit(self, layout: FamilyStateLayout):
+        if not layout.family_audit_file.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in layout.family_audit_file.read_text(encoding="ascii").splitlines()
+        ]
+
+    # Break caught: any missing/renamed family subcommand or accidental bypass flag.
+    def test_parser_exposes_only_the_exact_family_command_tree(self) -> None:
+        cases = (
+            (["family", "bind", "demo", "family/roadmap"], "bind"),
+            (["family", "list", "demo"], "list"),
+            (["family", "doctor", "demo"], "doctor"),
+            (["family", "issue", "pending", "demo"], "pending"),
+            (
+                ["family", "issue", "preview", "demo", self.request_id],
+                "preview",
+            ),
+            (
+                ["family", "issue", "approve", "demo", self.request_id],
+                "approve",
+            ),
+            (
+                ["family", "issue", "reject", "demo", self.request_id],
+                "reject",
+            ),
+            (
+                [
+                    "family",
+                    "issue",
+                    "resolve-created",
+                    "demo",
+                    self.request_id,
+                    "7",
+                ],
+                "resolve-created",
+            ),
+            (
+                [
+                    "family",
+                    "issue",
+                    "resolve-not-created",
+                    "demo",
+                    self.request_id,
+                ],
+                "resolve-not-created",
+            ),
+        )
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                parsed = parser().parse_args(argv)
+                self.assertEqual(parsed.command, "family")
+                operation = getattr(parsed, "family_issue_command", None) or getattr(
+                    parsed, "family_command", None
+                )
+                self.assertEqual(operation, expected)
+
+        for forbidden in ("--yes", "--batch", "--non-interactive"):
+            with self.subTest(forbidden=forbidden):
+                with self.assertRaises(SystemExit):
+                    parser().parse_args(
+                        [
+                            "family",
+                            "issue",
+                            "approve",
+                            "demo",
+                            self.request_id,
+                            forbidden,
+                        ]
+                    )
+        diagnostic = StringIO()
+        with redirect_stderr(diagnostic), self.assertRaises(SystemExit):
+            parser().parse_args(
+                [
+                    "family",
+                    "issue",
+                    "resolve-created",
+                    "demo",
+                    self.request_id,
+                    "9" * 5000,
+                ]
+            )
+        self.assertLess(len(diagnostic.getvalue()), 1000)
+
+    # Break caught: binding an unregistered project or trusting caller identity.
+    def test_bind_requires_registered_project_and_live_exact_inventory(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            root.chmod(0o700)
+            environment = {"AGENT_CONTAINER_HOME": str(root)}
+            stdout = StringIO()
+            stderr = StringIO()
+            provider = _FamilyProvider()
+            inventory = _FamilyInventory(self.binding)
+
+            result = main(
+                ["family", "bind", "demo", "family/roadmap"],
+                environment=environment,
+                stdout=stdout,
+                stderr=stderr,
+                family_token_provider_factory=lambda _layout: provider,
+                family_inventory=inventory,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertEqual(inventory.resolved, [])
+            self.assertNotIn("secret-marker", stderr.getvalue())
+
+            root, environment = self._registered_state(temp)
+            stdout = StringIO()
+            stderr = StringIO()
+            result = main(
+                ["family", "bind", "demo", "family/roadmap"],
+                environment=environment,
+                stdout=stdout,
+                stderr=stderr,
+                family_token_provider_factory=lambda _layout: provider,
+                family_inventory=inventory,
+            )
+
+            self.assertEqual((result, stderr.getvalue()), (0, ""))
+            layout = FamilyStateLayout(root, "demo")
+            self.assertEqual(load_family_binding(layout.family_binding_file), self.binding)
+            self.assertEqual(inventory.resolved, [(self.binding.repository, provider)])
+            self.assertNotIn(str(root), stdout.getvalue())
+            list_output = StringIO()
+            self.assertEqual(
+                main(
+                    ["family", "list", "demo"],
+                    environment=environment,
+                    stdout=list_output,
+                    stderr=StringIO(),
+                ),
+                0,
+            )
+            self.assertIn("request-id\tproject\tcreated-at\texpires-at\tstate", list_output.getvalue())
+
+    # Break caught: a repeated bind silently replacing exact repository identity.
+    def test_bind_never_overwrites_an_existing_binding(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            before = layout.family_binding_file.read_bytes()
+            inventory = _FamilyInventory(
+                FamilyBinding(Repository("family", "other"), 99)
+            )
+            stderr = StringIO()
+
+            result = main(
+                ["family", "bind", "demo", "family/other"],
+                environment=environment,
+                stdout=StringIO(),
+                stderr=stderr,
+                family_token_provider_factory=lambda _layout: _FamilyProvider(),
+                family_inventory=inventory,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(layout.family_binding_file.read_bytes(), before)
+            self.assertEqual(inventory.resolved, [])
+            self.assertNotIn("family/roadmap", stderr.getvalue())
+
+    # Break caught: a binding created during inventory resolution being overwritten.
+    def test_bind_preserves_a_concurrent_binding_winner(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = FamilyStateLayout(root, "demo")
+            winner = FamilyBinding(Repository("family", "winner"), 99)
+
+            class RacingInventory(_FamilyInventory):
+                def resolve(inner_self, repository, provider):
+                    write_family_binding(layout.family_binding_file, winner)
+                    return super().resolve(repository, provider)
+
+            stderr = StringIO()
+            result = main(
+                ["family", "bind", "demo", "family/roadmap"],
+                environment=environment,
+                stdout=StringIO(),
+                stderr=stderr,
+                family_token_provider_factory=lambda _layout: _FamilyProvider(),
+                family_inventory=RacingInventory(self.binding),
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(load_family_binding(layout.family_binding_file), winner)
+            self.assertNotIn(winner.repository.slug, stderr.getvalue())
+
+    # Break caught: the live bind resolver rejecting GitHub's full repository object.
+    def test_live_inventory_resolves_exact_name_and_id_from_complete_object(self) -> None:
+        from agent_container.family_cli import LiveFamilyInventory
+
+        calls = []
+        response = HttpResponse(
+            200,
+            {"Content-Type": "application/json"},
+            json.dumps(
+                {
+                    "total_count": 1,
+                    "repositories": [
+                        {
+                            "id": 42,
+                            "full_name": "family/roadmap",
+                            "name": "roadmap",
+                            "private": True,
+                            "owner": {"login": "family"},
+                        }
+                    ],
+                }
+            ).encode("utf-8"),
+        )
+        provider = _FamilyProvider()
+        provider.get = lambda: InstallationToken("t" * 16, 99_999)
+
+        inventory = LiveFamilyInventory(
+            transport=lambda *arguments: calls.append(arguments) or response
+        )
+        resolved = inventory.resolve(self.binding.repository, provider)
+
+        self.assertEqual(resolved, self.binding)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "GET")
+        self.assertEqual(calls[0][3], None)
+
+    # Break caught: ambiguous duplicate inventory fields selecting an arbitrary ID.
+    def test_live_inventory_rejects_duplicate_inventory_fields(self) -> None:
+        from agent_container.family_cli import LiveFamilyInventory
+
+        provider = _FamilyProvider()
+        provider.get = lambda: InstallationToken("t" * 16, 99_999)
+        bodies = (
+            b'{"total_count":1,"total_count":1,"repositories":[]}',
+            (
+                b'{"total_count":1,"repositories":[{"id":42,"id":43,'
+                b'"full_name":"family/roadmap"}]}'
+            ),
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                inventory = LiveFamilyInventory(
+                    transport=lambda *_: HttpResponse(
+                        200,
+                        {"Content-Type": "application/json"},
+                        body,
+                    )
+                )
+                with self.assertRaises(ValueError):
+                    inventory.resolve(self.binding.repository, provider)
+
+    # Break caught: ordinary inventory commands leaking canonical agent content.
+    def test_list_and_pending_print_only_fixed_identity_and_state_fields(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            pending = self._pending(layout)
+            for argv in (
+                ["family", "list", "demo"],
+                ["family", "issue", "pending", "demo"],
+            ):
+                with self.subTest(argv=argv):
+                    stdout = StringIO()
+                    result = main(
+                        argv,
+                        environment=environment,
+                        stdout=stdout,
+                        stderr=StringIO(),
+                    )
+                    output = stdout.getvalue()
+                    self.assertEqual(result, 0)
+                    self.assertIn("demo", output)
+                    self.assertIn(pending.request_id, output)
+                    self.assertIn(PendingState.PENDING.value, output)
+                    self.assertNotIn(self.issue.title, output)
+                    self.assertNotIn(self.issue.body, output)
+
+    # Break caught: content shown by non-preview reads or previewing wrong bytes.
+    def test_preview_is_the_sole_read_command_that_prints_canonical_content(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            pending = self._pending(layout)
+            stdout = StringIO()
+
+            result = main(
+                ["family", "issue", "preview", "demo", pending.request_id],
+                environment=environment,
+                stdout=stdout,
+                stderr=StringIO(),
+                family_clock=lambda: 200,
+            )
+
+            output = stdout.getvalue()
+            self.assertEqual(result, 0)
+            self.assertIn(self.binding.repository.slug, output)
+            self.assertIn(self.issue.title, output)
+            self.assertIn(self.issue.body, output)
+            self.assertIn(str(pending.expires_at), output)
+            self.assertEqual(
+                self._audit(layout)[-1],
+                {
+                    "operation": "preview",
+                    "project_id": "demo",
+                    "request_id": self.request_id,
+                    "stage": "validation",
+                    "status": "pending",
+                    "timestamp": 200,
+                },
+            )
+            audit = layout.family_audit_file.read_text(encoding="ascii")
+            self.assertNotIn(self.issue.title, audit)
+            self.assertNotIn(self.issue.body, audit)
+            self.assertNotIn(self.binding.repository.slug, audit)
+
+    # Break caught: doctor mutating state or claiming an unobserved remote PASS.
+    def test_doctor_reports_separate_checks_without_guessing_remote_availability(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            pending = self._pending(layout)
+            with pending_lock(
+                layout.family_pending_dir, pending.request_id, "demo"
+            ) as locked:
+                transition_pending(locked, PendingState.SENDING)
+            stdout = StringIO()
+
+            result = main(
+                ["family", "doctor", "demo"],
+                environment=environment,
+                stdout=stdout,
+                stderr=StringIO(),
+                family_token_provider_factory=lambda _layout: _FamilyProvider(),
+            )
+
+            output = stdout.getvalue().lower()
+            self.assertEqual(result, 1)
+            for field in (
+                "local-state",
+                "binding",
+                "pending-invariants",
+                "audit",
+                "app-metadata-permissions",
+                "remote-availability",
+            ):
+                self.assertIn(field, output)
+            remote_line = next(
+                line for line in output.splitlines() if "remote-availability" in line
+            )
+            self.assertNotIn("pass", remote_line)
+            self.assertIn("not run", remote_line)
+            self.assertEqual(
+                load_pending(
+                    layout.family_pending_dir, pending.request_id, "demo"
+                ).state,
+                PendingState.SENDING,
+            )
+
+    # Break caught: non-TTY, EOF, or an unbound confirmation triggering a send.
+    def test_approve_requires_tty_and_exact_request_bound_confirmation(self) -> None:
+        cases = (
+            (StringIO(f"approve {self.request_id}\n"), False),
+            (self._tty(""), True),
+            (self._tty("approve wrong-request\n"), True),
+            (self._tty(f"yes {self.request_id}\n"), True),
+        )
+        for stdin, interactive in cases:
+            with self.subTest(stdin=stdin.getvalue()):
+                with TemporaryDirectory() as temp:
+                    root, environment = self._registered_state(temp)
+                    layout = self._family_state(root)
+                    self._pending(layout)
+                    creator = _FamilyCreator(
+                        CreatedIssue(
+                            7,
+                            "https://github.com/family/roadmap/issues/7",
+                        )
+                    )
+
+                    result, output, error, _ = self._run_family(
+                        environment,
+                        "approve",
+                        creator=creator,
+                        stdin=stdin,
+                    )
+
+                    self.assertEqual(result, 1)
+                    self.assertEqual(creator.create_calls, [])
+                    self.assertEqual(
+                        load_pending(
+                            layout.family_pending_dir, self.request_id, "demo"
+                        ).state,
+                        PendingState.PENDING,
+                    )
+                    if not interactive:
+                        self.assertNotIn(self.issue.title, output)
+                        self.assertNotIn(self.issue.body, output)
+                        self.assertEqual(self._audit(layout)[-1]["status"], "denied")
+                        self.assertEqual(
+                            self._audit(layout)[-1]["stage"], "validation"
+                        )
+                    self.assertNotIn("secret", error)
+
+    # Break caught: approving terminal/ambiguous/internal states or an expired request.
+    def test_approve_rejects_ineligible_and_expired_requests_without_send(self) -> None:
+        for state in (
+            PendingState.SENDING,
+            PendingState.UNKNOWN,
+            PendingState.REJECTED,
+        ):
+            with self.subTest(state=state), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                with pending_lock(
+                    layout.family_pending_dir, self.request_id, "demo"
+                ) as locked:
+                    if state is PendingState.UNKNOWN:
+                        transition_pending(locked, PendingState.SENDING)
+                        transition_pending(locked, PendingState.UNKNOWN)
+                    else:
+                        transition_pending(locked, state)
+                creator = _FamilyCreator()
+                result, _, _, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=self._tty(f"approve {self.request_id}\n"),
+                )
+                self.assertEqual(result, 1)
+                self.assertEqual(creator.create_calls, [])
+
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            pending = self._pending(layout)
+            creator = _FamilyCreator()
+            result, _, _, _ = self._run_family(
+                environment,
+                "approve",
+                creator=creator,
+                stdin=self._tty(f"approve {self.request_id}\n"),
+                now=pending.expires_at,
+            )
+            self.assertEqual(result, 1)
+            self.assertEqual(creator.create_calls, [])
+            self.assertEqual(
+                load_pending(
+                    layout.family_pending_dir, self.request_id, "demo"
+                ).state,
+                PendingState.EXPIRED,
+            )
+
+    # Break caught: a post-preview content or binding swap reaching GitHub.
+    def test_approve_rereads_and_rejects_content_or_binding_swap(self) -> None:
+        for swap in ("content", "binding"):
+            with self.subTest(swap=swap), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+
+                def mutate():
+                    if swap == "binding":
+                        write_family_binding(
+                            layout.family_binding_file,
+                            FamilyBinding(Repository("family", "other"), 99),
+                        )
+                        return
+                    record = layout.family_pending_dir / f"{self.request_id}.json"
+                    payload = json.loads(record.read_text(encoding="ascii"))
+                    payload["title"] = "swapped private title marker"
+                    record.write_text(
+                        json.dumps(payload, separators=(",", ":")) + "\n",
+                        encoding="ascii",
+                    )
+                    record.chmod(0o600)
+
+                creator = _FamilyCreator()
+                inventory = _FamilyInventory(self.binding)
+                real_read = family_cli._read_exact_confirmation
+
+                def read_confirmation(descriptor: int, expected: str) -> bool:
+                    mutate()
+                    return real_read(descriptor, expected)
+
+                with patch.object(
+                    family_cli,
+                    "_read_exact_confirmation",
+                    side_effect=read_confirmation,
+                ):
+                    result, _, error, _ = self._run_family(
+                        environment,
+                        "approve",
+                        creator=creator,
+                        inventory=inventory,
+                        stdin=self._tty(f"approve {self.request_id}\n"),
+                    )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(creator.create_calls, [])
+                self.assertEqual(inventory.verified, [])
+                self.assertNotIn("swapped private", error)
+                self.assertEqual(self._audit(layout)[-1]["status"], "denied")
+                self.assertEqual(
+                    self._audit(layout)[-1]["stage"],
+                    "validation" if swap == "content" else "binding",
+                )
+
+    # Break caught: permission/inventory drift after confirmation allowing a send.
+    def test_approve_verifies_fresh_inventory_and_permission_before_sending(self) -> None:
+        class PermissionDriftInventory(_FamilyInventory):
+            def verify(inner_self, binding, provider):
+                inner_self.verified.append((binding, provider))
+                raise PermissionError("permission drift private marker")
+
+        inventories = (
+            _FamilyInventory(FamilyBinding(Repository("family", "roadmap"), 99)),
+            PermissionDriftInventory(self.binding),
+        )
+        for inventory in inventories:
+            with self.subTest(inventory=type(inventory)), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                creator = _FamilyCreator()
+
+                result, _, error, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    inventory=inventory,
+                    stdin=self._tty(f"approve {self.request_id}\n"),
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(creator.create_calls, [])
+                self.assertEqual(
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
+                    PendingState.PENDING,
+                )
+                self.assertNotIn("private marker", error)
+
+    # Break caught: a concurrent reject/expiry being overwritten by approval.
+    def test_approve_serializes_against_concurrent_reject_and_expiry(self) -> None:
+        for target in (PendingState.REJECTED, PendingState.EXPIRED):
+            with self.subTest(target=target), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+
+                def concurrent_transition():
+                    with pending_lock(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ) as locked:
+                        transition_pending(locked, target)
+
+                creator = _FamilyCreator()
+                real_read = family_cli._read_exact_confirmation
+
+                def read_confirmation(descriptor: int, expected: str) -> bool:
+                    concurrent_transition()
+                    return real_read(descriptor, expected)
+
+                with patch.object(
+                    family_cli,
+                    "_read_exact_confirmation",
+                    side_effect=read_confirmation,
+                ):
+                    result, _, _, _ = self._run_family(
+                        environment,
+                        "approve",
+                        creator=creator,
+                        stdin=self._tty(f"approve {self.request_id}\n"),
+                    )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(creator.create_calls, [])
+                self.assertEqual(
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
+                    target,
+                )
+
+    # Break caught: a proven pre-send failure becoming unknown or being retried.
+    def test_proven_pre_send_failure_returns_to_pending_without_retry(self) -> None:
+        for failure in (SendNotStarted("token"), SendNotStarted("send")):
+            with self.subTest(stage=failure.stage), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                creator = _FamilyCreator(failure)
+
+                result, _, error, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=self._tty(f"approve {self.request_id}\n"),
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(len(creator.create_calls), 1)
+                self.assertEqual(
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
+                    PendingState.PENDING,
+                )
+                self.assertNotIn(str(failure), error)
+
+    # Break caught: success audit/output preceding durable state and content cleanup.
+    def test_approve_reports_success_only_after_durable_cleanup_and_audit(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            creator = _FamilyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            observed = []
+
+            def inspect_audit(path, **event):
+                record = layout.family_pending_dir / f"{self.request_id}.json"
+                payload = json.loads(record.read_text(encoding="ascii"))
+                if event["status"] == "created":
+                    observed.append(
+                        (
+                            payload["state"],
+                            "title" in payload,
+                            "body" in payload,
+                            sorted(item.name for item in layout.family_pending_dir.iterdir()),
+                        )
+                    )
+                append_family_audit(path, **event)
+
+            with patch(
+                "agent_container.family_pending.append_family_audit",
+                side_effect=inspect_audit,
+                create=True,
+            ):
+                result, output, error, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=self._tty(f"approve {self.request_id}\n"),
+                )
+
+            self.assertEqual((result, error), (0, ""))
+            self.assertEqual(len(creator.create_calls), 1)
+            self.assertEqual(creator.create_calls[0][1], self.issue)
+            self.assertIn(self.issue.title, output)
+            self.assertIn(self.issue.body, output)
+            self.assertEqual(observed[0][:3], ("created", False, False))
+            self.assertEqual(
+                observed[0][3],
+                [f".{self.request_id}.json.lock", ".pending.lock", f"{self.request_id}.json"],
+            )
+            self.assertIn("issue-number: 7", output)
+            request = load_pending(
+                layout.family_pending_dir, self.request_id, "demo"
+            )
+            self.assertEqual(request.state, PendingState.CREATED)
+            self.assertIsNone(request.issue)
+            self.assertEqual(self._audit(layout)[-1]["status"], "created")
+
+    # Break caught: ambiguous terminal cleanup being announced/audited as success.
+    def test_cleanup_failure_never_emits_success_audit_or_success_output(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            creator = _FamilyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            import agent_container.family_pending as family_pending
+
+            real_unlink = family_pending._unlink_owned
+            calls = 0
+
+            def fail_second_cleanup(parent, name, expected):
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    raise OSError("cleanup private marker")
+                return real_unlink(parent, name, expected)
+
+            with patch(
+                "agent_container.family_pending._unlink_owned",
+                side_effect=fail_second_cleanup,
+            ):
+                result, output, error, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=self._tty(f"approve {self.request_id}\n"),
+                )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(len(creator.create_calls), 1)
+            self.assertNotIn("issue-number:", output)
+            self.assertNotIn("cleanup private marker", error)
+            self.assertNotIn("created", [event["status"] for event in self._audit(layout)])
+
+    # Break caught: post-send or unclassified uncertainty returning pending/retrying.
+    def test_post_send_and_unclassified_uncertainty_become_unknown_without_retry(self) -> None:
+        failures = (SendOutcomeUnknown("response"), RuntimeError("private remote body"))
+        for failure in failures:
+            with self.subTest(failure=type(failure)), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                creator = _FamilyCreator(failure)
+
+                result, _, error, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=self._tty(f"approve {self.request_id}\n"),
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(len(creator.create_calls), 1)
+                self.assertEqual(
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
+                    PendingState.UNKNOWN,
+                )
+                self.assertNotIn("private remote body", error)
+                self.assertEqual(self._audit(layout)[-1]["status"], "unknown")
+
+    # Break caught: a malformed success value creating a terminal record for another target.
+    def test_unproven_created_result_becomes_unknown_without_success(self) -> None:
+        outcomes = (CreatedIssue(7, "https://github.com/family/other/issues/7"),)
+        for outcome in outcomes:
+            with self.subTest(outcome=outcome), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                creator = _FamilyCreator(outcome)
+
+                result, output, _, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=self._tty(f"approve {self.request_id}\n"),
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(len(creator.create_calls), 1)
+                self.assertEqual(
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
+                    PendingState.UNKNOWN,
+                )
+                self.assertNotIn("issue-number:", output)
+                self.assertNotIn(
+                    "created", [event["status"] for event in self._audit(layout)]
+                )
+
+    # Break caught: reject reporting before terminal cleanup/audit or racing approval.
+    def test_reject_locks_cleans_content_then_audits_and_reports(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+
+            result, output, error, _ = self._run_family(environment, "reject")
+
+            self.assertEqual((result, error), (0, ""))
+            request = load_pending(
+                layout.family_pending_dir, self.request_id, "demo"
+            )
+            self.assertEqual(request.state, PendingState.REJECTED)
+            self.assertIsNone(request.issue)
+            self.assertNotIn(self.issue.title, output)
+            self.assertNotIn(self.issue.body, output)
+            self.assertEqual(
+                self._audit(layout)[-1],
+                {
+                    "operation": "reject",
+                    "project_id": "demo",
+                    "request_id": self.request_id,
+                    "stage": "cleanup",
+                    "status": "rejected",
+                    "timestamp": 200,
+                },
+            )
+
+    # Break caught: agentctl not exposing the reviewed approval helper contract.
+    def test_approve_helper_accepts_explicit_streams_and_clock(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            stdout = StringIO()
+            creator = _FamilyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+
+            result = agentctl._approve_family_issue(
+                layout,
+                self.request_id,
+                provider_factory=lambda _layout: _FamilyProvider(),
+                inventory=_FamilyInventory(self.binding),
+                creator=creator,
+                stdin=self._tty(f"approve {self.request_id}\n"),
+                stdout=stdout,
+                clock=lambda: 200,
+            )
+
+            self.assertEqual(result, 0)
+            self.assertIn("issue-number: 7", stdout.getvalue())
+
+    # Break caught: reconciliation accepting pending/terminal states or auto lookup.
+    def test_reconciliation_requires_unknown_and_supplied_issue_number(self) -> None:
+        with self.assertRaises(SystemExit):
+            parser().parse_args(
+                [
+                    "family",
+                    "issue",
+                    "resolve-created",
+                    "demo",
+                    self.request_id,
+                ]
+            )
+        with self.assertRaises(SystemExit):
+            parser().parse_args(
+                [
+                    "family",
+                    "issue",
+                    "resolve-created",
+                    "demo",
+                    self.request_id,
+                    "--lookup",
+                ]
+            )
+        for operation, extra in (("resolve-created", ("7",)), ("resolve-not-created", ())):
+            with self.subTest(operation=operation), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                creator = _FamilyCreator()
+                result, _, _, _ = self._run_family(
+                    environment,
+                    operation,
+                    creator=creator,
+                    stdin=self._tty(f"not-created {self.request_id}\n"),
+                    extra=extra,
+                )
+                self.assertEqual(result, 1)
+                self.assertEqual(creator.verify_calls, [])
+                self.assertEqual(
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
+                    PendingState.PENDING,
+                )
+
+    # Break caught: resolve-created skipping exact GET verification or retrying POST.
+    def test_resolve_created_verifies_supplied_issue_then_cleans_to_created(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            self._unknown(layout)
+            creator = _FamilyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            inventory = _FamilyInventory(self.binding)
+
+            result, output, error, provider = self._run_family(
+                environment,
+                "resolve-created",
+                creator=creator,
+                inventory=inventory,
+                extra=("7",),
+            )
+
+            self.assertEqual((result, error), (0, ""))
+            self.assertEqual(creator.create_calls, [])
+            self.assertEqual(
+                creator.verify_calls,
+                [(self.binding, self.issue, 7, provider)],
+            )
+            self.assertEqual(inventory.verified, [(self.binding, provider)])
+            request = load_pending(
+                layout.family_pending_dir, self.request_id, "demo"
+            )
+            self.assertEqual(request.state, PendingState.CREATED)
+            self.assertIsNone(request.issue)
+            self.assertEqual(request.issue_number, 7)
+            self.assertIn("issue-number: 7", output)
+            self.assertEqual(
+                self._audit(layout)[-1]["operation"], "resolve-created"
+            )
+            self.assertEqual(self._audit(layout)[-1]["status"], "created")
+
+    # Break caught: failed/mismatched exact verification destroying unknown evidence.
+    def test_resolve_created_keeps_unknown_on_verification_failure_or_mismatch(self) -> None:
+        outcomes = (
+            RuntimeError("private GET response marker"),
+            CreatedIssue(8, "https://github.com/family/roadmap/issues/8"),
+            CreatedIssue(7, "https://github.com/family/other/issues/7"),
+        )
+        for outcome in outcomes:
+            with self.subTest(outcome=outcome), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                self._unknown(layout)
+                creator = _FamilyCreator(outcome)
+
+                result, output, error, _ = self._run_family(
+                    environment,
+                    "resolve-created",
+                    creator=creator,
+                    extra=("7",),
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(len(creator.verify_calls), 1)
+                self.assertEqual(
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
+                    PendingState.UNKNOWN,
+                )
+                self.assertNotIn("issue-number:", output)
+                self.assertNotIn("private GET response marker", error)
+                self.assertNotIn(
+                    "created", [event["status"] for event in self._audit(layout)]
+                )
+
+    # Break caught: resolve-created reporting success after cleanup ambiguity.
+    def test_resolve_created_cleanup_failure_does_not_report_success(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            self._unknown(layout)
+            creator = _FamilyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            import agent_container.family_pending as family_pending
+
+            with patch(
+                "agent_container.family_pending._unlink_owned",
+                side_effect=OSError("reconcile cleanup private marker"),
+            ):
+                result, output, error, _ = self._run_family(
+                    environment,
+                    "resolve-created",
+                    creator=creator,
+                    extra=("7",),
+                )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(len(creator.verify_calls), 1)
+            self.assertNotIn("issue-number:", output)
+            self.assertNotIn("reconcile cleanup private marker", error)
+            self.assertNotIn(
+                "created", [event["status"] for event in self._audit(layout)]
+            )
+            self.assertIsNotNone(family_pending)
+
+    # Break caught: resolve-not-created allowing non-TTY/unbound confirmation.
+    def test_resolve_not_created_requires_exact_tty_confirmation(self) -> None:
+        cases = (
+            StringIO(f"not-created {self.request_id}\n"),
+            self._tty(""),
+            self._tty(f"approve {self.request_id}\n"),
+            self._tty("not-created wrong-request\n"),
+        )
+        for stdin in cases:
+            with self.subTest(stdin=stdin.getvalue()), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                self._unknown(layout)
+
+                result, output, _, _ = self._run_family(
+                    environment,
+                    "resolve-not-created",
+                    stdin=stdin,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
+                    PendingState.UNKNOWN,
+                )
+                if not stdin.isatty():
+                    self.assertNotIn(self.issue.title, output)
+                    self.assertNotIn(self.issue.body, output)
+                    self.assertEqual(self._audit(layout)[-1]["status"], "denied")
+                    self.assertEqual(self._audit(layout)[-1]["stage"], "reconcile")
+
+    # Break caught: reconciliation confirmation doing anything but unknown->pending.
+    def test_resolve_not_created_warns_then_returns_only_to_pending(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            self._unknown(layout)
+
+            result, output, error, _ = self._run_family(
+                environment,
+                "resolve-not-created",
+                stdin=self._tty(f"not-created {self.request_id}\n"),
+            )
+
+            self.assertEqual((result, error), (0, ""))
+            self.assertIn("later approve", output.lower())
+            self.assertIn("external state", output.lower())
+            request = load_pending(
+                layout.family_pending_dir, self.request_id, "demo"
+            )
+            self.assertEqual(request.state, PendingState.PENDING)
+            self.assertEqual(request.issue, self.issue)
+            self.assertEqual(
+                self._audit(layout)[-1],
+                {
+                    "operation": "resolve-not-created",
+                    "project_id": "demo",
+                    "request_id": self.request_id,
+                    "stage": "reconcile",
+                    "status": "pending",
+                    "timestamp": 200,
+                },
+            )
+
+    # Break caught: a record injected under one project's layout being exposed or sent.
+    def test_family_issue_commands_reject_cross_project_injected_records(self) -> None:
+        cases = (
+            ("preview", (), None),
+            (
+                "approve",
+                (),
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7"),
+            ),
+            ("reject", (), None),
+            (
+                "resolve-created",
+                ("7",),
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7"),
+            ),
+            ("resolve-not-created", (), None),
+        )
+        for operation, extra, outcome in cases:
+            with self.subTest(operation=operation), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                pending = create_pending(
+                    layout.family_pending_dir,
+                    "other",
+                    self.issue,
+                    now=100,
+                    random_bytes=lambda _: bytes.fromhex(self.request_id),
+                )
+                if operation.startswith("resolve-"):
+                    with pending_lock(
+                        layout.family_pending_dir, pending.request_id, "other"
+                    ) as locked:
+                        transition_pending(locked, PendingState.SENDING)
+                        transition_pending(locked, PendingState.UNKNOWN)
+                creator = _FamilyCreator(outcome)
+                stdin = (
+                    self._tty(f"not-created {self.request_id}\n")
+                    if operation == "resolve-not-created"
+                    else (
+                        self._tty(f"approve {self.request_id}\n")
+                        if operation == "approve"
+                        else None
+                    )
+                )
+
+                result, output, _, _ = self._run_family(
+                    environment,
+                    operation,
+                    creator=creator,
+                    stdin=stdin,
+                    extra=extra,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertNotIn(self.issue.title, output)
+                self.assertNotIn(self.issue.body, output)
+                self.assertEqual(creator.create_calls, [])
+                self.assertEqual(creator.verify_calls, [])
+
+    # Break caught: equal request values hiding replacement of the approved inode.
+    def test_approve_rejects_same_content_inode_replacement_without_sending(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            record = layout.family_pending_dir / f"{self.request_id}.json"
+
+            def replace_with_equal_bytes() -> None:
+                replacement = layout.family_pending_dir / ".replacement"
+                replacement.write_bytes(record.read_bytes())
+                replacement.chmod(0o600)
+                os.replace(replacement, record)
+
+            creator = _FamilyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            real_read = family_cli._read_exact_confirmation
+
+            def read_confirmation(descriptor: int, expected: str) -> bool:
+                replace_with_equal_bytes()
+                return real_read(descriptor, expected)
+
+            with patch.object(
+                family_cli,
+                "_read_exact_confirmation",
+                side_effect=read_confirmation,
+            ):
+                result, _, _, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=self._tty(f"approve {self.request_id}\n"),
+                )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(creator.create_calls, [])
+            self.assertEqual(
+                load_pending(
+                    layout.family_pending_dir, self.request_id, "demo"
+                ).state,
+                PendingState.PENDING,
+            )
+
+    # Break caught: malformed post-send scalar values leaving a retryable sending record.
+    def test_malformed_created_scalars_become_unknown_at_response_stage(self) -> None:
+        outcomes = (
+            CreatedIssue("7", "https://github.com/family/roadmap/issues/7"),
+            CreatedIssue(True, "https://github.com/family/roadmap/issues/True"),
+            CreatedIssue(0, "https://github.com/family/roadmap/issues/0"),
+            CreatedIssue(-1, "https://github.com/family/roadmap/issues/-1"),
+            CreatedIssue(
+                2_147_483_648,
+                "https://github.com/family/roadmap/issues/2147483648",
+            ),
+        )
+        for outcome in outcomes:
+            with self.subTest(number=outcome.number), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                creator = _FamilyCreator(outcome)
+
+                result, output, _, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=self._tty(f"approve {self.request_id}\n"),
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(len(creator.create_calls), 1)
+                self.assertEqual(
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
+                    PendingState.UNKNOWN,
+                )
+                self.assertNotIn("issue-number:", output)
+                self.assertEqual(self._audit(layout)[-1]["stage"], "response")
+                self.assertEqual(self._audit(layout)[-1]["status"], "unknown")
+
+    # Break caught: ordinary property failures escaping after POST and leaving sending.
+    def test_malformed_created_objects_never_escape_response_quarantine(self) -> None:
+        missing = object.__new__(CreatedIssue)
+        deleted = CreatedIssue(
+            7, "https://github.com/family/roadmap/issues/7"
+        )
+        object.__delattr__(deleted, "number")
+
+        def hostile_number(_instance):
+            raise RuntimeError("private hostile property marker")
+
+        cases = (
+            ("object-new", missing, None),
+            ("delattr", deleted, None),
+            (
+                "hostile-property",
+                CreatedIssue(
+                    7, "https://github.com/family/roadmap/issues/7"
+                ),
+                property(hostile_number),
+            ),
+        )
+        for label, outcome, hostile in cases:
+            with self.subTest(case=label), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                creator = _FamilyCreator(outcome)
+                context = (
+                    patch.object(CreatedIssue, "number", hostile, create=True)
+                    if hostile is not None
+                    else nullcontext()
+                )
+
+                with context:
+                    result, output, error, _ = self._run_family(
+                        environment,
+                        "approve",
+                        creator=creator,
+                        stdin=self._tty(f"approve {self.request_id}\n"),
+                    )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(len(creator.create_calls), 1)
+                self.assertEqual(
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
+                    PendingState.UNKNOWN,
+                )
+                self.assertEqual(self._audit(layout)[-1]["stage"], "response")
+                self.assertEqual(self._audit(layout)[-1]["status"], "unknown")
+                self.assertNotIn("issue-number:", output)
+                self.assertNotIn("private hostile property marker", error)
+
+    # Break caught: re-reading a validated creator object after POST leaving sending.
+    def test_created_result_attributes_are_snapshotted_exactly_once(self) -> None:
+        for attribute, valid in (
+            ("number", 7),
+            ("url", "https://github.com/family/roadmap/issues/7"),
+        ):
+            with self.subTest(attribute=attribute), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                outcome = CreatedIssue(
+                    7, "https://github.com/family/roadmap/issues/7"
+                )
+                creator = _FamilyCreator(outcome)
+                accesses = 0
+
+                def hostile_getter(_instance):
+                    nonlocal accesses
+                    accesses += 1
+                    if accesses >= 3:
+                        raise RuntimeError("private late property marker")
+                    return valid
+
+                with patch.object(
+                    CreatedIssue,
+                    attribute,
+                    property(hostile_getter),
+                    create=True,
+                ):
+                    result, output, error, _ = self._run_family(
+                        environment,
+                        "approve",
+                        creator=creator,
+                        stdin=self._tty(f"approve {self.request_id}\n"),
+                    )
+
+                request = load_pending(
+                    layout.family_pending_dir, self.request_id, "demo"
+                )
+                self.assertEqual((result, error), (0, ""))
+                self.assertEqual(accesses, 1)
+                self.assertEqual(request.state, PendingState.CREATED)
+                self.assertEqual(request.issue_number, 7)
+                self.assertIn("issue-number: 7", output)
+
+    # Break caught: an ordinary exception during the attribute snapshot escaping quarantine.
+    def test_created_result_snapshot_failure_is_unknown_but_baseexception_escapes(self) -> None:
+        for failure, caught in (
+            (RuntimeError("private snapshot marker"), True),
+            (KeyboardInterrupt(), False),
+        ):
+            with self.subTest(failure=type(failure)), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                outcome = CreatedIssue(
+                    7, "https://github.com/family/roadmap/issues/7"
+                )
+                creator = _FamilyCreator(outcome)
+
+                def hostile_url(_instance):
+                    raise failure
+
+                with patch.object(
+                    CreatedIssue,
+                    "url",
+                    property(hostile_url),
+                    create=True,
+                ):
+                    if caught:
+                        result, _, error, _ = self._run_family(
+                            environment,
+                            "approve",
+                            creator=creator,
+                            stdin=self._tty(f"approve {self.request_id}\n"),
+                        )
+                        self.assertEqual(result, 1)
+                        self.assertNotIn("private snapshot marker", error)
+                    else:
+                        with self.assertRaises(KeyboardInterrupt):
+                            self._run_family(
+                                environment,
+                                "approve",
+                                creator=creator,
+                                stdin=self._tty(f"approve {self.request_id}\n"),
+                            )
+
+                request = load_pending(
+                    layout.family_pending_dir, self.request_id, "demo"
+                )
+                self.assertEqual(
+                    request.state,
+                    PendingState.UNKNOWN if caught else PendingState.SENDING,
+                )
+                self.assertEqual(
+                    self._audit(layout)[-1]["stage"],
+                    "response" if caught else "send",
+                )
+
+    # Break caught: approval using a time sampled before prompt and remote preflight.
+    def test_approval_samples_expiry_after_preflight_at_exact_boundary(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            pending = self._pending(layout)
+            observed = [pending.expires_at - 1]
+
+            class CrossingInventory(_FamilyInventory):
+                def verify(inner_self, binding, provider):
+                    super().verify(binding, provider)
+                    observed[0] = pending.expires_at
+
+            creator = _FamilyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            result, _, _, _ = self._run_family(
+                environment,
+                "approve",
+                creator=creator,
+                inventory=CrossingInventory(self.binding),
+                stdin=self._tty(f"approve {self.request_id}\n"),
+                clock=lambda: observed[0],
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(creator.create_calls, [])
+            self.assertEqual(
+                load_pending(
+                    layout.family_pending_dir, self.request_id, "demo"
+                ).state,
+                PendingState.EXPIRED,
+            )
+
+    # Break caught: a surviving send being neither recovered nor durably audited.
+    def test_cli_startup_recovers_sending_then_allows_exact_reconciliation(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            with pending_lock(
+                layout.family_pending_dir, self.request_id, "demo"
+            ) as locked:
+                transition_pending(locked, PendingState.SENDING)
+            creator = _FamilyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            recovered_states = []
+
+            def inspect_recovery(path, **event):
+                if event["operation"] == "recover":
+                    payload = json.loads(
+                        (
+                            layout.family_pending_dir
+                            / f"{self.request_id}.json"
+                        ).read_text("ascii")
+                    )
+                    recovered_states.append(PendingState(payload["state"]))
+                append_family_audit(path, **event)
+
+            with patch(
+                "agent_container.family_pending.append_family_audit",
+                side_effect=inspect_recovery,
+            ):
+                result, _, error, _ = self._run_family(
+                    environment,
+                    "resolve-created",
+                    creator=creator,
+                    extra=("7",),
+                )
+
+            self.assertEqual((result, error), (0, ""))
+            self.assertEqual(len(creator.verify_calls), 1)
+            self.assertEqual(recovered_states, [PendingState.UNKNOWN])
+            events = self._audit(layout)
+            self.assertEqual(
+                events[0],
+                {
+                    "operation": "recover",
+                    "project_id": "demo",
+                    "request_id": self.request_id,
+                    "stage": "reconcile",
+                    "status": "unknown",
+                    "timestamp": 200,
+                },
+            )
+            self.assertEqual(events[-1]["status"], "created")
+
+    # Break caught: doctor mutating interrupted work or ignoring unsafe audit state.
+    def test_doctor_is_read_only_and_fails_sending_or_invalid_audit(self) -> None:
+        for damage in (
+            "sending",
+            "recovery-marker",
+            "malformed-audit",
+            "insecure-audit",
+        ):
+            with self.subTest(damage=damage), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                if damage in {"sending", "recovery-marker"}:
+                    with pending_lock(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ) as locked:
+                        transition_pending(locked, PendingState.SENDING)
+                        if damage == "recovery-marker":
+                            transition_pending(
+                                locked,
+                                PendingState.UNKNOWN,
+                                recovery_audit_pending=True,
+                            )
+                else:
+                    layout.family_audit_file.write_bytes(b"{not-json}\n")
+                    layout.family_audit_file.chmod(
+                        0o644 if damage == "insecure-audit" else 0o600
+                    )
+                record = layout.family_pending_dir / f"{self.request_id}.json"
+                before_record = record.read_bytes()
+                before_entries = sorted(
+                    path.name for path in layout.family_pending_dir.iterdir()
+                )
+                before_audit = (
+                    layout.family_audit_file.read_bytes()
+                    if layout.family_audit_file.exists()
+                    else None
+                )
+                stdout = StringIO()
+                stderr = StringIO()
+
+                result = main(
+                    ["family", "doctor", "demo"],
+                    environment=environment,
+                    stdout=stdout,
+                    stderr=stderr,
+                    family_token_provider_factory=lambda _layout: _FamilyProvider(),
+                    family_clock=lambda: 200,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertIn("FAIL", stdout.getvalue())
+                self.assertEqual(record.read_bytes(), before_record)
+                self.assertEqual(
+                    sorted(
+                        path.name for path in layout.family_pending_dir.iterdir()
+                    ),
+                    before_entries,
+                )
+                self.assertEqual(
+                    layout.family_audit_file.read_bytes()
+                    if layout.family_audit_file.exists()
+                    else None,
+                    before_audit,
+                )
+
+    # Break caught: isatty spoofing or unbounded confirmation reads authorizing a send.
+    def test_irreversible_confirmation_requires_real_fd_and_bounded_line(self) -> None:
+        for stdin in (
+            _SpoofedTTY(f"approve {self.request_id}\n"),
+            _NoFilenoTTY(),
+        ):
+            with self.subTest(stdin=type(stdin).__name__), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                creator = _FamilyCreator(
+                    CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+                )
+                result, output, _, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=stdin,
+                )
+                self.assertEqual(result, 1)
+                self.assertEqual(creator.create_calls, [])
+                self.assertNotIn(self.issue.title, output)
+                self.assertNotIn(self.issue.body, output)
+
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            creator = _FamilyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            terminal = self._tty("reject this request\n")
+            stdin = _FabricatedReadlineTTY(
+                terminal, f"approve {self.request_id}\n"
+            )
+
+            result, _, _, _ = self._run_family(
+                environment,
+                "approve",
+                creator=creator,
+                stdin=stdin,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(creator.create_calls, [])
+
+        for raw_confirmation in (
+            b"\xff\n",
+            f"approve {self.request_id}\nunexpected\n".encode("ascii"),
+        ):
+            with self.subTest(raw=raw_confirmation), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                creator = _FamilyCreator(
+                    CreatedIssue(
+                        7,
+                        "https://github.com/family/roadmap/issues/7",
+                    )
+                )
+                terminal = _RawPtyTTY(raw_confirmation)
+                self.addCleanup(terminal.close)
+
+                result, _, _, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=terminal,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(creator.create_calls, [])
+
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            creator = _FamilyCreator()
+            confirmation = self._tty(
+                f"approve {self.request_id}" + ("x" * 256) + "\n"
+            )
+            result, _, _, _ = self._run_family(
+                environment,
+                "approve",
+                creator=creator,
+                stdin=confirmation,
+            )
+            self.assertEqual(result, 1)
+            self.assertEqual(creator.create_calls, [])
+
+    # Break caught: closing and reusing stdin after fileno redirecting confirmation reads.
+    def test_irreversible_confirmation_duplicates_and_pins_the_terminal_fd(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            terminal = _RawPtyTTY(
+                f"approve {self.request_id}\n".encode("ascii")
+            )
+            self.addCleanup(terminal.close)
+            creator = _FamilyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            real_dup = os.dup
+            duplicated: list[int] = []
+            reused: list[int] = []
+
+            def close_reuse_and_duplicate(descriptor: int) -> int:
+                pinned = real_dup(descriptor)
+                duplicated.append(pinned)
+                original = terminal.abandon_slave()
+                replacement = os.open("/dev/null", os.O_RDONLY)
+                self.assertEqual(replacement, original)
+                reused.append(replacement)
+                return pinned
+
+            with patch.object(
+                family_cli.os,
+                "dup",
+                side_effect=close_reuse_and_duplicate,
+            ):
+                result, _, _, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=terminal,
+                )
+
+            for descriptor in reused:
+                os.close(descriptor)
+            self.assertEqual(result, 0)
+            self.assertEqual(len(creator.create_calls), 1)
+            self.assertEqual(len(duplicated), 1)
+            with self.assertRaises(OSError):
+                os.fstat(duplicated[0])
+
+    # Break caught: falsy injected complete dependencies being silently discarded.
+    def test_falsy_injected_family_dependencies_are_used_when_not_none(self) -> None:
+        class FalsyProviderFactory:
+            def __init__(inner_self):
+                inner_self.provider = _FamilyProvider()
+
+            def __bool__(inner_self):
+                return False
+
+            def __call__(inner_self, _layout):
+                return inner_self.provider
+
+        class FalsyInventory(_FamilyInventory):
+            def __bool__(inner_self):
+                return False
+
+        class FalsyCreator(_FamilyCreator):
+            def __bool__(inner_self):
+                return False
+
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            provider_factory = FalsyProviderFactory()
+            inventory = FalsyInventory(self.binding)
+            creator = FalsyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            stdout = StringIO()
+            stderr = StringIO()
+
+            result = main(
+                ["family", "issue", "approve", "demo", self.request_id],
+                environment=environment,
+                stdin=self._tty(f"approve {self.request_id}\n"),
+                stdout=stdout,
+                stderr=stderr,
+                family_token_provider_factory=provider_factory,
+                family_inventory=inventory,
+                family_creator=creator,
+                family_clock=lambda: 200,
+            )
+
+            self.assertEqual((result, stderr.getvalue()), (0, ""))
+            self.assertEqual(len(creator.create_calls), 1)
+            self.assertEqual(len(inventory.verified), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ import getpass
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,7 @@ from agent_container.github_broker_runtime import write_broker_policy
 from agent_container.handover_broker_runtime import HandoverBrokerRuntime
 from agent_container.handover_broker_runtime import HandoverBrokerRuntimeError
 from agent_container.github_app import GitHubAppMetadata
+from agent_container.family_runtime_mount import FamilyRuntimeError
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_policy import validate_repository_id
 from agent_container.podman import CommandSpec
@@ -69,6 +71,8 @@ from agent_container.podman import podman_image_id_spec
 from agent_container.podman import podman_project_images_spec
 from agent_container.podman import podman_running_agent_containers_spec
 from agent_container.podman import podman_rootless_spec
+from agent_container.podman import podman_oci_runtime_spec
+from agent_container.podman import podman_connections_spec
 from agent_container.podman import podman_stats_spec
 from agent_container.podman import podman_version_spec
 from agent_container.podman import project_node_version_spec
@@ -147,6 +151,20 @@ def _positive_repository_id(value: str) -> int:
     return parsed
 
 
+def _positive_issue_number(value: str) -> int:
+    if (
+        len(value) > 10
+        or not value.isascii()
+        or not value.isdecimal()
+        or value.startswith("0")
+    ):
+        raise argparse.ArgumentTypeError("issue number must be a positive integer")
+    parsed = int(value)
+    if parsed > 2_147_483_647:
+        raise argparse.ArgumentTypeError("issue number must be a positive integer")
+    return parsed
+
+
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog="agentctl")
     command.add_argument(
@@ -204,6 +222,29 @@ def parser() -> argparse.ArgumentParser:
     migrate.add_argument("--from", dest="source", type=Path, required=True)
     migrate.add_argument("--plugin", dest="plugins", action="append", default=[])
     migrate.add_argument("--apply", action="store_true")
+    family = subcommands.add_parser("family")
+    family_subcommands = family.add_subparsers(dest="family_command", required=True)
+    family_bind = family_subcommands.add_parser("bind")
+    family_bind.add_argument("project")
+    family_bind.add_argument("repository")
+    family_list = family_subcommands.add_parser("list")
+    family_list.add_argument("project")
+    family_doctor = family_subcommands.add_parser("doctor")
+    family_doctor.add_argument("project")
+    family_issue = family_subcommands.add_parser("issue")
+    family_issue_subcommands = family_issue.add_subparsers(
+        dest="family_issue_command", required=True
+    )
+    family_pending = family_issue_subcommands.add_parser("pending")
+    family_pending.add_argument("project")
+    for operation in ("preview", "approve", "reject", "resolve-not-created"):
+        action = family_issue_subcommands.add_parser(operation)
+        action.add_argument("project")
+        action.add_argument("request_id")
+    family_resolve_created = family_issue_subcommands.add_parser("resolve-created")
+    family_resolve_created.add_argument("project")
+    family_resolve_created.add_argument("request_id")
+    family_resolve_created.add_argument("issue_number", type=_positive_issue_number)
     return command
 
 
@@ -768,6 +809,99 @@ def _podman_preflight(
         _required_probe_run(runner, podman_image_exists_spec(image_required))
 
 
+def _family_podman_preflight(
+    runner: Callable[[CommandSpec], subprocess.CompletedProcess],
+    environment: Mapping[str, str] | None = None,
+) -> None:
+    effective_environment = os.environ if environment is None else environment
+    if any(
+        effective_environment.get(name)
+        for name in ("CONTAINER_HOST", "CONTAINER_CONNECTION")
+    ):
+        raise ValueError("local Podman with crun is required for family intake")
+    version_result = _required_probe_run(runner, podman_version_spec())
+    version_match = re.fullmatch(
+        r"podman version ([0-9]+)\.([0-9]+)(?:\.[0-9]+)?",
+        (version_result.stdout or "").strip(),
+    )
+    if version_match is None or (
+        int(version_match.group(1)), int(version_match.group(2))
+    ) < (5, 8):
+        raise ValueError("Podman 5.8 or newer is required for family intake")
+    rootless = _required_probe_run(runner, podman_rootless_spec())
+    if (rootless.stdout or "").strip().lower() != "true":
+        raise ValueError("rootless Podman is required for family intake")
+    runtime = _required_probe_run(runner, podman_oci_runtime_spec())
+    if (runtime.stdout or "").strip() != "crun":
+        raise ValueError("local Podman with crun is required for family intake")
+    connections = _required_probe_run(runner, podman_connections_spec())
+    try:
+        decoded = json.loads(connections.stdout or "")
+    except (json.JSONDecodeError, TypeError):
+        raise ValueError("local Podman with crun is required for family intake") from None
+    if type(decoded) is not list:
+        raise ValueError("local Podman with crun is required for family intake")
+    for entry in decoded:
+        if type(entry) is not dict:
+            raise ValueError("local Podman with crun is required for family intake")
+        default = entry.get("Default", entry.get("default", False))
+        if type(default) is not bool or default:
+            raise ValueError("local Podman with crun is required for family intake")
+
+
+def _family_podman_doctor_checks(
+    runner: Callable[[CommandSpec], subprocess.CompletedProcess],
+    version: subprocess.CompletedProcess,
+    environment: Mapping[str, str] | None,
+) -> list[CheckResult]:
+    version_text = (version.stdout or "").strip()
+    match = re.fullmatch(
+        r"podman version ([0-9]+)\.([0-9]+)(?:\.[0-9]+)?", version_text
+    )
+    version_ok = (
+        version.returncode == 0
+        and match is not None
+        and (int(match.group(1)), int(match.group(2))) >= (5, 8)
+    )
+    runtime = _doctor_run(runner, podman_oci_runtime_spec())
+    runtime_ok = runtime.returncode == 0 and (runtime.stdout or "").strip() == "crun"
+    connections = _doctor_run(runner, podman_connections_spec())
+    effective_environment = os.environ if environment is None else environment
+    environment_local = not any(
+        effective_environment.get(name)
+        for name in ("CONTAINER_HOST", "CONTAINER_CONNECTION")
+    )
+    local_ok = False
+    if connections.returncode == 0:
+        try:
+            decoded = json.loads(connections.stdout or "")
+            local_ok = environment_local and type(decoded) is list and all(
+                type(entry) is dict
+                and type(entry.get("Default", entry.get("default", False))) is bool
+                and not entry.get("Default", entry.get("default", False))
+                for entry in decoded
+            )
+        except (json.JSONDecodeError, TypeError):
+            local_ok = False
+    return [
+        CheckResult(
+            "PASS" if version_ok else "FAIL",
+            "family-podman-version",
+            ">= 5.8 required",
+        ),
+        CheckResult(
+            "PASS" if runtime_ok else "FAIL",
+            "family-podman-runtime",
+            "crun required",
+        ),
+        CheckResult(
+            "PASS" if local_ok else "FAIL",
+            "family-podman-local",
+            "local service required",
+        ),
+    ]
+
+
 def _resolve_project_image(
     layout: StateLayout,
     base_image: str,
@@ -854,6 +988,16 @@ def _doctor(
             "available" if version.returncode == 0 else "unavailable",
         )
     )
+
+    from agent_container.family_state import FamilyStateLayout
+
+    family_layout = FamilyStateLayout(layout.root, layout.project_id)
+    try:
+        os.lstat(family_layout.family_binding_file)
+    except FileNotFoundError:
+        pass
+    else:
+        checks.extend(_family_podman_doctor_checks(runner, version, environment))
 
     rootless = _doctor_run(runner, podman_rootless_spec())
     rootless_value = (rootless.stdout or "").strip().lower()
@@ -1297,6 +1441,33 @@ def _run_with_egress_supervision(
     return results[0]
 
 
+def _approve_family_issue(
+    layout,
+    request_id: str,
+    *,
+    provider_factory: Callable,
+    inventory,
+    creator,
+    stdin: TextIO,
+    stdout: TextIO,
+    clock: Callable[[], int],
+) -> int:
+    """Run one host-approved Issue creation with explicit operator streams."""
+
+    from agent_container.family_cli import approve_family_issue
+
+    return approve_family_issue(
+        layout,
+        request_id,
+        provider_factory=provider_factory,
+        inventory=inventory,
+        creator=creator,
+        stdin=stdin,
+        stdout=stdout,
+        clock=clock,
+    )
+
+
 def main(
     argv: list[str] | None = None,
     environment: Mapping[str, str] | None = None,
@@ -1310,6 +1481,12 @@ def main(
     runtime_spec_builders: Mapping[str, RuntimeSpecBuilder] | None = None,
     cachebuster_reader: Callable[[], str] = read_cachebuster,
     token_reader: Callable[[str], str] | None = None,
+    family_token_provider_factory: Callable | None = None,
+    family_inventory: object | None = None,
+    family_creator: object | None = None,
+    family_clock: Callable[[], int] | None = None,
+    family_runtime_factory: Callable | None = None,
+    runtime_supervisor: Callable | None = None,
 ) -> int:
     try:
         arguments = parser().parse_args(argv)
@@ -1352,7 +1529,45 @@ def main(
             validate_project_id(arguments.project)
             for plugin in arguments.plugins:
                 validate_plugin_identifier(plugin)
+        elif arguments.command == "family":
+            validate_project_id(arguments.project)
         repository_root = Path(__file__).resolve().parents[2]
+        if arguments.command == "family":
+            try:
+                from agent_container.family_cli import dispatch_family
+                from agent_container.family_state import FamilyStateLayout
+                state_layout = StateLayout.from_environment(
+                    arguments.project, environment
+                )
+                _ensure_exact_state_root(state_layout, environment)
+                for directory in (
+                    state_layout.root,
+                    state_layout.project_dir.parent,
+                    state_layout.project_dir,
+                ):
+                    ensure_private_directory(directory)
+                _read_runtime_project(state_layout.project_file)
+                family_layout = FamilyStateLayout(
+                    state_layout.root, state_layout.project_id
+                )
+                family_clock_source = (
+                    (lambda: int(time.time()))
+                    if family_clock is None
+                    else family_clock
+                )
+                return dispatch_family(
+                    arguments,
+                    family_layout,
+                    stdin=stdin,
+                    stdout=stdout,
+                    provider_factory=family_token_provider_factory,
+                    inventory=family_inventory,
+                    creator=family_creator,
+                    clock=family_clock_source,
+                    approval_handler=_approve_family_issue,
+                )
+            except Exception:
+                raise ValueError("family command failed") from None
         if arguments.command == "build":
             _podman_preflight(runner)
             runner(
@@ -1562,7 +1777,23 @@ def main(
                 identity_reader,
                 arguments.github_broker,
             )
-            _podman_preflight(runner, image_required=arguments.image)
+            from agent_container.family_state import FamilyStateLayout
+            from agent_container.family_state import load_family_binding
+
+            family_layout = FamilyStateLayout(layout.root, layout.project_id)
+            try:
+                os.lstat(family_layout.family_binding_file)
+            except FileNotFoundError:
+                family_bound = False
+            else:
+                load_family_binding(family_layout.family_binding_file)
+                family_bound = True
+            if family_bound:
+                _family_podman_preflight(runner, environment)
+                image_probe = podman_image_exists_spec(arguments.image)
+                _require_success(_required_probe_run(runner, image_probe), image_probe)
+            else:
+                _podman_preflight(runner, image_required=arguments.image)
             resolution = _resolve_project_image(
                 layout,
                 arguments.image,
@@ -1585,6 +1816,19 @@ def main(
             if runtime_spec_builder is not None:
                 builders = {**builders, "codex": runtime_spec_builder}
             with ExitStack() as stack:
+                from agent_container.family_intake_runtime import FamilyIntakeRuntime
+
+                if not family_bound:
+                    family_runtime = None
+                    family_mount = None
+                else:
+                    factory = (
+                        FamilyIntakeRuntime.create
+                        if family_runtime_factory is None
+                        else family_runtime_factory
+                    )
+                    family_runtime = factory(family_layout)
+                    family_mount = stack.enter_context(family_runtime)
                 egress_runtime = (
                     EgressBrokerRuntime.create(
                         layout, arguments.agent, egress_policy
@@ -1625,7 +1869,13 @@ def main(
                         builder_args.append(github_mount)
                     if egress_mount is not None:
                         builder_args.append(egress_mount)
-                    spec = builders[arguments.agent](*builder_args)
+                    spec = (
+                        builders[arguments.agent](
+                            *builder_args, family_mount=family_mount
+                        )
+                        if family_mount is not None
+                        else builders[arguments.agent](*builder_args)
+                    )
                 else:
                     builder_args = [
                         layout,
@@ -1638,12 +1888,31 @@ def main(
                         builder_args.append(github_mount)
                     if egress_mount is not None:
                         builder_args.append(egress_mount)
-                    spec = builders[arguments.agent](*builder_args)
+                    spec = (
+                        builders[arguments.agent](
+                            *builder_args, family_mount=family_mount
+                        )
+                        if family_mount is not None
+                        else builders[arguments.agent](*builder_args)
+                    )
                 print(
                     f"Starting {arguments.agent.title()} for project: {layout.project_id}",
                     file=stdout,
                 )
-                if egress_runtime is not None and egress_mount is not None:
+                if family_runtime is not None:
+                    supervisor = (
+                        run_command_supervised
+                        if runtime_supervisor is None
+                        else runtime_supervisor
+                    )
+                    completed = supervisor(
+                        spec,
+                        egress_runtime,
+                        egress_mount,
+                        family_runtime,
+                        family_mount,
+                    )
+                elif egress_runtime is not None and egress_mount is not None:
                     completed = (
                         run_command_supervised(spec, egress_runtime, egress_mount)
                         if runner is run_command
@@ -1708,6 +1977,9 @@ def main(
         return 1
     except EgressBrokerRuntimeError:
         print("error: egress gateway failed", file=stderr)
+        return 1
+    except FamilyRuntimeError:
+        print("error: family intake runtime failed", file=stderr)
         return 1
     except (ValueError, PermissionError, FileNotFoundError) as error:
         print(f"error: {error}", file=stderr)

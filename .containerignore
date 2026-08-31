@@ -3,6 +3,14 @@
 !requirements-lint.txt
 !src/
 !src/**
+src/agent_container/family_cli.py
+src/agent_container/family_github_app.py
+src/agent_container/family_issue_create.py
+src/agent_container/family_state.py
+src/agent_container/family_intake_broker.py
+src/agent_container/family_intake_runtime.py
+src/agent_container/family_intake_transport.py
+src/agent_container/family_pending.py
 !profiles/
 !profiles/codex/
 !profiles/codex/**
@@ -16,6 +24,7 @@
 !container/bin/claude
 !container/bin/git-remote-agent-broker
 !container/bin/agent-handover
+!container/bin/agent-runtime-launcher
 !container/profile.d/
 !container/profile.d/10-agent-node.sh
 **/auth.json

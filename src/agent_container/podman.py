@@ -4,14 +4,18 @@ from pathlib import Path
 import re
 import signal
 import subprocess
+import time
 
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
+from agent_container.family_runtime_mount import FamilyRuntimeMount
+from agent_container.family_runtime_mount import FamilyRuntimeError
 from agent_container.egress_broker_runtime import EgressBrokerRuntime
 from agent_container.egress_broker_runtime import EgressBrokerRuntimeError
 from agent_container.egress_broker_runtime import EgressRuntimeMount
 from agent_container.state import Repository
 from agent_container.state import StateLayout
 from agent_container.state import validate_project_id
+from agent_container.state import github_broker_project_label
 
 
 CODEX_STATUS_LINE_CONFIG = (
@@ -37,6 +41,10 @@ _CLAUDE_RUNTIME_HOME_TMPFS_MOUNT = (
 _BROKER_RUNTIME_PATH = "/run/agent-broker"
 _HANDOVER_BROKER_RUNTIME_PATH = "/run/agent-handover"
 _EGRESS_RUNTIME_PATH = "/run/agent-egress"
+_FAMILY_RUNTIME_PATH = "/run/agent-family"
+_FAMILY_SOCKET_TARGET = f"{_FAMILY_RUNTIME_PATH}/intake.sock"
+_RUNTIME_LAUNCHER = "agent-runtime-launcher"
+_FAMILY_RUN_ID = re.compile(r"^[0-9a-f]{16}$")
 _CONTAINER_ID = re.compile(r"^[0-9a-f]{12,64}$")
 _RESOURCE_AGENTS = frozenset({"codex", "claude"})
 _RESOURCE_STATS_FORMAT = (
@@ -48,6 +56,7 @@ _RESOURCE_STATS_FORMAT = (
 class CommandSpec:
     argv: tuple[str, ...]
     environment: dict[str, str]
+    pass_fds: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -218,6 +227,59 @@ def _handover_broker_args(broker: HandoverRuntimeMount) -> list[str]:
         "--env",
         f"AGENT_HANDOVER_BROKER_CAPABILITY={_HANDOVER_BROKER_RUNTIME_PATH}/capability",
     ]
+
+
+def _family_runtime_args(
+    layout: StateLayout, family: FamilyRuntimeMount, *, named_by_egress: bool
+) -> list[str]:
+    if type(family) is not FamilyRuntimeMount:
+        raise ValueError("family runtime mount is invalid")
+    expected_parent = (
+        layout.root
+        / "family"
+        / "intake"
+        / "r"
+        / github_broker_project_label(layout.project_id)
+    )
+    socket_dir = family.socket_dir
+    expected_environment = {
+        "AGENT_FAMILY_SOCKET": f"{_FAMILY_RUNTIME_PATH}/intake.sock",
+        "AGENT_FAMILY_CAPABILITY": family.capability,
+    }
+    preserved_fds = family.pass_fds
+    if len(preserved_fds) != 1 or preserved_fds[0] < 3:
+        raise ValueError("family runtime mount is invalid")
+    if (
+        not socket_dir.is_absolute()
+        or socket_dir.parent != expected_parent
+        or _FAMILY_RUN_ID.fullmatch(socket_dir.name) is None
+        or socket_dir != Path(os.path.normpath(socket_dir))
+        or dict(family.environment) != expected_environment
+    ):
+        raise ValueError("family runtime mount is invalid")
+    family.revalidate()
+    arguments = [
+        f"--preserve-fd={preserved_fds[0]}",
+        "--mount",
+        _mount(family.mount_source, _FAMILY_SOCKET_TARGET),
+        "--env",
+        f"AGENT_FAMILY_SOCKET={expected_environment['AGENT_FAMILY_SOCKET']}",
+        "--env",
+        f"AGENT_FAMILY_CAPABILITY={family.capability}",
+    ]
+    if not named_by_egress:
+        arguments[:0] = [f"--name={family.container_name}"]
+    return arguments
+
+
+def _runtime_launcher_args(
+    family: FamilyRuntimeMount | None,
+) -> list[str]:
+    arguments = [_RUNTIME_LAUNCHER]
+    if family is not None:
+        arguments.append(f"--close-fd={family.pass_fds[0]}")
+    arguments.append("--")
+    return arguments
 
 
 def build_image_spec(
@@ -560,6 +622,7 @@ def run_codex_spec(
     gid: int,
     broker: BrokerRuntimeMount | None = None,
     egress: EgressRuntimeMount | None = None,
+    family_mount: FamilyRuntimeMount | None = None,
 ) -> CommandSpec:
     if uid != os.getuid() or gid != os.getgid():
         raise ValueError("runtime uid and gid must match the current user")
@@ -580,7 +643,12 @@ def run_codex_spec(
         argv += ["--mount", _mount(source, target, read_only)]
     if egress is not None:
         argv += _egress_args(layout, "codex", egress)
+    if family_mount is not None:
+        argv += _family_runtime_args(
+            layout, family_mount, named_by_egress=egress is not None
+        )
     argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image]
+    argv += _runtime_launcher_args(family_mount)
     if egress is not None:
         argv += ["agent-egress-runtime", "--"]
     argv += [
@@ -589,7 +657,9 @@ def run_codex_spec(
         "-c",
         CODEX_STATUS_LINE_CONFIG,
     ]
-    return CommandSpec(tuple(argv), {})
+    return CommandSpec(
+        tuple(argv), {}, () if family_mount is None else family_mount.pass_fds
+    )
 
 
 def run_claude_spec(
@@ -601,6 +671,7 @@ def run_claude_spec(
     handover_broker: HandoverRuntimeMount,
     broker: BrokerRuntimeMount | None = None,
     egress: EgressRuntimeMount | None = None,
+    family_mount: FamilyRuntimeMount | None = None,
 ) -> CommandSpec:
     if uid != os.getuid() or gid != os.getgid():
         raise ValueError("runtime uid and gid must match the current user")
@@ -630,11 +701,18 @@ def run_claude_spec(
     argv += ["--env", "AGENT_HANDOVER_ROOT=/handovers"]
     if egress is not None:
         argv += _egress_args(layout, "claude", egress)
+    if family_mount is not None:
+        argv += _family_runtime_args(
+            layout, family_mount, named_by_egress=egress is not None
+        )
     argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image]
+    argv += _runtime_launcher_args(family_mount)
     if egress is not None:
         argv += ["agent-egress-runtime", "--"]
     argv += _CLAUDE_LAUNCHER_PREFIX
-    return CommandSpec(tuple(argv), {})
+    return CommandSpec(
+        tuple(argv), {}, () if family_mount is None else family_mount.pass_fds
+    )
 
 
 def podman_version_spec() -> CommandSpec:
@@ -644,6 +722,18 @@ def podman_version_spec() -> CommandSpec:
 def podman_rootless_spec() -> CommandSpec:
     return CommandSpec(
         ("podman", "info", "--format", "{{.Host.Security.Rootless}}"), {}
+    )
+
+
+def podman_oci_runtime_spec() -> CommandSpec:
+    return CommandSpec(
+        ("podman", "info", "--format", "{{.Host.OCIRuntime.Name}}"), {}
+    )
+
+
+def podman_connections_spec() -> CommandSpec:
+    return CommandSpec(
+        ("podman", "system", "connection", "list", "--format", "json"), {}
     )
 
 
@@ -664,13 +754,16 @@ def run_command(
         text=True,
         check=check,
         capture_output=capture_output,
+        pass_fds=spec.pass_fds,
     )
 
 
 def run_command_supervised(
     spec: CommandSpec,
-    gateway: EgressBrokerRuntime,
-    egress: EgressRuntimeMount,
+    gateway: EgressBrokerRuntime | None,
+    egress: EgressRuntimeMount | None,
+    family_runtime=None,
+    family_mount: FamilyRuntimeMount | None = None,
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.update(spec.environment)
@@ -689,11 +782,53 @@ def run_command_supervised(
     gateway_failed = False
     failure: BaseException | None = None
     try:
-        process = subprocess.Popen(spec.argv, env=environment, text=True)
+        launch_argv = spec.argv
+        if family_runtime is not None:
+            if family_mount is None:
+                raise FamilyRuntimeError("family runtime mount is unavailable")
+            family_runtime.validate_mount()
+            launch_argv = (
+                "/bin/sh",
+                "-c",
+                'kill -STOP $$; exec "$@"',
+                "agent-runtime",
+                *spec.argv,
+            )
+        process = subprocess.Popen(
+            launch_argv,
+            env=environment,
+            text=True,
+            pass_fds=spec.pass_fds,
+        )
+        if family_runtime is not None:
+            try:
+                stopped_pid, stopped_status = os.waitpid(process.pid, os.WUNTRACED)
+                if (
+                    stopped_pid != process.pid
+                    or not os.WIFSTOPPED(stopped_status)
+                    or os.WSTOPSIG(stopped_status) != signal.SIGSTOP
+                ):
+                    raise RuntimeError("family runtime launch handoff failed")
+                family_runtime.register_runtime(process.pid)
+            except BaseException:
+                try:
+                    os.kill(process.pid, signal.SIGKILL)
+                finally:
+                    try:
+                        process.wait(timeout=5)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                process = None
+                raise
+            os.kill(process.pid, signal.SIGCONT)
         while process.poll() is None and not interrupted:
-            if gateway.wait_failed(0.1):
+            if gateway is not None and gateway.wait_failed(0.1):
                 gateway_failed = True
                 break
+            if gateway is None:
+                time.sleep(0.1)
+            if family_runtime is not None:
+                family_runtime.check()
     except BaseException as error:
         failure = error
     finally:
@@ -705,17 +840,27 @@ def run_command_supervised(
         raise failure
     if gateway_failed or interrupted or failure is not None:
         _reap_process(process)
-        _stop_egress_container(egress)
-        if isinstance(failure, KeyboardInterrupt):
+        if egress is not None:
+            _stop_egress_container(egress)
+        elif family_mount is not None:
+            _stop_named_container(family_mount.container_name)
+        if failure is not None:
             raise failure
         raise EgressBrokerRuntimeError("egress gateway failed")
     try:
         returncode = process.wait(timeout=5)
     except (OSError, subprocess.TimeoutExpired):
         _reap_process(process)
-        _stop_egress_container(egress)
+        if egress is not None:
+            _stop_egress_container(egress)
+        elif family_mount is not None:
+            _stop_named_container(family_mount.container_name)
         raise EgressBrokerRuntimeError("egress gateway failed") from None
     if returncode != 0:
+        if egress is not None:
+            _stop_egress_container(egress)
+        elif family_mount is not None:
+            _stop_named_container(family_mount.container_name)
         raise subprocess.CalledProcessError(returncode, spec.argv)
     return subprocess.CompletedProcess(spec.argv, returncode)
 
@@ -736,7 +881,15 @@ def _reap_process(process: subprocess.Popen[str]) -> None:
 
 
 def _stop_egress_container(egress: EgressRuntimeMount) -> None:
-    stop = egress_runtime_stop_spec(egress)
+    _stop_named_container(egress.container_name)
+
+
+def _stop_named_container(container_name: str) -> None:
+    if re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,127}", container_name) is None:
+        raise EgressBrokerRuntimeError("runtime cleanup failed")
+    stop = CommandSpec(
+        ("podman", "stop", "--ignore", "--time=2", container_name), {}
+    )
     try:
         completed = subprocess.run(
             stop.argv,
@@ -749,7 +902,9 @@ def _stop_egress_container(egress: EgressRuntimeMount) -> None:
         completed = None
     if completed is not None and completed.returncode == 0:
         return
-    kill = egress_runtime_kill_spec(egress)
+    kill = CommandSpec(
+        ("podman", "kill", "--signal=KILL", container_name), {}
+    )
     try:
         completed = subprocess.run(
             kill.argv,

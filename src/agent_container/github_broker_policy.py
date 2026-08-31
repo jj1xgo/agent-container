@@ -2,6 +2,9 @@ from dataclasses import dataclass
 import re
 from typing import Iterable
 
+from agent_container.github_values import MAX_ISSUE_NUMBER as MAX_ISSUE_NUMBER
+from agent_container.github_values import validate_issue_number as validate_issue_number
+from agent_container.github_values import validate_repository_id
 from agent_container.state import Repository
 from agent_container.state import validate_project_id
 
@@ -18,7 +21,6 @@ ALLOWED_OPERATIONS = frozenset(
     }
 )
 MAX_PR_NUMBER = 2_147_483_647
-MAX_ISSUE_NUMBER = 2_147_483_647
 MAX_PR_TITLE_BYTES = 256
 MAX_PR_BODY_BYTES = 65_536
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
@@ -68,20 +70,6 @@ def validate_pr_number(value: int) -> int:
         raise ValueError("pull request number is invalid")
     if not 1 <= value <= MAX_PR_NUMBER:
         raise ValueError("pull request number is invalid")
-    return value
-
-
-def validate_issue_number(value: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError("issue number is invalid")
-    if not 1 <= value <= MAX_ISSUE_NUMBER:
-        raise ValueError("issue number is invalid")
-    return value
-
-
-def validate_repository_id(value: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ValueError("GitHub repository ID is invalid")
     return value
 
 

@@ -10,6 +10,8 @@ Development builds derive their version from Git as
 
 現在はPhase 3のGitHub App brokerを明示opt-inで利用できます。`0.x`の間はCLI、state配置、security boundaryが互換性なく変更される可能性があります。
 
+family repository向けには、開発用Appと分離したhost承認付きのfamily Issue作成brokerを利用できます。credentialをcontainerへ渡さず、Issue案をhostでpreviewし、requestごとの対話承認後だけ1件作成します。設定・unknown照合・rollbackは[Family Issue作成broker運用ガイド](docs/family-issue-create-broker.md)、実環境のgateは[smoke test](docs/family-issue-create-broker-smoke-test.md)を参照してください。
+
 ## 最短で使う
 
 必要なsoftwareを準備したLinux hostで、repositoryをcloneしてsetup scriptを実行します。引数は、agentに作業させるGitHub repositoryです。

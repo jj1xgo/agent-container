@@ -1,8 +1,12 @@
 from fnmatch import fnmatchcase
 from pathlib import Path
 import json
+import os
 import re
 import subprocess
+import shutil
+import sys
+from tempfile import TemporaryDirectory
 import unittest
 
 
@@ -20,6 +24,30 @@ def containerignore_includes(path: str, patterns: list[str]) -> bool:
 
 
 class ContainerImageContractTest(unittest.TestCase):
+    def test_runtime_launcher_closes_exact_fd_before_agent_exec(self) -> None:
+        with TemporaryDirectory() as temp:
+            descriptor = os.open(temp, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                launched = subprocess.run(
+                    (
+                        str(ROOT / "container/bin/agent-runtime-launcher"),
+                        f"--close-fd={descriptor}",
+                        "--",
+                        sys.executable,
+                        "-c",
+                        (
+                            "import os,sys; "
+                            "sys.exit(1 if os.path.exists('/proc/self/fd/' + sys.argv[1]) else 0)"
+                        ),
+                        str(descriptor),
+                    ),
+                    pass_fds=(descriptor,),
+                    check=False,
+                )
+            finally:
+                os.close(descriptor)
+        self.assertEqual(launched.returncode, 0)
+
     def test_image_installs_exact_managed_claude_handover_instructions(self) -> None:
         instructions_path = ROOT / "profiles/claude/CLAUDE.md"
         instructions = instructions_path.read_text(encoding="utf-8")
@@ -62,6 +90,7 @@ class ContainerImageContractTest(unittest.TestCase):
             "COPY --chmod=0644 profiles/claude/CLAUDE.md /etc/claude-code/CLAUDE.md",
             body,
         )
+        self.assertIn("RUN install -d -m 0755 /run/agent-family", body)
 
     def test_image_copies_exact_claude_managed_policy(self) -> None:
         settings_path = ROOT / "profiles/claude/managed-settings.json"
@@ -221,6 +250,10 @@ class ContainerImageContractTest(unittest.TestCase):
             body,
         )
         self.assertIn(
+            "COPY --chmod=0755 container/bin/agent-family /usr/local/bin/agent-family",
+            body,
+        )
+        self.assertIn(
             "COPY --chmod=0755 container/bin/agent-egress-adapter /usr/local/bin/agent-egress-adapter",
             body,
         )
@@ -228,6 +261,17 @@ class ContainerImageContractTest(unittest.TestCase):
             "COPY --chmod=0755 container/bin/agent-egress-runtime /usr/local/bin/agent-egress-runtime",
             body,
         )
+        self.assertIn(
+            "COPY --chmod=0755 container/bin/agent-runtime-launcher "
+            "/usr/local/bin/agent-runtime-launcher",
+            body,
+        )
+        launcher = (ROOT / "container/bin/agent-runtime-launcher").read_text(
+            "utf-8"
+        )
+        self.assertIn("os.close", launcher)
+        self.assertIn("os.execvp", launcher)
+        self.assertNotIn("os.environ", launcher)
         self.assertIn(
             "COPY container/profile.d/10-agent-node.sh /etc/profile.d/10-agent-node.sh",
             body,
@@ -266,6 +310,22 @@ class ContainerImageContractTest(unittest.TestCase):
             broker_wrapper,
         )
 
+        family_wrapper = (ROOT / "container/bin/agent-family").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("agent_container.family_intake_client", family_wrapper)
+        self.assertIn("main()", family_wrapper)
+        self.assertNotIn("agentctl", family_wrapper)
+        self.assertNotIn("approve", family_wrapper)
+        self.assertNotIn("credential", family_wrapper)
+
+    def test_image_omits_family_approval_and_credential_material(self) -> None:
+        body = (ROOT / "Containerfile").read_text(encoding="utf-8")
+
+        self.assertNotIn("agentctl family", body)
+        self.assertNotIn("private-key.pem", body)
+        self.assertNotIn("family-app", body)
+
     def test_image_creates_fixed_agent_identity(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
 
@@ -285,6 +345,14 @@ class ContainerImageContractTest(unittest.TestCase):
                 "!requirements-lint.txt",
                 "!src/",
                 "!src/**",
+                "src/agent_container/family_cli.py",
+                "src/agent_container/family_github_app.py",
+                "src/agent_container/family_issue_create.py",
+                "src/agent_container/family_state.py",
+                "src/agent_container/family_intake_broker.py",
+                "src/agent_container/family_intake_runtime.py",
+                "src/agent_container/family_intake_transport.py",
+                "src/agent_container/family_pending.py",
                 "!profiles/",
                 "!profiles/codex/",
                 "!profiles/codex/**",
@@ -298,6 +366,7 @@ class ContainerImageContractTest(unittest.TestCase):
                 "!container/bin/claude",
                 "!container/bin/git-remote-agent-broker",
                 "!container/bin/agent-handover",
+                "!container/bin/agent-runtime-launcher",
                 "!container/profile.d/",
                 "!container/profile.d/10-agent-node.sh",
                 "**/auth.json",
@@ -331,6 +400,88 @@ class ContainerImageContractTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertFalse(containerignore_includes(path, patterns))
 
+    def test_effective_image_source_set_excludes_host_only_family_modules(self) -> None:
+        patterns = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()
+        source_files = sorted((ROOT / "src/agent_container").rglob("*.py"))
+        included = {
+            path.relative_to(ROOT).as_posix()
+            for path in source_files
+            if containerignore_includes(str(path.relative_to(ROOT)), patterns)
+        }
+
+        self.assertTrue(
+            {
+                "src/agent_container/family_intake_client.py",
+                "src/agent_container/family_intake_protocol.py",
+                "src/agent_container/family_issue.py",
+            }.issubset(included)
+        )
+        self.assertEqual(
+            {
+                "src/agent_container/family_cli.py",
+                "src/agent_container/family_github_app.py",
+                "src/agent_container/family_state.py",
+                "src/agent_container/family_intake_broker.py",
+                "src/agent_container/family_intake_runtime.py",
+                "src/agent_container/family_intake_transport.py",
+                "src/agent_container/family_pending.py",
+            }
+            & included,
+            set(),
+        )
+        image_source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in source_files
+            if path.relative_to(ROOT).as_posix() in included
+        )
+        self.assertNotIn("family_app_file", image_source)
+        self.assertNotIn("family_private_key_file", image_source)
+        self.assertNotIn("FamilyInstallationTokenProvider", image_source)
+        for module in ("agentctl.py", "podman.py"):
+            source = (ROOT / "src/agent_container" / module).read_text("utf-8")
+            top_level = source.split("\ndef ", 1)[0]
+            self.assertNotIn(
+                "from agent_container.family_state import", top_level
+            )
+            self.assertNotIn(
+                "from agent_container.family_intake_runtime import", top_level
+            )
+
+    def test_effective_image_tree_imports_host_entrypoints_without_host_modules(self) -> None:
+        patterns = (ROOT / ".containerignore").read_text("utf-8").splitlines()
+        with TemporaryDirectory() as temp:
+            target = Path(temp) / "src" / "agent_container"
+            target.mkdir(parents=True)
+            for source in (ROOT / "src/agent_container").glob("*.py"):
+                relative = source.relative_to(ROOT).as_posix()
+                if containerignore_includes(relative, patterns):
+                    shutil.copy2(source, target / source.name)
+            for forbidden in (
+                "family_state.py",
+                "family_intake_runtime.py",
+                "family_intake_broker.py",
+                "family_intake_transport.py",
+                "family_pending.py",
+            ):
+                self.assertFalse((target / forbidden).exists())
+            probe = subprocess.run(
+                (
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    (
+                        "import sys; sys.path.insert(0, 'src'); "
+                        "import agent_container.agentctl; "
+                        "import agent_container.podman"
+                    ),
+                ),
+                cwd=temp,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual((probe.returncode, probe.stderr), (0, ""))
+
     def test_containerignore_includes_every_tracked_copy_input(self) -> None:
         patterns = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()
         tracked = subprocess.run(
@@ -353,4 +504,16 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertTrue(tracked)
         for path in tracked:
             with self.subTest(path=path):
-                self.assertTrue(containerignore_includes(path, patterns))
+                if path in {
+                    "src/agent_container/family_cli.py",
+                    "src/agent_container/family_github_app.py",
+                    "src/agent_container/family_issue_create.py",
+                    "src/agent_container/family_state.py",
+                    "src/agent_container/family_intake_broker.py",
+                    "src/agent_container/family_intake_runtime.py",
+                    "src/agent_container/family_intake_transport.py",
+                    "src/agent_container/family_pending.py",
+                }:
+                    self.assertFalse(containerignore_includes(path, patterns))
+                else:
+                    self.assertTrue(containerignore_includes(path, patterns))

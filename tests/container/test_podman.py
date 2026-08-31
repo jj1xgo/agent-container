@@ -1,7 +1,10 @@
 from pathlib import Path
 import os
 import signal
+import socket
+import stat
 import subprocess
+from tempfile import TemporaryDirectory
 import unittest
 from unittest import mock
 
@@ -29,12 +32,15 @@ from agent_container.podman import podman_stats_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.podman import run_command_supervised
+from agent_container.family_intake_runtime import FamilyRuntimeMount
+from agent_container.family_intake_runtime import FamilyIntakeRuntime
 from agent_container.egress_broker_runtime import EgressBrokerRuntimeError
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
 from agent_container.egress_broker_runtime import EgressRuntimeMount
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.state import Repository
 from agent_container.state import StateLayout
+from agent_container.state import github_broker_project_label
 
 
 IMAGE = "localhost/agent-container:dev"
@@ -43,6 +49,397 @@ HANDOVER_BROKER = HandoverRuntimeMount(Path("/state/handover-broker/one"))
 
 
 class PodmanCommandTest(unittest.TestCase):
+    def test_preserved_fd_reaches_fake_podman_and_oci_child(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake_podman = root / "fake-podman"
+            fake_podman.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in --preserve-fd=*) fd=${1#*=} ;; *) exit 81 ;; esac\n"
+                "exec python3 -c 'import os,stat,sys; "
+                "assert stat.S_ISSOCK(os.fstat(int(sys.argv[1])).st_mode)' \"$fd\"\n",
+                encoding="ascii",
+            )
+            fake_podman.chmod(0o755)
+            socket_path = root / "intake.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(socket_path))
+            descriptor = os.open(
+                socket_path,
+                getattr(os, "O_PATH", os.O_RDONLY) | os.O_NOFOLLOW,
+            )
+            family = mock.create_autospec(FamilyIntakeRuntime, instance=True)
+            mount = mock.create_autospec(FamilyRuntimeMount, instance=True)
+            mount.container_name = "agent-family-safe"
+            try:
+                self.assertTrue(stat.S_ISSOCK(os.fstat(descriptor).st_mode))
+                with self.assertRaises((NotADirectoryError, OSError)):
+                    os.open("..", os.O_RDONLY, dir_fd=descriptor)
+                completed = run_command_supervised(
+                    CommandSpec(
+                        (str(fake_podman), f"--preserve-fd={descriptor}"),
+                        {},
+                        (descriptor,),
+                    ),
+                    None,
+                    None,
+                    family,
+                    mount,
+                )
+            finally:
+                os.close(descriptor)
+                listener.close()
+
+        self.assertEqual(completed.returncode, 0)
+
+    def test_family_supervision_registers_stopped_runtime_before_resume(self) -> None:
+        events = []
+
+        class Process:
+            pid = 4321
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        family = mock.create_autospec(FamilyIntakeRuntime, instance=True)
+        family.check.return_value = None
+        family.validate_mount.side_effect = lambda: events.append("revalidated")
+        gateway = mock.Mock()
+        gateway.wait_failed.return_value = False
+        egress = EgressRuntimeMount(
+            Path("/state/egress/codex"), "agent-container", "codex"
+        )
+        family_mount = mock.create_autospec(FamilyRuntimeMount, instance=True)
+        family_mount.container_name = "agent-family-safe"
+        with mock.patch(
+            "agent_container.podman.subprocess.Popen", return_value=Process()
+        ) as popen, mock.patch(
+            "agent_container.podman.os.waitpid",
+            side_effect=lambda pid, flags: events.append(("stopped", pid, flags))
+            or (pid, (signal.SIGSTOP << 8) | 0x7F),
+        ), mock.patch(
+            "agent_container.podman.os.kill",
+            side_effect=lambda pid, signum: events.append(("signal", pid, signum)),
+        ):
+            family.register_runtime.side_effect = lambda pid: events.append(
+                ("registered", pid)
+            )
+            result = run_command_supervised(
+                CommandSpec(("podman", "run", "image"), {}, (77,)),
+                gateway,
+                egress,
+                family,
+                family_mount,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            events,
+            [
+                "revalidated",
+                ("stopped", 4321, os.WUNTRACED),
+                ("registered", 4321),
+                ("signal", 4321, signal.SIGCONT),
+            ],
+        )
+        self.assertEqual(
+            popen.call_args.args[0][:4],
+            ("/bin/sh", "-c", 'kill -STOP $$; exec "$@"', "agent-runtime"),
+        )
+        self.assertEqual(popen.call_args.kwargs["pass_fds"], (77,))
+
+    def test_family_registration_failure_kills_stopped_runtime_without_resume(self) -> None:
+        class Process:
+            pid = 4321
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.returncode = -signal.SIGKILL
+                return self.returncode
+
+        family = mock.create_autospec(FamilyIntakeRuntime, instance=True)
+        family_mount = mock.create_autospec(FamilyRuntimeMount, instance=True)
+        family_mount.container_name = "agent-family-safe"
+        family.register_runtime.side_effect = RuntimeError("registration failed")
+        signals = []
+        with mock.patch(
+            "agent_container.podman.subprocess.Popen", return_value=Process()
+        ), mock.patch(
+            "agent_container.podman.os.waitpid",
+            return_value=(4321, (signal.SIGSTOP << 8) | 0x7F),
+        ), mock.patch(
+            "agent_container.podman.os.kill",
+            side_effect=lambda pid, signum: signals.append((pid, signum)),
+        ), self.assertRaises(RuntimeError):
+            run_command_supervised(
+                CommandSpec(("podman", "run", "image"), {}),
+                mock.Mock(),
+                EgressRuntimeMount(
+                    Path("/state/egress/codex"), "agent-container", "codex"
+                ),
+                family,
+                family_mount,
+            )
+
+        self.assertEqual(signals, [(4321, signal.SIGKILL)])
+
+    def test_family_health_failure_stops_then_kills_exact_named_container(self) -> None:
+        class Process:
+            pid = 4321
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                self.returncode = -signal.SIGKILL
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    raise subprocess.TimeoutExpired(("podman", "run"), timeout)
+                return self.returncode
+
+        family = mock.create_autospec(FamilyIntakeRuntime, instance=True)
+        family.check.side_effect = RuntimeError("broker failed")
+        family_mount = mock.create_autospec(FamilyRuntimeMount, instance=True)
+        family_mount.container_name = "agent-family-safe"
+        cleanups = []
+        with mock.patch(
+            "agent_container.podman.subprocess.Popen", return_value=Process()
+        ), mock.patch(
+            "agent_container.podman.os.waitpid",
+            return_value=(4321, (signal.SIGSTOP << 8) | 0x7F),
+        ), mock.patch("agent_container.podman.os.kill"), mock.patch(
+            "agent_container.podman.time.sleep"
+        ) as slept, mock.patch(
+            "agent_container.podman.subprocess.run",
+            side_effect=lambda argv, **_kwargs: cleanups.append(tuple(argv))
+            or subprocess.CompletedProcess(argv, 1 if len(cleanups) == 1 else 0),
+        ), self.assertRaisesRegex(RuntimeError, "broker failed"):
+            run_command_supervised(
+                CommandSpec(("podman", "run", "image"), {}),
+                None,
+                None,
+                family,
+                family_mount,
+            )
+
+        self.assertEqual(slept.call_args.args, (0.1,))
+        self.assertEqual(
+            cleanups,
+            [
+                ("podman", "stop", "--ignore", "--time=2", "agent-family-safe"),
+                ("podman", "kill", "--signal=KILL", "agent-family-safe"),
+            ],
+        )
+
+    def test_family_runtime_mount_is_exactly_bounded_for_both_agents(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        handover = Path("/handovers/agent-container")
+        capability = "A" * 43
+        run_dir = (
+            Path("/state/family/intake/r")
+            / github_broker_project_label(layout.project_id)
+            / "0123456789abcdef"
+        )
+        family = FamilyRuntimeMount(
+            run_dir,
+            capability,
+            {
+                "AGENT_FAMILY_SOCKET": "/run/agent-family/intake.sock",
+                "AGENT_FAMILY_CAPABILITY": capability,
+            },
+        )
+        object.__setattr__(family, "_directory_descriptor", 77)
+        object.__setattr__(family, "_socket_descriptor", 78)
+
+        with mock.patch.object(FamilyRuntimeMount, "revalidate"):
+            specs = (
+                run_codex_spec(
+                    layout, handover, IMAGE, os.getuid(), os.getgid(),
+                    family_mount=family,
+                ),
+                run_claude_spec(
+                    layout, handover, IMAGE, os.getuid(), os.getgid(),
+                    HANDOVER_BROKER, family_mount=family,
+                ),
+            )
+        for spec in specs:
+            with self.subTest(agent=spec.argv[-1]):
+                self.assertEqual(
+                    spec.argv.count(
+                        "type=bind,src=/proc/self/fd/78,"
+                        "dst=/run/agent-family/intake.sock"
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    spec.argv.count(
+                        "AGENT_FAMILY_SOCKET=/run/agent-family/intake.sock"
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    spec.argv.count(f"AGENT_FAMILY_CAPABILITY={capability}"), 1
+                )
+                self.assertEqual(spec.argv.count("--preserve-fd=78"), 1)
+                self.assertEqual(spec.pass_fds, (78,))
+                self.assertLess(
+                    spec.argv.index("--preserve-fd=78"), spec.argv.index(IMAGE)
+                )
+                rendered = " ".join(spec.argv)
+                for forbidden in (
+                    "family/app.json", "private-key", "installation-token",
+                    "family/roadmap", "repository_id", "/pending",
+                    "family issue approve",
+                ):
+                    self.assertNotIn(forbidden, rendered)
+
+    def test_family_runtime_mount_rejects_unsafe_or_inconsistent_values(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        handover = Path("/handovers/agent-container")
+        capability = "A" * 43
+        family = object.__new__(FamilyRuntimeMount)
+        object.__setattr__(family, "socket_dir", Path("relative"))
+        object.__setattr__(family, "capability", capability)
+        object.__setattr__(family, "environment", {
+            "AGENT_FAMILY_SOCKET": "/run/agent-family/intake.sock",
+            "AGENT_FAMILY_CAPABILITY": capability,
+        })
+        cases = (family,)
+        for family in cases:
+            with self.assertRaises(ValueError):
+                run_codex_spec(
+                    layout, handover, IMAGE, os.getuid(), os.getgid(),
+                    family_mount=family,
+                )
+
+    def test_nonzero_family_runtime_stops_exact_container_before_reraising(self) -> None:
+        class Process:
+            pid = 4321
+            returncode = 9
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        family = mock.create_autospec(FamilyIntakeRuntime, instance=True)
+        mount = mock.create_autospec(FamilyRuntimeMount, instance=True)
+        mount.container_name = "agent-family-safe"
+        cleanups = []
+        with mock.patch(
+            "agent_container.podman.subprocess.Popen", return_value=Process()
+        ), mock.patch(
+            "agent_container.podman.os.waitpid",
+            return_value=(4321, (signal.SIGSTOP << 8) | 0x7F),
+        ), mock.patch("agent_container.podman.os.kill"), mock.patch(
+            "agent_container.podman.subprocess.run",
+            side_effect=lambda argv, **_kwargs: cleanups.append(tuple(argv))
+            or subprocess.CompletedProcess(argv, 0),
+        ), self.assertRaises(subprocess.CalledProcessError) as raised:
+            run_command_supervised(
+                CommandSpec(("podman", "run", "image"), {}),
+                None,
+                None,
+                family,
+                mount,
+            )
+
+        self.assertEqual(raised.exception.returncode, 9)
+        self.assertEqual(
+            cleanups,
+            [("podman", "stop", "--ignore", "--time=2", "agent-family-safe")],
+        )
+
+    def test_nonzero_family_with_egress_cleans_only_egress_container(self) -> None:
+        class Process:
+            pid = 4321
+            returncode = 7
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        family = mock.create_autospec(FamilyIntakeRuntime, instance=True)
+        mount = mock.create_autospec(FamilyRuntimeMount, instance=True)
+        mount.container_name = "agent-family-wrong-target"
+        egress = EgressRuntimeMount(
+            Path("/state/egress/codex"), "agent-container", "codex"
+        )
+        cleanups = []
+        with mock.patch(
+            "agent_container.podman.subprocess.Popen", return_value=Process()
+        ), mock.patch(
+            "agent_container.podman.os.waitpid",
+            return_value=(4321, (signal.SIGSTOP << 8) | 0x7F),
+        ), mock.patch("agent_container.podman.os.kill"), mock.patch(
+            "agent_container.podman.subprocess.run",
+            side_effect=lambda argv, **_kwargs: cleanups.append(tuple(argv))
+            or subprocess.CompletedProcess(argv, 0),
+        ), self.assertRaises(subprocess.CalledProcessError):
+            run_command_supervised(
+                CommandSpec(("podman", "run", "image"), {}),
+                mock.Mock(wait_failed=lambda _timeout: False),
+                egress,
+                family,
+                mount,
+            )
+
+        self.assertEqual(
+            cleanups,
+            [("podman", "stop", "--ignore", "--time=2", egress.container_name)],
+        )
+
+    def test_family_cleanup_stop_and_kill_failure_is_fatal(self) -> None:
+        class Process:
+            pid = 4321
+            returncode = 5
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        family = mock.create_autospec(FamilyIntakeRuntime, instance=True)
+        mount = mock.create_autospec(FamilyRuntimeMount, instance=True)
+        mount.container_name = "agent-family-safe"
+        cleanups = []
+        with mock.patch(
+            "agent_container.podman.subprocess.Popen", return_value=Process()
+        ), mock.patch(
+            "agent_container.podman.os.waitpid",
+            return_value=(4321, (signal.SIGSTOP << 8) | 0x7F),
+        ), mock.patch("agent_container.podman.os.kill"), mock.patch(
+            "agent_container.podman.subprocess.run",
+            side_effect=lambda argv, **_kwargs: cleanups.append(tuple(argv))
+            or subprocess.CompletedProcess(argv, 1),
+        ), self.assertRaises(EgressBrokerRuntimeError):
+            run_command_supervised(
+                CommandSpec(("podman", "run", "image"), {}),
+                None,
+                None,
+                family,
+                mount,
+            )
+
+        self.assertEqual(len(cleanups), 2)
+        self.assertTrue(all(call[-1] == "agent-family-safe" for call in cleanups))
+
     def test_supervised_process_stops_named_container_when_cli_cannot_be_reaped(
         self,
     ) -> None:
@@ -297,11 +694,14 @@ class PodmanCommandTest(unittest.TestCase):
                     self.assertEqual(spec.argv.count(f"{variable}={value}"), 1)
                 image_index = spec.argv.index(IMAGE)
                 self.assertEqual(
-                    spec.argv[image_index + 1 : image_index + 3],
-                    ("agent-egress-runtime", "--"),
+                    spec.argv[image_index + 1 : image_index + 5],
+                    (
+                        "agent-runtime-launcher", "--",
+                        "agent-egress-runtime", "--",
+                    ),
                 )
                 original = "codex" if agent == "codex" else "python3"
-                self.assertEqual(spec.argv[image_index + 3], original)
+                self.assertEqual(spec.argv[image_index + 5], original)
 
     def test_egress_mount_rejects_relative_or_wrong_project_agent(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")
@@ -826,9 +1226,11 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertNotIn("/vault,dst=", joined)
         self.assertNotIn("token", joined.lower())
         self.assertEqual(
-            spec.argv[-5:],
+            spec.argv[-7:],
             (
                 IMAGE,
+                "agent-runtime-launcher",
+                "--",
                 "codex",
                 "--approve-for-me",
                 "-c",
@@ -953,9 +1355,11 @@ class PodmanCommandTest(unittest.TestCase):
         self.assertNotIn("/vault/handovers/other-project", joined)
         self.assertNotIn("capability-secret-value", joined)
         self.assertEqual(
-            spec.argv[-7:],
+            spec.argv[-9:],
             (
                 IMAGE,
+                "agent-runtime-launcher",
+                "--",
                 "python3",
                 "-m",
                 "agent_container.claude_launcher",

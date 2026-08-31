@@ -221,7 +221,6 @@ class StateLayout:
     def egress_broker_audit_file(self) -> Path:
         return self.egress_broker_root / "audit/events.jsonl"
 
-
 def ensure_private_directory(path: Path, create: bool = False) -> Path:
     if path.is_symlink():
         raise ValueError(f"directory must not be a symlink: {path}")
