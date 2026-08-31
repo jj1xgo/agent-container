@@ -18,6 +18,7 @@ from agent_container.family_pending import initialize_pending_store
 from agent_container.family_state import FamilyStateLayout
 from agent_container.family_state import load_family_binding
 from agent_container.family_runtime_mount import FamilyRuntimeMount
+from agent_container.family_runtime_mount import FamilyRuntimeError
 from agent_container.state import ensure_private_directory
 
 
@@ -35,7 +36,7 @@ _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 
 
-class FamilyIntakeRuntimeError(Exception):
+class FamilyIntakeRuntimeError(FamilyRuntimeError):
     pass
 
 

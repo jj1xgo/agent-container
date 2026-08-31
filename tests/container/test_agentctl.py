@@ -10,6 +10,7 @@ import subprocess
 import threading
 from tempfile import TemporaryDirectory
 import unittest
+from unittest import mock
 from unittest.mock import patch
 
 import agent_container.agentctl as agentctl
@@ -27,6 +28,7 @@ from agent_container.family_issue_create import CreatedIssue
 from agent_container.family_issue_create import SendNotStarted
 from agent_container.family_issue_create import SendOutcomeUnknown
 from agent_container.family_intake_runtime import FamilyRuntimeMount
+from agent_container.family_runtime_mount import FamilyRuntimeError
 from agent_container.family_pending import create_pending
 from agent_container.family_pending import append_family_audit
 from agent_container.family_pending import load_pending
@@ -4239,6 +4241,234 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 root,
                 remote_url="https://github.com/example/other.git",
             )
+
+
+class AgentCtlFamilyRuntimeTest(unittest.TestCase):
+    def _state(self, temp: str) -> tuple[Path, dict[str, str]]:
+        helper = AgentCtlRunDoctorTest()
+        root, _handover = helper._runtime_state(temp)
+        return root, {"AGENT_CONTAINER_HOME": str(root)}
+
+    def _bind(self, root: Path) -> FamilyStateLayout:
+        layout = FamilyStateLayout(root, "agent-container")
+        for directory in (
+            layout.family_root,
+            layout.family_root / "projects",
+            layout.family_project_dir,
+        ):
+            directory.mkdir(mode=0o700)
+        write_family_binding(
+            layout.family_binding_file,
+            FamilyBinding(Repository.parse("family/roadmap"), 42),
+        )
+        return layout
+
+    def _run(
+        self,
+        root: Path,
+        *,
+        agent: str,
+        factory=None,
+        supervisor=None,
+        builders=None,
+    ) -> tuple[int, list[CommandSpec], StringIO]:
+        calls: list[CommandSpec] = []
+        stderr = StringIO()
+        argv = ["run", "agent-container", "--agent", agent]
+        with patch(
+            "agent_container.agentctl.HandoverBrokerRuntime.create",
+            return_value=nullcontext(
+                HandoverRuntimeMount(root / "handover-broker/runtime")
+            ),
+        ):
+            result = main(
+                argv,
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=lambda spec: calls.append(spec)
+                or successful_podman_result(spec),
+                git_remote_reader=lambda _path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                runtime_spec_builders=builders,
+                family_runtime_factory=factory,
+                runtime_supervisor=supervisor,
+                stdout=StringIO(),
+                stderr=stderr,
+            )
+        return result, calls, stderr
+
+    def test_unbound_codex_and_claude_never_start_family_runtime(self) -> None:
+        for agent in ("codex", "claude"):
+            with self.subTest(agent=agent), TemporaryDirectory() as temp:
+                root, _environment = self._state(temp)
+                built = []
+
+                def builder(*args, **kwargs):
+                    built.append((args, kwargs))
+                    return CommandSpec(("podman", "run", agent), {})
+
+                result, _calls, stderr = self._run(
+                    root,
+                    agent=agent,
+                    factory=lambda _layout: self.fail("family runtime started"),
+                    builders={agent: builder},
+                )
+
+                self.assertEqual((result, stderr.getvalue()), (0, ""))
+                self.assertEqual(len(built), 1)
+                self.assertNotIn("family_mount", built[0][1])
+
+    def test_bound_codex_and_claude_use_one_supervised_runtime_and_cleanup(self) -> None:
+        for agent in ("codex", "claude"):
+            with self.subTest(agent=agent), TemporaryDirectory() as temp:
+                root, _environment = self._state(temp)
+                layout = self._bind(root)
+                capability = "A" * 43
+                mount = FamilyRuntimeMount(
+                    layout.family_intake_run_root / "0123456789abcdef",
+                    capability,
+                    {
+                        "AGENT_FAMILY_SOCKET": "/run/agent-family/intake.sock",
+                        "AGENT_FAMILY_CAPABILITY": capability,
+                    },
+                )
+                events = []
+
+                class Runtime:
+                    def __enter__(self):
+                        events.append("start")
+                        return mount
+
+                    def __exit__(self, *_args):
+                        events.append("cleanup")
+
+                    def register_runtime(self, pid):
+                        events.append(("register", pid))
+
+                    def check(self):
+                        events.append("health")
+
+                runtime = Runtime()
+
+                def builder(*args, **kwargs):
+                    self.assertIs(kwargs["family_mount"], mount)
+                    events.append(("spec", agent))
+                    return CommandSpec(("podman", "run", agent), {})
+
+                def supervisor(spec, gateway, egress, observed_runtime):
+                    self.assertIs(observed_runtime, runtime)
+                    events.append(("supervise", spec.argv[-1], gateway, egress))
+                    observed_runtime.register_runtime(4321)
+                    observed_runtime.check()
+                    return subprocess.CompletedProcess(spec.argv, 0)
+
+                result, calls, stderr = self._run(
+                    root,
+                    agent=agent,
+                    factory=lambda _layout: runtime,
+                    supervisor=supervisor,
+                    builders={agent: builder},
+                )
+
+                self.assertEqual((result, stderr.getvalue()), (0, ""))
+                self.assertEqual(
+                    events,
+                    [
+                        "start", ("spec", agent),
+                        ("supervise", agent, None, None),
+                        ("register", 4321), "health", "cleanup",
+                    ],
+                )
+                self.assertFalse(any(call.argv == ("podman", "run", agent) for call in calls))
+
+    def test_startup_and_spec_failure_cleanup_without_fallback(self) -> None:
+        for stage in ("startup", "spec"):
+            with self.subTest(stage=stage), TemporaryDirectory() as temp:
+                root, _environment = self._state(temp)
+                self._bind(root)
+                events = []
+
+                class Runtime:
+                    def __enter__(self):
+                        events.append("start")
+                        if stage == "startup":
+                            raise FamilyRuntimeError("start failed")
+                        return mock.sentinel.mount
+
+                    def __exit__(self, *_args):
+                        events.append("cleanup")
+
+                def builder(*_args, **_kwargs):
+                    events.append("spec")
+                    raise ValueError("spec failed")
+
+                result, calls, stderr = self._run(
+                    root,
+                    agent="codex",
+                    factory=lambda _layout: Runtime(),
+                    supervisor=lambda *_args: self.fail("supervisor called"),
+                    builders={"codex": builder},
+                )
+
+                self.assertEqual(result, 1)
+                self.assertNotEqual(stderr.getvalue(), "")
+                self.assertFalse(any(call.argv[:2] == ("podman", "run") for call in calls))
+                self.assertEqual(
+                    events,
+                    ["start"] if stage == "startup" else ["start", "spec", "cleanup"],
+                )
+
+    def test_register_health_and_supervision_failure_cleanup_without_fallback(self) -> None:
+        for stage in ("register", "health", "supervision"):
+            with self.subTest(stage=stage), TemporaryDirectory() as temp:
+                root, _environment = self._state(temp)
+                self._bind(root)
+                events = []
+
+                class Runtime:
+                    def __enter__(self):
+                        events.append("start")
+                        return mock.sentinel.mount
+
+                    def __exit__(self, *_args):
+                        events.append("cleanup")
+
+                    def register_runtime(self, _pid):
+                        events.append("register")
+                        if stage == "register":
+                            raise FamilyRuntimeError("register failed")
+
+                    def check(self):
+                        events.append("health")
+                        if stage == "health":
+                            raise FamilyRuntimeError("health failed")
+
+                runtime = Runtime()
+
+                def supervisor(spec, _gateway, _egress, observed):
+                    observed.register_runtime(4321)
+                    if stage != "register":
+                        observed.check()
+                    if stage == "supervision":
+                        raise FamilyRuntimeError("supervision failed")
+                    return subprocess.CompletedProcess(spec.argv, 0)
+
+                result, calls, stderr = self._run(
+                    root,
+                    agent="codex",
+                    factory=lambda _layout: runtime,
+                    supervisor=supervisor,
+                    builders={
+                        "codex": lambda *_args, **_kwargs: CommandSpec(
+                            ("podman", "run", "codex"), {}
+                        )
+                    },
+                )
+
+                self.assertEqual(result, 1)
+                self.assertNotEqual(stderr.getvalue(), "")
+                self.assertEqual(events[-1], "cleanup")
+                self.assertFalse(any(call.argv == ("podman", "run", "codex") for call in calls))
 
 
 class AgentCtlMigrationTest(unittest.TestCase):

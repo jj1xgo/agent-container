@@ -42,6 +42,7 @@ from agent_container.github_broker_runtime import write_broker_policy
 from agent_container.handover_broker_runtime import HandoverBrokerRuntime
 from agent_container.handover_broker_runtime import HandoverBrokerRuntimeError
 from agent_container.github_app import GitHubAppMetadata
+from agent_container.family_runtime_mount import FamilyRuntimeError
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_policy import validate_repository_id
 from agent_container.podman import CommandSpec
@@ -1854,6 +1855,9 @@ def main(
         return 1
     except EgressBrokerRuntimeError:
         print("error: egress gateway failed", file=stderr)
+        return 1
+    except FamilyRuntimeError:
+        print("error: family intake runtime failed", file=stderr)
         return 1
     except (ValueError, PermissionError, FileNotFoundError) as error:
         print(f"error: {error}", file=stderr)
