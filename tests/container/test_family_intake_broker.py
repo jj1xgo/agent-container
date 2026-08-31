@@ -6,6 +6,8 @@ import unittest
 from unittest.mock import patch
 
 from agent_container.family_intake_broker import FamilyIntakeSession
+from agent_container.family_intake_broker import FamilyIntakeDenied
+from agent_container.family_intake_broker import FamilyIntakeInternalError
 from agent_container.family_intake_protocol import FamilyIntakeRequest
 from agent_container.family_intake_protocol import FamilyIntakeResponse
 from agent_container.family_issue import CanonicalFamilyIssue
@@ -58,20 +60,111 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
         return FamilyIntakeRequest(**values)  # type: ignore[arg-type]
 
     def session(self, **changes: object) -> FamilyIntakeSession:
+        register = changes.pop("register", True)
         values = {
             "project_id": "demo",
             "capability": CAPABILITY,
             "expires_at": NOW + 60,
-            "peer_pid": PEER_PID,
             "store": self.store,
             "binding_path": self.binding,
             "audit_path": self.audit,
             "owner_uid": os.getuid(),
             "clock": lambda: NOW,
             "random_bytes": lambda size: b"\x11" * size,
+            "process_reader": lambda pid: (
+                (1, 100, os.getuid())
+                if pid == PEER_PID
+                else (_ for _ in ()).throw(ProcessLookupError(pid))
+            ),
         }
         values.update(changes)
-        return FamilyIntakeSession(**values)  # type: ignore[arg-type]
+        session = FamilyIntakeSession(**values)  # type: ignore[arg-type]
+        if register:
+            session.register_runtime(PEER_PID)
+        return session
+
+    def unarmed_session(self, identities: dict[int, tuple[int, int, int]]):
+        def read_process(pid: int) -> tuple[int, int, int]:
+            try:
+                return identities[pid]
+            except KeyError:
+                raise ProcessLookupError(pid) from None
+
+        return FamilyIntakeSession(
+            "demo",
+            CAPABILITY,
+            NOW + 60,
+            store=self.store,
+            binding_path=self.binding,
+            audit_path=self.audit,
+            owner_uid=os.getuid(),
+            clock=lambda: NOW,
+            random_bytes=lambda size: b"\x11" * size,
+            process_reader=read_process,
+        )
+
+    # Break caught: startup guessing a future client PID instead of arming once post-spawn.
+    def test_starts_unarmed_then_registers_one_runtime_root_once(self) -> None:
+        identities = {400: (1, 100, os.getuid())}
+        session = self.unarmed_session(identities)
+
+        with self.assertRaises(ValueError):
+            session.validate_peer(400, os.getuid())
+        session.register_runtime(400)
+        session.validate_peer(400, os.getuid())
+        with self.assertRaises(ValueError):
+            session.register_runtime(400)
+
+    # Break caught: a sibling process using the same socket/capability as the runtime tree.
+    def test_accepts_stable_descendant_chain_and_rejects_unrelated_sibling(self) -> None:
+        identities = {
+            400: (1, 100, os.getuid()),
+            401: (400, 101, os.getuid()),
+            402: (401, 102, os.getuid()),
+            403: (1, 103, os.getuid()),
+        }
+        session = self.unarmed_session(identities)
+        session.register_runtime(400)
+
+        session.validate_peer(402, os.getuid())
+        with self.assertRaises(ValueError):
+            session.validate_peer(403, os.getuid())
+
+    # Break caught: dead roots or PID reuse authenticating a new process tree.
+    def test_registration_and_peer_validation_reject_dead_or_reused_root(self) -> None:
+        identities = {400: (1, 100, os.getuid())}
+        dead_identities: dict[int, tuple[int, int, int]] = {}
+        dead = self.unarmed_session(dead_identities)
+        with self.assertRaises(ValueError):
+            dead.register_runtime(400)
+        dead_identities[400] = (1, 100, os.getuid())
+        with self.assertRaises(ValueError):
+            dead.register_runtime(400)
+        identities[400] = (1, 200, os.getuid())
+        session = self.unarmed_session(identities)
+        session.register_runtime(400)
+        identities[400] = (1, 201, os.getuid())
+        with self.assertRaises(ValueError):
+            session.validate_peer(400, os.getuid())
+
+    # Break caught: cycles or an unbounded process tree making authorization non-terminating.
+    def test_process_parent_traversal_is_bounded_and_cycle_safe(self) -> None:
+        identities = {400: (1, 100, os.getuid())}
+        identities.update(
+            {
+                pid: (pid - 1, pid, os.getuid())
+                for pid in range(401, 470)
+            }
+        )
+        session = self.unarmed_session(identities)
+        session.register_runtime(400)
+
+        with self.assertRaises(ValueError):
+            session.validate_peer(469, os.getuid())
+        identities[401] = (402, 101, os.getuid())
+        identities[402] = (401, 102, os.getuid())
+        with self.assertRaises(ValueError):
+            session.validate_peer(402, os.getuid())
 
     # Break caught: a successful intake exposing content instead of only a receipt.
     def test_persists_canonical_request_and_returns_only_fixed_pending_receipt(self) -> None:
@@ -108,6 +201,7 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
         )
         receipt_and_audit = repr(response) + self.audit.read_text("ascii")
         for forbidden in (
+            CAPABILITY,
             "Add export",
             "Portable copy",
             "No export exists",
@@ -198,10 +292,16 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
             "agent_container.family_intake_broker.create_pending",
             side_effect=persist_then_fail,
         ):
-            with self.assertRaises(OSError):
+            with self.assertRaises(FamilyIntakeInternalError) as raised:
                 session.handle(self.request())
 
+        self.assertEqual(str(raised.exception), "family intake persistence failed")
+        self.assertNotIn("private-persistence-marker", str(raised.exception))
+        self.assertTrue(session.failed)
         self.assertTrue(session.consumed)
+        self.assertEqual(len(list_pending(self.store)), 1)
+        with self.assertRaises(FamilyIntakeDenied):
+            session.handle(self.request())
         self.assertEqual(len(list_pending(self.store)), 1)
 
     # Break caught: an audit fsync ambiguity returning a replayable capability.
@@ -212,15 +312,31 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
             "agent_container.family_intake_broker.append_family_audit",
             side_effect=OSError("private-audit-marker"),
         ):
-            with self.assertRaises(OSError):
+            with self.assertRaises(FamilyIntakeInternalError) as raised:
                 session.handle(self.request())
 
+        self.assertEqual(str(raised.exception), "family intake persistence failed")
+        self.assertNotIn("private-audit-marker", str(raised.exception))
+        self.assertTrue(session.failed)
         self.assertTrue(session.consumed)
         self.assertEqual(len(list_pending(self.store)), 1)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(FamilyIntakeDenied):
             session.handle(self.request())
         self.assertEqual(len(list_pending(self.store)), 1)
-        with self.assertRaises(ValueError):
+
+    # Break caught: an ordinary request denial poisoning runtime supervision.
+    def test_ordinary_denial_is_typed_without_marking_internal_failure(self) -> None:
+        session = self.session()
+
+        with self.assertRaises(FamilyIntakeDenied):
+            session.handle(self.request(capability="x" * 43))
+
+        self.assertFalse(session.failed)
+        self.assertFalse(session.consumed)
+        response = session.handle(self.request())
+        self.assertEqual(response.status, "pending")
+        self.assertEqual(len(list_pending(self.store)), 1)
+        with self.assertRaises(FamilyIntakeDenied):
             session.handle(self.request())
         self.assertEqual(len(list_pending(self.store)), 1)
 
@@ -240,13 +356,13 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
         self.assertFalse(session.consumed)
 
     # Break caught: invalid project/session primitives creating an unbound store record.
-    def test_constructor_rejects_invalid_project_capability_expiry_and_pid(self) -> None:
+    def test_constructor_rejects_invalid_session_primitives_and_paths(self) -> None:
         cases = (
             {"project_id": "../other"},
             {"capability": "short"},
             {"expires_at": True},
-            {"peer_pid": 0},
             {"owner_uid": -1},
+            {"process_reader": None},
             {"store": self.store.parent / "other" / "pending"},
             {"binding_path": self.store.parent / "other-binding.json"},
         )

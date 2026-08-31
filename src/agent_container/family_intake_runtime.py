@@ -78,7 +78,6 @@ class FamilyRuntimeMount:
 @dataclass
 class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
     layout: FamilyStateLayout
-    peer_pid: int
     clock: Callable[[], int] = field(default=lambda: int(time.time()), repr=False)
     random_bytes: Callable[[int], bytes] = field(default=os.urandom, repr=False)
     session: FamilyIntakeSession | None = field(default=None, init=False)
@@ -89,7 +88,10 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
     )
     _thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
-    _error: BaseException | None = field(default=None, init=False, repr=False)
+    _error: bool = field(default=False, init=False, repr=False)
+    _failure_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
     _mount: FamilyRuntimeMount | None = field(default=None, init=False, repr=False)
     _run_parent_descriptor: int | None = field(default=None, init=False, repr=False)
     _run_descriptor: int | None = field(default=None, init=False, repr=False)
@@ -102,18 +104,15 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
     def create(
         cls,
         layout: FamilyStateLayout,
-        peer_pid: int,
         *,
         clock: Callable[[], int] = lambda: int(time.time()),
         random_bytes: Callable[[int], bytes] = os.urandom,
     ) -> "FamilyIntakeRuntime":
         if type(layout) is not FamilyStateLayout:
             raise ValueError("family intake runtime is invalid")
-        if type(peer_pid) is not int or peer_pid <= 0:
-            raise ValueError("family intake runtime is invalid")
         if not callable(clock) or not callable(random_bytes):
             raise ValueError("family intake runtime is invalid")
-        return cls(layout, peer_pid, clock, random_bytes)
+        return cls(layout, clock, random_bytes)
 
     def _create_run_directory(self) -> Path:
         ensure_private_directory(self.layout.root)
@@ -181,7 +180,6 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
                 self.layout.project_id,
                 capability,
                 observed_now + _CAPABILITY_TTL_SECONDS,
-                self.peer_pid,
                 store=self.layout.family_pending_dir,
                 binding_path=self.layout.family_binding_file,
                 audit_path=self.layout.family_audit_file,
@@ -257,6 +255,18 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
                 "family intake runtime failed to start"
             ) from None
 
+    def register_runtime(self, peer_pid: int) -> None:
+        if self.session is None or self._mount is None or self._stop.is_set():
+            raise FamilyIntakeRuntimeError(
+                "family intake runtime registration failed"
+            )
+        try:
+            self.session.register_runtime(peer_pid)
+        except ValueError:
+            raise FamilyIntakeRuntimeError(
+                "family intake runtime registration failed"
+            ) from None
+
     def _serve(self, listener: socket.socket) -> None:
         try:
             while not self._stop.is_set():
@@ -287,6 +297,9 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
                     with self._client_lock:
                         if self._client is client:
                             self._client = None
+                if self.session.failed:
+                    self._fail_runtime()
+                    break
                 if self.session.consumed:
                     self._stop.set()
                     try:
@@ -294,71 +307,95 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
                     except OSError:
                         pass
                     break
-        except BaseException as error:
+        except BaseException:
             if not self._stop.is_set():
-                self._error = error
+                self._fail_runtime()
+
+    def _interrupt_client(self) -> None:
+        with self._client_lock:
+            client = self._client
+            if client is not None:
+                try:
+                    client.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    def _fail_runtime(self) -> None:
+        with self._failure_lock:
+            self._error = True
+            self._stop.set()
+            if self._listener is not None:
+                try:
+                    self._listener.close()
+                except OSError:
+                    pass
+            self._interrupt_client()
 
     def _cleanup_artifacts(self) -> None:
         cleanup_failed = False
-        if self._run_descriptor is not None and self._socket_stat is not None:
-            try:
-                current = os.stat(
-                    "intake.sock",
-                    dir_fd=self._run_descriptor,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                pass
-            except OSError:
-                cleanup_failed = True
-            else:
-                if (
-                    _same_inode(current, self._socket_stat)
-                    and stat.S_ISSOCK(current.st_mode)
-                ):
+        try:
+            if self._run_descriptor is not None and self._socket_stat is not None:
+                try:
+                    current = os.stat(
+                        "intake.sock",
+                        dir_fd=self._run_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    cleanup_failed = True
+                else:
+                    if (
+                        _same_inode(current, self._socket_stat)
+                        and stat.S_ISSOCK(current.st_mode)
+                    ):
+                        try:
+                            os.unlink("intake.sock", dir_fd=self._run_descriptor)
+                        except OSError:
+                            cleanup_failed = True
+                    else:
+                        cleanup_failed = True
+
+            if (
+                not cleanup_failed
+                and self._run_parent_descriptor is not None
+                and self._run_id is not None
+                and self._run_stat is not None
+            ):
+                try:
+                    current_run = os.stat(
+                        self._run_id,
+                        dir_fd=self._run_parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    cleanup_failed = True
+                else:
+                    if _same_inode(current_run, self._run_stat) and _private_directory(
+                        current_run
+                    ):
+                        try:
+                            os.rmdir(self._run_id, dir_fd=self._run_parent_descriptor)
+                        except OSError:
+                            cleanup_failed = True
+                    else:
+                        cleanup_failed = True
+        finally:
+            for attribute in ("_run_descriptor", "_run_parent_descriptor"):
+                descriptor = getattr(self, attribute)
+                if descriptor is not None:
                     try:
-                        os.unlink("intake.sock", dir_fd=self._run_descriptor)
+                        os.close(descriptor)
                     except OSError:
                         cleanup_failed = True
-                else:
-                    cleanup_failed = True
-
-        if (
-            not cleanup_failed
-            and self._run_parent_descriptor is not None
-            and self._run_id is not None
-            and self._run_stat is not None
-        ):
-            try:
-                current_run = os.stat(
-                    self._run_id,
-                    dir_fd=self._run_parent_descriptor,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                pass
-            except OSError:
-                cleanup_failed = True
-            else:
-                if _same_inode(current_run, self._run_stat) and _private_directory(
-                    current_run
-                ):
-                    try:
-                        os.rmdir(self._run_id, dir_fd=self._run_parent_descriptor)
-                    except OSError:
-                        cleanup_failed = True
-                else:
-                    cleanup_failed = True
-
+                    finally:
+                        setattr(self, attribute, None)
+            self._cleanup_complete = True
         if cleanup_failed:
             raise ValueError("family intake cleanup failed")
-        if self._run_descriptor is not None:
-            os.close(self._run_descriptor)
-            self._run_descriptor = None
-        if self._run_parent_descriptor is not None:
-            os.close(self._run_parent_descriptor)
-            self._run_parent_descriptor = None
-        self._cleanup_complete = True
 
     def close(self) -> None:
         if self._cleanup_complete:
@@ -372,13 +409,7 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
                 self._listener.close()
             except OSError:
                 cleanup_failed = True
-        with self._client_lock:
-            client = self._client
-            if client is not None:
-                try:
-                    client.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
+        self._interrupt_client()
         if self._thread is not None:
             self._thread.join(timeout=_STOP_TIMEOUT_SECONDS)
             if self._thread.is_alive():
@@ -393,14 +424,14 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
             raise FamilyIntakeRuntimeError(
                 "family intake runtime cleanup failed"
             ) from None
-        if self._error is not None:
+        if self._error:
             raise FamilyIntakeRuntimeError("family intake runtime failed") from None
 
     def is_alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
     def check(self) -> None:
-        if self._error is not None or (
+        if self._error or (
             self._thread is not None
             and not self._thread.is_alive()
             and self.session is not None

@@ -1,4 +1,5 @@
 from io import StringIO
+import json
 import os
 from pathlib import Path
 import socket
@@ -8,6 +9,7 @@ from tempfile import TemporaryDirectory
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from agent_container.family_intake_client import connect_family_intake
 from agent_container.family_intake_client import run
@@ -50,11 +52,8 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
             FamilyBinding(Repository.parse("family/roadmap"), 12345),
         )
 
-    def runtime(self, *, peer_pid: int | None = None) -> FamilyIntakeRuntime:
-        return FamilyIntakeRuntime.create(
-            self.layout,
-            os.getpid() if peer_pid is None else peer_pid,
-        )
+    def runtime(self) -> FamilyIntakeRuntime:
+        return FamilyIntakeRuntime.create(self.layout)
 
     def request(self, capability: str) -> FamilyIntakeRequest:
         return FamilyIntakeRequest(
@@ -84,6 +83,7 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
         stderr = StringIO()
 
         with runtime as mount:
+            runtime.register_runtime(os.getpid())
             run_dir = mount.socket_dir
             host_environment = dict(mount.environment)
             host_environment["AGENT_FAMILY_SOCKET"] = str(mount.socket_path)
@@ -121,6 +121,7 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
 
         second = self.runtime()
         with second as mount:
+            second.register_runtime(os.getpid())
             self.assertNotEqual(stale, mount.capability)
             with self.assertRaises((OSError, RuntimeError, ValueError)):
                 connect_family_intake(self.request(stale), mount.socket_path)
@@ -133,22 +134,67 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
         self.assertEqual(len(list_pending(self.layout.family_pending_dir)), 1)
 
     # Break caught: any local process with the capability being treated as the runtime.
-    def test_second_process_peer_pid_is_denied_without_burning_capability(self) -> None:
+    def test_registered_runtime_root_execs_client_while_sibling_is_denied(self) -> None:
         runtime = self.runtime()
         with runtime as mount:
-            script = (
-                "import os,sys; from pathlib import Path; "
-                "from agent_container.family_intake_client import run; "
-                "raise SystemExit(run((\"issue\",\"create\",\"--title\",\"Add export\","
-                "\"--summary\",\"Portable copy.\",\"--context\",\"No export exists.\","
-                "\"--acceptance-criterion\",\"JSON downloads\"),os.environ,sys.stdout,sys.stderr))"
+            source_root = Path(__file__).parents[2]
+            shim_dir = self.layout.root / "wrapper-test-bin"
+            shim_dir.mkdir(mode=0o700)
+            python_shim = shim_dir / "python3"
+            python_shim.write_text(
+                "#!/bin/sh\n"
+                'PYTHONPATH="$AGENT_TEST_PYTHONPATH" '
+                f'exec "{sys.executable}" "$@"\n',
+                encoding="ascii",
             )
-            environment = dict(os.environ)
-            environment.update(mount.environment)
-            environment["PYTHONPATH"] = str(Path(__file__).parents[2] / "src")
+            python_shim.chmod(0o700)
+            wrapper = source_root / "container" / "bin" / "agent-family"
+            client_command = (
+                "/bin/sh",
+                str(wrapper),
+                "issue",
+                "create",
+                "--title",
+                "Add export",
+                "--summary",
+                "Portable copy.",
+                "--context",
+                "No export exists.",
+                "--acceptance-criterion",
+                "JSON downloads",
+            )
+            root_script = (
+                "import json,os,subprocess,sys; "
+                "config=json.loads(sys.stdin.readline()); "
+                "environment=dict(os.environ); environment.update(config['environment']); "
+                "completed=subprocess.run(config['command'],"
+                "env=environment,text=True,capture_output=True,check=False,timeout=5); "
+                "print(json.dumps({'returncode':completed.returncode,"
+                "'stdout':completed.stdout,'stderr':completed.stderr}))"
+            )
+            root = subprocess.Popen(
+                (sys.executable, "-c", root_script),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            def stop_root() -> None:
+                if root.poll() is None:
+                    root.kill()
+                    root.communicate(timeout=5)
+
+            self.addCleanup(stop_root)
+            runtime.register_runtime(root.pid)
+
+            environment = dict(mount.environment)
+            environment["AGENT_FAMILY_SOCKET"] = str(mount.socket_path)
+            environment["AGENT_TEST_PYTHONPATH"] = str(source_root / "src")
+            environment["PATH"] = str(shim_dir) + os.pathsep + os.environ["PATH"]
             denied = subprocess.run(
-                (sys.executable, "-c", script),
-                env=environment,
+                client_command,
+                env=dict(os.environ) | environment,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -159,34 +205,68 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
             self.assertEqual(denied.stdout, "")
             self.assertEqual(denied.stderr, "error: family intake request failed\n")
             self.assertFalse(runtime.session.consumed)  # type: ignore[union-attr]
-            response = connect_family_intake(
-                self.request(mount.capability), mount.socket_path
+            root_stdout, root_stderr = root.communicate(
+                json.dumps(
+                    {"command": client_command, "environment": environment},
+                    sort_keys=True,
+                )
+                + "\n",
+                timeout=5,
             )
 
-        self.assertEqual(response.status, "pending")
+        self.assertEqual(root.returncode, 0)
+        self.assertEqual(root_stderr, "")
+        result = json.loads(root_stdout)
+        self.assertEqual(result["returncode"], 0)
+        self.assertRegex(result["stdout"], r"^pending [0-9a-f]{32} [0-9]+\n$")
+        self.assertEqual(result["stderr"], "")
+        self.assertEqual(len(list_pending(self.layout.family_pending_dir)), 1)
 
     # Break caught: client disconnect boundaries either burning early or replaying late.
     def test_disconnect_before_and_after_persistence_have_defined_state(self) -> None:
         before = self.runtime()
-        with before as mount:
-            frame = encode_request_frame(self.request(mount.capability))
-            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            client.connect(str(mount.socket_path))
-            client.sendall(frame[:-1])
-            client.close()
-            self.wait_for(
-                lambda: not before.session.consumed,  # type: ignore[union-attr]
-                "incomplete request unexpectedly consumed the session",
-            )
-            response = connect_family_intake(
-                self.request(mount.capability), mount.socket_path
-            )
+        handler_entered = threading.Event()
+        handler_completed = threading.Event()
+        runtime_module = __import__(
+            "agent_container.family_intake_runtime",
+            fromlist=["handle_family_intake_connection"],
+        )
+        real_handler = runtime_module.handle_family_intake_connection
+
+        def observed_handler(*args: object, **kwargs: object) -> None:
+            handler_entered.set()
+            try:
+                real_handler(*args, **kwargs)
+            finally:
+                handler_completed.set()
+
+        with patch(
+            "agent_container.family_intake_runtime.handle_family_intake_connection",
+            side_effect=observed_handler,
+        ):
+            with before as mount:
+                before.register_runtime(os.getpid())
+                frame = encode_request_frame(self.request(mount.capability))
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.connect(str(mount.socket_path))
+                client.sendall(frame[:-1])
+                self.assertTrue(handler_entered.wait(1), "handler did not accept request")
+                client.close()
+                self.assertTrue(
+                    handler_completed.wait(1),
+                    "incomplete request handler did not complete",
+                )
+                self.assertFalse(before.session.consumed)  # type: ignore[union-attr]
+                response = connect_family_intake(
+                    self.request(mount.capability), mount.socket_path
+                )
         self.assertEqual(response.status, "pending")
 
         for path in self.layout.family_pending_dir.iterdir():
             path.unlink()
         after = self.runtime()
         with after as mount:
+            after.register_runtime(os.getpid())
             client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             client.connect(str(mount.socket_path))
             client.sendall(encode_request_frame(self.request(mount.capability)))
@@ -204,6 +284,7 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
         successes = []
         failures = []
         with runtime as mount:
+            runtime.register_runtime(os.getpid())
             def submit() -> None:
                 barrier.wait()
                 try:
@@ -231,6 +312,7 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
     def test_broker_death_has_no_fallback_and_socket_is_gone(self) -> None:
         runtime = self.runtime()
         mount = runtime.start()
+        runtime.register_runtime(os.getpid())
         runtime.close()
 
         with self.assertRaises((OSError, RuntimeError, ValueError)):
@@ -244,6 +326,7 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
     def test_runtime_exit_interrupts_a_client_stalled_mid_frame(self) -> None:
         runtime = self.runtime()
         mount = runtime.start()
+        runtime.register_runtime(os.getpid())
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         client.connect(str(mount.socket_path))
         client.sendall(b"\x00\x00")
@@ -260,6 +343,114 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
         self.assertLess(elapsed, 2)
         self.assertFalse(mount.socket_dir.exists())
         self.assertEqual(list_pending(self.layout.family_pending_dir), ())
+
+    # Break caught: a fatal handler exit leaving a live listener and queued clients.
+    def test_unexpected_handler_failure_closes_service_and_reports_fixed_error(self) -> None:
+        marker = "private-fatal-handler-marker"
+        runtime = self.runtime()
+        mount = runtime.start()
+        runtime.register_runtime(os.getpid())
+        first = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        first.settimeout(1)
+
+        with patch(
+            "agent_container.family_intake_runtime.handle_family_intake_connection",
+            side_effect=RuntimeError(marker),
+        ):
+            first.connect(str(mount.socket_path))
+            first.sendall(b"\x00\x00\x00\x01x")
+            try:
+                self.assertEqual(first.recv(1), b"")
+            except OSError:
+                pass
+        first.close()
+        self.wait_for(lambda: not runtime.is_alive(), "fatal handler remained alive")
+
+        with self.assertRaisesRegex(Exception, "^family intake runtime failed$") as checked:
+            runtime.check()
+        self.assertNotIn(marker, str(checked.exception))
+        second = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        second.settimeout(0.5)
+        try:
+            with self.assertRaises(OSError):
+                second.connect(str(mount.socket_path))
+        finally:
+            second.close()
+        with self.assertRaisesRegex(Exception, "^family intake runtime failed$") as closed:
+            runtime.close()
+        self.assertNotIn(marker, str(closed.exception))
+        self.assertNotIn(marker, repr(runtime))
+        self.assertFalse(mount.socket_dir.exists())
+
+    # Break caught: create persistence failure looking like an ordinary client disconnect.
+    def test_create_pending_failure_is_sanitized_fatal_runtime_failure(self) -> None:
+        marker = "private-create-error-marker"
+        runtime = self.runtime()
+        mount = runtime.start()
+        runtime.register_runtime(os.getpid())
+        environment = dict(mount.environment)
+        environment["AGENT_FAMILY_SOCKET"] = str(mount.socket_path)
+        stdout = StringIO()
+        stderr = StringIO()
+
+        with patch(
+            "agent_container.family_intake_broker.create_pending",
+            side_effect=OSError(marker),
+        ):
+            status = run(
+                (
+                    "issue", "create", "--title", "Add export",
+                    "--summary", "Portable copy.", "--context", "No export exists.",
+                    "--acceptance-criterion", "JSON downloads",
+                ),
+                environment,
+                stdout,
+                stderr,
+            )
+        self.wait_for(lambda: not runtime.is_alive(), "persistence failure was not fatal")
+
+        self.assertEqual(status, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "error: family intake request failed\n")
+        with self.assertRaisesRegex(Exception, "^family intake runtime failed$") as checked:
+            runtime.check()
+        exposed = stderr.getvalue() + str(checked.exception) + repr(runtime)
+        self.assertNotIn(marker, exposed)
+        self.assertNotIn(mount.capability, exposed)
+        with self.assertRaisesRegex(Exception, "^family intake runtime failed$"):
+            runtime.close()
+        self.assertFalse(mount.socket_dir.exists())
+
+    # Break caught: audit durability failure leaving a normal-looking consumed service.
+    def test_audit_failure_is_sanitized_fatal_runtime_failure(self) -> None:
+        marker = "private-audit-error-marker"
+        runtime = self.runtime()
+        mount = runtime.start()
+        runtime.register_runtime(os.getpid())
+        request = self.request(mount.capability)
+
+        with patch(
+            "agent_container.family_intake_broker.append_family_audit",
+            side_effect=OSError(marker),
+        ):
+            with self.assertRaises((OSError, RuntimeError, ValueError)) as client_error:
+                connect_family_intake(request, mount.socket_path)
+        self.wait_for(lambda: not runtime.is_alive(), "audit failure was not fatal")
+
+        with self.assertRaisesRegex(Exception, "^family intake runtime failed$") as checked:
+            runtime.check()
+        audit = (
+            self.layout.family_audit_file.read_text("ascii")
+            if self.layout.family_audit_file.exists()
+            else ""
+        )
+        exposed = str(client_error.exception) + str(checked.exception) + repr(runtime) + audit
+        self.assertNotIn(marker, exposed)
+        self.assertNotIn(mount.capability, exposed)
+        self.assertEqual(len(list_pending(self.layout.family_pending_dir)), 1)
+        with self.assertRaisesRegex(Exception, "^family intake runtime failed$"):
+            runtime.close()
+        self.assertFalse(mount.socket_dir.exists())
 
 
 if __name__ == "__main__":

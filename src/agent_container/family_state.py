@@ -9,7 +9,7 @@ import secrets
 import stat
 from typing import Any
 
-from agent_container.github_broker_policy import validate_repository_id
+from agent_container.github_values import validate_repository_id
 from agent_container.state import github_broker_project_label
 from agent_container.state import Repository
 from agent_container.state import ensure_private_directory

@@ -22,7 +22,7 @@ from agent_container.family_state import _temporary_name
 from agent_container.family_state import _unlink_owned
 from agent_container.family_state import _validate_private_file
 from agent_container.family_state import _write_all
-from agent_container.github_broker_policy import validate_issue_number
+from agent_container.github_values import validate_issue_number
 from agent_container.state import validate_project_id
 
 
@@ -75,6 +75,10 @@ _AUDIT_STAGES = frozenset(
         "reconcile",
     }
 )
+
+
+class PendingCapacityError(ValueError):
+    pass
 
 
 class PendingState(str, Enum):
@@ -614,7 +618,7 @@ def create_pending(
             if request.state in _CONTENT_STATES:
                 unfinished += 1
         if unfinished >= _MAX_UNFINISHED:
-            raise ValueError("family pending inventory is full")
+            raise PendingCapacityError("family pending inventory is full")
         for _attempt in range(_ID_ATTEMPTS):
             generated = random_bytes(16)
             if type(generated) is not bytes or len(generated) != 16:

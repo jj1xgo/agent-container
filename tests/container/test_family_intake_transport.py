@@ -5,7 +5,9 @@ import socket
 import struct
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
+from agent_container.family_intake_broker import FamilyIntakeInternalError
 from agent_container.family_intake_broker import FamilyIntakeSession
 from agent_container.family_intake_protocol import decode_response_frame
 from agent_container.family_intake_protocol import encode_request_frame
@@ -94,18 +96,24 @@ class FamilyIntakeTransportTest(unittest.TestCase):
         )
 
     def session(self) -> FamilyIntakeSession:
-        return FamilyIntakeSession(
+        session = FamilyIntakeSession(
             "demo",
             CAPABILITY,
             NOW + 60,
-            PEER_PID,
             store=self.store,
             binding_path=self.binding,
             audit_path=self.audit,
             owner_uid=os.getuid(),
             clock=lambda: NOW,
             random_bytes=lambda size: b"\x22" * size,
+            process_reader=lambda pid: (
+                (1, 100, os.getuid())
+                if pid == PEER_PID
+                else (_ for _ in ()).throw(ProcessLookupError(pid))
+            ),
         )
+        session.register_runtime(PEER_PID)
+        return session
 
     # Break caught: transport trusting caller-supplied identity instead of SO_PEERCRED.
     def test_reads_peer_credentials_and_writes_one_exact_response(self) -> None:
@@ -164,6 +172,29 @@ class FamilyIntakeTransportTest(unittest.TestCase):
         handle_family_intake_connection(FakeConnection(replay), session, self.store)
         self.assertEqual(replay.outgoing.getvalue(), b"")
         self.assertEqual(len(list_pending(self.store)), 1)
+
+    # Break caught: an internal persistence error being downgraded to a disconnect.
+    def test_internal_failure_is_silent_to_client_but_propagates_to_supervisor(self) -> None:
+        session = self.session()
+        stream = FakeStream(encode_request_frame(self.request()))
+
+        with patch(
+            "agent_container.family_intake_broker.create_pending",
+            side_effect=OSError("private-transport-marker"),
+        ):
+            with self.assertRaises(FamilyIntakeInternalError) as raised:
+                handle_family_intake_connection(
+                    FakeConnection(stream),
+                    session,
+                    self.store,
+                )
+
+        self.assertEqual(str(raised.exception), "family intake persistence failed")
+        self.assertNotIn("private-transport-marker", str(raised.exception))
+        self.assertNotIn(CAPABILITY, str(raised.exception))
+        self.assertEqual(stream.outgoing.getvalue(), b"")
+        self.assertTrue(stream.closed)
+        self.assertTrue(session.failed)
 
     # Break caught: a different process consuming the capability before the expected runtime.
     def test_peer_mismatch_is_silent_and_does_not_read_or_consume(self) -> None:

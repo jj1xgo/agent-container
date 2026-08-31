@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import socket
 import stat
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -50,7 +52,6 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
     def runtime(self, **changes: object) -> FamilyIntakeRuntime:
         values = {
             "layout": self.layout,
-            "peer_pid": os.getpid(),
             "clock": lambda: NOW,
             "random_bytes": lambda size: b"\x33" * size,
         }
@@ -174,6 +175,8 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
                 runtime.start()
 
         self.assertEqual(list(self.layout.family_intake_run_root.iterdir()), [])
+        self.assertIsNone(runtime._run_descriptor)
+        self.assertIsNone(runtime._run_parent_descriptor)
 
     # Break caught: bind succeeding before chmod fails and leaving a live stale socket.
     def test_post_bind_start_failure_cleans_the_owned_socket_and_run_directory(self) -> None:
@@ -193,11 +196,70 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
                 runtime.start()
 
         self.assertEqual(list(self.layout.family_intake_run_root.iterdir()), [])
+        self.assertIsNone(runtime._run_descriptor)
+        self.assertIsNone(runtime._run_parent_descriptor)
+
+    # Break caught: startup inode replacement preserving attacker data but leaking both FDs.
+    def test_startup_cleanup_preserves_replacement_and_closes_descriptors(self) -> None:
+        runtime = self.runtime()
+        descriptors: list[int] = []
+
+        def replace_socket_then_fail(
+            path: object,
+            _mode: int,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            if path != "intake.sock":
+                raise AssertionError(f"unexpected chmod target: {path!r}")
+            run_descriptor = runtime._run_descriptor
+            parent_descriptor = runtime._run_parent_descriptor
+            self.assertIsNotNone(run_descriptor)
+            self.assertIsNotNone(parent_descriptor)
+            descriptors.extend((run_descriptor, parent_descriptor))  # type: ignore[arg-type]
+            os.unlink("intake.sock", dir_fd=run_descriptor)
+            replacement = os.open(
+                "intake.sock",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=run_descriptor,
+            )
+            try:
+                os.write(replacement, b"startup-replacement-marker")
+            finally:
+                os.close(replacement)
+            raise OSError("private-startup-marker")
+
+        with patch(
+            "agent_container.family_intake_runtime.os.chmod",
+            side_effect=replace_socket_then_fail,
+        ):
+            with self.assertRaises(FamilyIntakeRuntimeError) as raised:
+                runtime.start()
+
+        replacement_path = (
+            self.layout.family_intake_run_root / ("33" * 8) / "intake.sock"
+        )
+        self.assertEqual(
+            replacement_path.read_text("ascii"),
+            "startup-replacement-marker",
+        )
+        self.assertNotIn("private-startup-marker", str(raised.exception))
+        self.assertIsNone(runtime._run_descriptor)
+        self.assertIsNone(runtime._run_parent_descriptor)
+        self.assertEqual(len(descriptors), 2)
+        for descriptor in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
 
     # Break caught: cleanup deleting an attacker replacement at the socket name.
     def test_cleanup_preserves_replacement_inode_and_reports_fixed_failure(self) -> None:
         runtime = self.runtime()
         mount = runtime.start()
+        run_descriptor = runtime._run_descriptor
+        parent_descriptor = runtime._run_parent_descriptor
+        self.assertIsNotNone(run_descriptor)
+        self.assertIsNotNone(parent_descriptor)
         mount.socket_path.unlink()
         mount.socket_path.write_text("replacement-marker", encoding="ascii")
         mount.socket_path.chmod(0o600)
@@ -208,6 +270,11 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
         self.assertEqual(str(raised.exception), "family intake runtime cleanup failed")
         self.assertEqual(mount.socket_path.read_text("ascii"), "replacement-marker")
         self.assertNotIn("replacement-marker", str(raised.exception))
+        self.assertIsNone(runtime._run_descriptor)
+        self.assertIsNone(runtime._run_parent_descriptor)
+        for descriptor in (run_descriptor, parent_descriptor):
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)  # type: ignore[arg-type]
 
     # Break caught: environment or import graph introducing credential/network modules.
     def test_runtime_environment_and_intake_imports_contain_no_sensitive_surface(self) -> None:
@@ -250,6 +317,42 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
             "agent_container.github_broker_runtime",
         ):
             self.assertNotIn(forbidden_import, modules)
+
+    # Break caught: a neutral-looking intake import loading development policy transitively.
+    def test_recursive_import_graph_loads_no_credential_or_development_broker_module(self) -> None:
+        blocked = (
+            "agent_container.github_app",
+            "agent_container.github_client",
+            "agent_container.github_issue",
+            "agent_container.github_broker_policy",
+            "agent_container.github_broker_runtime",
+        )
+        script = "\n".join(
+            (
+                "import importlib.abc, sys",
+                f"blocked = {blocked!r}",
+                "class Blocker(importlib.abc.MetaPathFinder):",
+                "    def find_spec(self, fullname, path=None, target=None):",
+                "        if fullname in blocked:",
+                "            raise ImportError('forbidden ' + fullname)",
+                "        return None",
+                "sys.meta_path.insert(0, Blocker())",
+                "import agent_container.family_intake_runtime",
+                "loaded = set(blocked).intersection(sys.modules)",
+                "raise SystemExit(0 if not loaded else 2)",
+            )
+        )
+
+        completed = subprocess.run(
+            (sys.executable, "-c", script),
+            env=dict(os.environ)
+            | {"PYTHONPATH": str(Path(__file__).parents[2] / "src")},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
 
 if __name__ == "__main__":

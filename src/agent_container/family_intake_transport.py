@@ -6,6 +6,8 @@ import struct
 from typing import BinaryIO
 
 from agent_container.family_intake_broker import FamilyIntakeSession
+from agent_container.family_intake_broker import FamilyIntakeDenied
+from agent_container.family_intake_broker import FamilyIntakeInternalError
 from agent_container.family_intake_protocol import read_request_frame
 from agent_container.family_intake_protocol import write_response_frame
 
@@ -18,7 +20,7 @@ def handle_family_intake_connection(
     session: FamilyIntakeSession,
     store: Path,
 ) -> None:
-    """Handle one request, closing silently on every denied/error path."""
+    """Close ordinary denials silently; propagate sanitized internal failures."""
 
     stream: BinaryIO | None = None
     try:
@@ -37,7 +39,11 @@ def handle_family_intake_connection(
         request = read_request_frame(stream)
         response = session.handle(request)
         write_response_frame(stream, response)
-    except (OSError, RuntimeError, TypeError, ValueError, struct.error):
+    except FamilyIntakeInternalError:
+        raise
+    except FamilyIntakeDenied:
+        return
+    except (OSError, TypeError, ValueError, struct.error):
         return
     finally:
         if stream is not None:
