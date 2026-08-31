@@ -16,10 +16,6 @@ _REQUEST_FIELDS = frozenset(
 _BIDI_OVERRIDES = frozenset(
     (*range(0x202A, 0x202F), *range(0x2066, 0x206A))
 )
-_ENTITY_REFERENCE = re.compile(
-    r"&(?:#(?:0|[1-9][0-9]{0,6})|#x(?:0|[1-9A-Fa-f][0-9A-Fa-f]{0,5})|"
-    r"[A-Za-z][A-Za-z0-9]{1,31});"
-)
 _LINK = re.compile(r"!?\[[^\]\n]+\]\([^)\n]*\)")
 _REFERENCE_LINK = re.compile(r"!?\[[^\]\n]+\]\[[^\]\n]*\]")
 _HTML_OR_AUTOLINK = re.compile(
@@ -110,8 +106,6 @@ def _escape_markdown_literal(value: str) -> str:
         if ordered:
             escaped.add(leading_spaces + ordered.start(1))
 
-    for match in _ENTITY_REFERENCE.finditer(value):
-        escaped.add(match.start())
     for match in (*_LINK.finditer(value), *_REFERENCE_LINK.finditer(value)):
         start = match.start()
         if value[start] == "!":
@@ -133,7 +127,7 @@ def _escape_markdown_literal(value: str) -> str:
 
     return "".join(
         f"\\{character}"
-        if index in escaped or character in "\\`"
+        if index in escaped or character in "\\`&"
         else character
         for index, character in enumerate(value)
     )

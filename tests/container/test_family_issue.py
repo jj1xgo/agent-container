@@ -117,6 +117,31 @@ class FamilyIssueTest(unittest.TestCase):
         self.assertIn("- Show \\&amp; exactly", body)
         self.assertNotIn("&#x202E;", body.replace("\\&#x202E;", ""))
 
+    # Break caught: padded numeric references or ordinary ampersands bypassing entity escaping.
+    def test_escapes_every_ampersand_including_padded_entities(self) -> None:
+        payload = valid_payload()
+        payload.update(
+            {
+                "summary": (
+                    "Padded &#x00202E; &#0008238; plus &#x202E; &#8238; &copy; "
+                    "&not-an-entity; and ordinary A & B."
+                ),
+                "context": "A & B stays literal.",
+                "acceptance_criteria": ["&#x00202E; and A & B"],
+            }
+        )
+
+        body = render_family_issue_body(parse_family_issue_draft(payload))
+
+        self.assertIn(
+            "Padded \\&#x00202E; \\&#0008238; plus \\&#x202E; \\&#8238; \\&copy; "
+            "\\&not-an-entity; and ordinary A \\& B.",
+            body,
+        )
+        self.assertIn("A \\& B stays literal.", body)
+        self.assertIn("- \\&#x00202E; and A \\& B", body)
+        self.assertNotIn("&#x00202E;", body.replace("\\&#x00202E;", ""))
+
     # Break caught: inline syntax and block-leading markers becoming user-owned structure.
     def test_escapes_inline_constructs_and_contextual_block_markers(self) -> None:
         payload = valid_payload()

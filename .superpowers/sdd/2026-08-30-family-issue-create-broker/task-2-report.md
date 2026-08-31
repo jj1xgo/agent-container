@@ -65,6 +65,32 @@ PYTHONPATH=src python3 -m unittest tests.container.test_family_issue -v && bin/l
 
 Output: `Ran 14 tests ... OK`; `All checks passed!`.
 
+## Review fix round 3
+
+The renderer now escapes every literal ampersand in request-controlled content,
+rather than attempting to recognize CommonMark entity grammar. This covers
+padded and unpadded decimal/hex bidi references, named entities, malformed
+entity-like text, and ordinary `A & B`, ensuring Markdown decoding cannot
+introduce a hidden control. Normal sentence and URL periods remain unchanged.
+
+Review-fix RED command:
+
+```text
+PYTHONPATH=src python3 -m unittest tests.container.test_family_issue -v
+```
+
+Output: 1 failure in
+`test_escapes_every_ampersand_including_padded_entities`; padded numeric and
+ordinary ampersands were emitted without a backslash.
+
+Review-fix GREEN command:
+
+```text
+PYTHONPATH=src python3 -m unittest tests.container.test_family_issue -v && bin/lint && git diff --check
+```
+
+Output: `Ran 15 tests ... OK`; `All checks passed!`.
+
 ## Verification
 
 - Focused Task 2 tests: PASS (12 tests).
