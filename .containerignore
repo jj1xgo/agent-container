@@ -3,6 +3,7 @@
 !requirements-lint.txt
 !src/
 !src/**
+src/agent_container/family_github_app.py
 src/agent_container/family_state.py
 !profiles/
 !profiles/codex/

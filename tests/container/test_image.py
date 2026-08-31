@@ -305,6 +305,7 @@ class ContainerImageContractTest(unittest.TestCase):
                 "!requirements-lint.txt",
                 "!src/",
                 "!src/**",
+                "src/agent_container/family_github_app.py",
                 "src/agent_container/family_state.py",
                 "!profiles/",
                 "!profiles/codex/",
@@ -352,7 +353,7 @@ class ContainerImageContractTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertFalse(containerignore_includes(path, patterns))
 
-    def test_effective_image_source_set_excludes_host_only_family_state(self) -> None:
+    def test_effective_image_source_set_excludes_host_only_family_modules(self) -> None:
         patterns = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()
         source_files = sorted((ROOT / "src/agent_container").glob("*.py"))
         included = {
@@ -368,7 +369,10 @@ class ContainerImageContractTest(unittest.TestCase):
                 "family_issue.py",
             }.issubset(included)
         )
-        self.assertNotIn("family_state.py", included)
+        self.assertEqual(
+            {"family_github_app.py", "family_state.py"} & included,
+            set(),
+        )
         image_source = "\n".join(
             path.read_text(encoding="utf-8")
             for path in source_files
@@ -376,6 +380,7 @@ class ContainerImageContractTest(unittest.TestCase):
         )
         self.assertNotIn("family_app_file", image_source)
         self.assertNotIn("family_private_key_file", image_source)
+        self.assertNotIn("FamilyInstallationTokenProvider", image_source)
 
     def test_containerignore_includes_every_tracked_copy_input(self) -> None:
         patterns = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()
@@ -399,7 +404,10 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertTrue(tracked)
         for path in tracked:
             with self.subTest(path=path):
-                if path == "src/agent_container/family_state.py":
+                if path in {
+                    "src/agent_container/family_github_app.py",
+                    "src/agent_container/family_state.py",
+                }:
                     self.assertFalse(containerignore_includes(path, patterns))
                 else:
                     self.assertTrue(containerignore_includes(path, patterns))
