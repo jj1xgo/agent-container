@@ -67,6 +67,12 @@ class FamilyInventory(Protocol):
 
 
 @dataclass(frozen=True)
+class _ValidatedCreatedIssue:
+    number: int
+    url: str
+
+
+@dataclass(frozen=True)
 class LiveFamilyInventory:
     """Bounded exact installation inventory used only by the host CLI."""
 
@@ -350,20 +356,24 @@ def _validate_created_result(
     binding: FamilyBinding,
     *,
     expected_number: int | None = None,
-) -> CreatedIssue:
-    if type(value) is not CreatedIssue or type(value.number) is not int:
+) -> _ValidatedCreatedIssue:
+    if type(value) is not CreatedIssue:
         raise ValueError("family Issue result is invalid")
-    number = validate_issue_number(value.number)
+    number_value = value.number
+    url_value = value.url
+    if type(number_value) is not int:
+        raise ValueError("family Issue result is invalid")
+    number = validate_issue_number(number_value)
     if expected_number is not None and number != expected_number:
         raise ValueError("family Issue result is invalid")
-    if type(value.url) is not str:
+    if type(url_value) is not str:
         raise ValueError("family Issue result is invalid")
     expected_url = (
         f"https://github.com/{binding.repository.slug}/issues/{number}"
     )
-    if value.url != expected_url:
+    if url_value != expected_url:
         raise ValueError("family Issue result is invalid")
-    return value
+    return _ValidatedCreatedIssue(number, url_value)
 
 
 def _expire_locked(layout: FamilyStateLayout, locked, *, now: int) -> None:

@@ -450,3 +450,126 @@ All checks passed!
 
 All creator, provider, and inventory dependencies were fakes in these tests.
 No real GitHub operation was performed in review round 2.
+
+## Review fix round 3
+
+The third review fix round removes the last use-after-validation dependency on
+an untrusted creator result. `_validate_created_result` now:
+
+1. requires the exact `CreatedIssue` class;
+2. reads `number` and `url` from that object exactly once each into locals;
+3. validates only those primitive locals; and
+4. returns a new private immutable `_ValidatedCreatedIssue` snapshot.
+
+Approval and exact-GET reconciliation use only that stable snapshot for the
+durable transition and output. They never read the creator-returned object
+again. Ordinary exceptions raised during either attribute acquisition remain
+inside the response-validation quarantine, causing durable
+`sending -> unknown` plus `approve/unknown/response`. `BaseException` is still
+not caught by the ordinary path, preserving the previously ruled crash
+semantics and startup recovery boundary.
+
+### Review round 3 RED
+
+The hostile-property regression supplies an exact `CreatedIssue` whose selected
+property returns a valid value twice and raises on the third access:
+
+```text
+PYTHONPATH=src python3 -m unittest \
+  tests.container.test_agentctl.AgentCtlFamilyTest.test_created_result_attributes_are_snapshotted_exactly_once -v
+```
+
+Result before the fix: exit `1`; one method with two failing subtests
+(`number` and `url`). Both returned command failure instead of success because
+the validated original object was read again outside the response quarantine.
+
+After the one-read snapshot change, the same test observes exactly one access
+to each hostile property and a durable created result. A companion test proves
+that an ordinary exception during acquisition becomes response-stage unknown,
+while `KeyboardInterrupt` remains outside the ordinary catch.
+
+### Canonical TTY incomplete-line ruling
+
+The proposed `approve <id>\nx` case was reproduced against the real PTY. The
+first exact newline-terminated confirmation line is readable, while the `x` is
+the beginning of a second, not-yet-terminated canonical input line.
+
+A Linux PTY characterization produced:
+
+```text
+write(master, b"approve\nx")
+FIONREAD before first read: 8
+read(slave): b"approve\n"
+FIONREAD after first read: 0
+disable ICANON
+FIONREAD after disabling ICANON: 1
+```
+
+`select` has the same canonical readiness boundary as `FIONREAD`: the pending
+unterminated `x` is intentionally invisible until a line delimiter arrives.
+There is no immediate, portable, non-destructive POSIX inspection for that
+incomplete canonical line. A duplicated fd does not isolate terminal settings;
+termios belongs to the terminal device, so disabling `ICANON` through the dup
+also changes the original terminal and races concurrent readers and arriving
+input. It can also leave or consume user input across failure boundaries.
+
+Ruling: the helper strictly validates one bounded, newline-terminated
+confirmation line. It rejects bytes after that newline when already delivered,
+including a completed extra `x\n` line, but an incomplete future line is not
+part of the confirmation bytes. No shared-termios mutation or timing heuristic
+was added. Existing tests retain exact normal-line, completed-extra-line, EOF,
+invalid UTF-8, overlong input, spoofed stream, and duplicated-fd pinning
+coverage.
+
+Cost if this ruling is wrong: meeting an “unterminated future bytes must reject
+immediately” contract would require a different input protocol, such as
+noncanonical input established before prompting with an explicit quiet-period
+or framing rule. That would change terminal behavior for the shared device,
+introduce timing semantics, and require a wider concurrency and terminal-
+restoration design; it cannot be safely implemented as a local post-line
+peek.
+
+### Review round 3 GREEN and final verification
+
+Focused hostile-result and TTY regression selection:
+
+```text
+Ran 8 tests in 0.091s
+OK
+```
+
+Complete Task 8 class:
+
+```text
+PYTHONPATH=src python3 -m unittest \
+  tests.container.test_agentctl.AgentCtlFamilyTest -v
+Ran 39 tests in 0.339s
+OK
+```
+
+Full agentctl regression:
+
+```text
+PYTHONPATH=src python3 -m unittest tests.container.test_agentctl
+Ran 162 tests in 1.042s
+OK
+```
+
+All-family regression, including real Unix socket integration tests outside
+the restricted socket sandbox:
+
+```text
+Ran 196 tests in 1.871s
+OK
+```
+
+Final complete verification outside the restricted socket sandbox:
+
+```text
+PYTHONPATH=src python3 -m unittest discover -s tests
+Ran 932 tests in 4.973s
+OK (skipped=12)
+```
+
+All creator, provider, and inventory dependencies were fakes. No real GitHub
+operation was performed in review round 3.

@@ -6012,6 +6012,105 @@ class AgentCtlFamilyTest(unittest.TestCase):
                 self.assertNotIn("issue-number:", output)
                 self.assertNotIn("private hostile property marker", error)
 
+    # Break caught: re-reading a validated creator object after POST leaving sending.
+    def test_created_result_attributes_are_snapshotted_exactly_once(self) -> None:
+        for attribute, valid in (
+            ("number", 7),
+            ("url", "https://github.com/family/roadmap/issues/7"),
+        ):
+            with self.subTest(attribute=attribute), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                outcome = CreatedIssue(
+                    7, "https://github.com/family/roadmap/issues/7"
+                )
+                creator = _FamilyCreator(outcome)
+                accesses = 0
+
+                def hostile_getter(_instance):
+                    nonlocal accesses
+                    accesses += 1
+                    if accesses >= 3:
+                        raise RuntimeError("private late property marker")
+                    return valid
+
+                with patch.object(
+                    CreatedIssue,
+                    attribute,
+                    property(hostile_getter),
+                    create=True,
+                ):
+                    result, output, error, _ = self._run_family(
+                        environment,
+                        "approve",
+                        creator=creator,
+                        stdin=self._tty(f"approve {self.request_id}\n"),
+                    )
+
+                request = load_pending(
+                    layout.family_pending_dir, self.request_id, "demo"
+                )
+                self.assertEqual((result, error), (0, ""))
+                self.assertEqual(accesses, 1)
+                self.assertEqual(request.state, PendingState.CREATED)
+                self.assertEqual(request.issue_number, 7)
+                self.assertIn("issue-number: 7", output)
+
+    # Break caught: an ordinary exception during the attribute snapshot escaping quarantine.
+    def test_created_result_snapshot_failure_is_unknown_but_baseexception_escapes(self) -> None:
+        for failure, caught in (
+            (RuntimeError("private snapshot marker"), True),
+            (KeyboardInterrupt(), False),
+        ):
+            with self.subTest(failure=type(failure)), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                outcome = CreatedIssue(
+                    7, "https://github.com/family/roadmap/issues/7"
+                )
+                creator = _FamilyCreator(outcome)
+
+                def hostile_url(_instance):
+                    raise failure
+
+                with patch.object(
+                    CreatedIssue,
+                    "url",
+                    property(hostile_url),
+                    create=True,
+                ):
+                    if caught:
+                        result, _, error, _ = self._run_family(
+                            environment,
+                            "approve",
+                            creator=creator,
+                            stdin=self._tty(f"approve {self.request_id}\n"),
+                        )
+                        self.assertEqual(result, 1)
+                        self.assertNotIn("private snapshot marker", error)
+                    else:
+                        with self.assertRaises(KeyboardInterrupt):
+                            self._run_family(
+                                environment,
+                                "approve",
+                                creator=creator,
+                                stdin=self._tty(f"approve {self.request_id}\n"),
+                            )
+
+                request = load_pending(
+                    layout.family_pending_dir, self.request_id, "demo"
+                )
+                self.assertEqual(
+                    request.state,
+                    PendingState.UNKNOWN if caught else PendingState.SENDING,
+                )
+                self.assertEqual(
+                    self._audit(layout)[-1]["stage"],
+                    "response" if caught else "send",
+                )
+
     # Break caught: approval using a time sampled before prompt and remote preflight.
     def test_approval_samples_expiry_after_preflight_at_exact_boundary(self) -> None:
         with TemporaryDirectory() as temp:
