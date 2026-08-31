@@ -41,6 +41,8 @@ from agent_container.github_broker_runtime import upgrade_legacy_broker_policy
 from agent_container.github_broker_runtime import write_broker_policy
 from agent_container.handover_broker_runtime import HandoverBrokerRuntime
 from agent_container.handover_broker_runtime import HandoverBrokerRuntimeError
+from agent_container.family_intake_runtime import FamilyIntakeRuntime
+from agent_container.family_state import FamilyStateLayout
 from agent_container.github_app import GitHubAppMetadata
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_policy import validate_repository_id
@@ -1378,6 +1380,9 @@ def main(
     family_inventory: object | None = None,
     family_creator: object | None = None,
     family_clock: Callable[[], int] | None = None,
+    family_runtime_factory: Callable[[FamilyStateLayout], FamilyIntakeRuntime]
+    = FamilyIntakeRuntime.create,
+    runtime_supervisor: Callable | None = None,
 ) -> int:
     try:
         arguments = parser().parse_args(argv)
@@ -1426,8 +1431,6 @@ def main(
         if arguments.command == "family":
             try:
                 from agent_container.family_cli import dispatch_family
-                from agent_container.family_state import FamilyStateLayout
-
                 state_layout = StateLayout.from_environment(
                     arguments.project, environment
                 )
@@ -1692,6 +1695,15 @@ def main(
             if runtime_spec_builder is not None:
                 builders = {**builders, "codex": runtime_spec_builder}
             with ExitStack() as stack:
+                family_layout = FamilyStateLayout(layout.root, layout.project_id)
+                try:
+                    os.lstat(family_layout.family_binding_file)
+                except FileNotFoundError:
+                    family_runtime = None
+                    family_mount = None
+                else:
+                    family_runtime = family_runtime_factory(family_layout)
+                    family_mount = stack.enter_context(family_runtime)
                 egress_runtime = (
                     EgressBrokerRuntime.create(
                         layout, arguments.agent, egress_policy
@@ -1732,7 +1744,13 @@ def main(
                         builder_args.append(github_mount)
                     if egress_mount is not None:
                         builder_args.append(egress_mount)
-                    spec = builders[arguments.agent](*builder_args)
+                    spec = (
+                        builders[arguments.agent](
+                            *builder_args, family_mount=family_mount
+                        )
+                        if family_mount is not None
+                        else builders[arguments.agent](*builder_args)
+                    )
                 else:
                     builder_args = [
                         layout,
@@ -1745,12 +1763,27 @@ def main(
                         builder_args.append(github_mount)
                     if egress_mount is not None:
                         builder_args.append(egress_mount)
-                    spec = builders[arguments.agent](*builder_args)
+                    spec = (
+                        builders[arguments.agent](
+                            *builder_args, family_mount=family_mount
+                        )
+                        if family_mount is not None
+                        else builders[arguments.agent](*builder_args)
+                    )
                 print(
                     f"Starting {arguments.agent.title()} for project: {layout.project_id}",
                     file=stdout,
                 )
-                if egress_runtime is not None and egress_mount is not None:
+                if family_runtime is not None:
+                    supervisor = (
+                        run_command_supervised
+                        if runtime_supervisor is None
+                        else runtime_supervisor
+                    )
+                    completed = supervisor(
+                        spec, egress_runtime, egress_mount, family_runtime
+                    )
+                elif egress_runtime is not None and egress_mount is not None:
                     completed = (
                         run_command_supervised(spec, egress_runtime, egress_mount)
                         if runner is run_command

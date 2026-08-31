@@ -6,12 +6,14 @@ import signal
 import subprocess
 
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
+from agent_container.family_intake_runtime import FamilyRuntimeMount
 from agent_container.egress_broker_runtime import EgressBrokerRuntime
 from agent_container.egress_broker_runtime import EgressBrokerRuntimeError
 from agent_container.egress_broker_runtime import EgressRuntimeMount
 from agent_container.state import Repository
 from agent_container.state import StateLayout
 from agent_container.state import validate_project_id
+from agent_container.state import github_broker_project_label
 
 
 CODEX_STATUS_LINE_CONFIG = (
@@ -37,6 +39,8 @@ _CLAUDE_RUNTIME_HOME_TMPFS_MOUNT = (
 _BROKER_RUNTIME_PATH = "/run/agent-broker"
 _HANDOVER_BROKER_RUNTIME_PATH = "/run/agent-handover"
 _EGRESS_RUNTIME_PATH = "/run/agent-egress"
+_FAMILY_RUNTIME_PATH = "/run/agent-family"
+_FAMILY_RUN_ID = re.compile(r"^[0-9a-f]{16}$")
 _CONTAINER_ID = re.compile(r"^[0-9a-f]{12,64}$")
 _RESOURCE_AGENTS = frozenset({"codex", "claude"})
 _RESOURCE_STATS_FORMAT = (
@@ -217,6 +221,41 @@ def _handover_broker_args(broker: HandoverRuntimeMount) -> list[str]:
         f"AGENT_HANDOVER_BROKER_SOCKET={_HANDOVER_BROKER_RUNTIME_PATH}/broker.sock",
         "--env",
         f"AGENT_HANDOVER_BROKER_CAPABILITY={_HANDOVER_BROKER_RUNTIME_PATH}/capability",
+    ]
+
+
+def _family_runtime_args(
+    layout: StateLayout, family: FamilyRuntimeMount
+) -> list[str]:
+    if type(family) is not FamilyRuntimeMount:
+        raise ValueError("family runtime mount is invalid")
+    expected_parent = (
+        layout.root
+        / "family"
+        / "intake"
+        / "r"
+        / github_broker_project_label(layout.project_id)
+    )
+    socket_dir = family.socket_dir
+    expected_environment = {
+        "AGENT_FAMILY_SOCKET": f"{_FAMILY_RUNTIME_PATH}/intake.sock",
+        "AGENT_FAMILY_CAPABILITY": family.capability,
+    }
+    if (
+        not socket_dir.is_absolute()
+        or socket_dir.parent != expected_parent
+        or _FAMILY_RUN_ID.fullmatch(socket_dir.name) is None
+        or socket_dir != Path(os.path.normpath(socket_dir))
+        or dict(family.environment) != expected_environment
+    ):
+        raise ValueError("family runtime mount is invalid")
+    return [
+        "--mount",
+        _mount(socket_dir, _FAMILY_RUNTIME_PATH),
+        "--env",
+        f"AGENT_FAMILY_SOCKET={expected_environment['AGENT_FAMILY_SOCKET']}",
+        "--env",
+        f"AGENT_FAMILY_CAPABILITY={family.capability}",
     ]
 
 
@@ -560,6 +599,7 @@ def run_codex_spec(
     gid: int,
     broker: BrokerRuntimeMount | None = None,
     egress: EgressRuntimeMount | None = None,
+    family_mount: FamilyRuntimeMount | None = None,
 ) -> CommandSpec:
     if uid != os.getuid() or gid != os.getgid():
         raise ValueError("runtime uid and gid must match the current user")
@@ -580,6 +620,8 @@ def run_codex_spec(
         argv += ["--mount", _mount(source, target, read_only)]
     if egress is not None:
         argv += _egress_args(layout, "codex", egress)
+    if family_mount is not None:
+        argv += _family_runtime_args(layout, family_mount)
     argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image]
     if egress is not None:
         argv += ["agent-egress-runtime", "--"]
@@ -601,6 +643,7 @@ def run_claude_spec(
     handover_broker: HandoverRuntimeMount,
     broker: BrokerRuntimeMount | None = None,
     egress: EgressRuntimeMount | None = None,
+    family_mount: FamilyRuntimeMount | None = None,
 ) -> CommandSpec:
     if uid != os.getuid() or gid != os.getgid():
         raise ValueError("runtime uid and gid must match the current user")
@@ -630,6 +673,8 @@ def run_claude_spec(
     argv += ["--env", "AGENT_HANDOVER_ROOT=/handovers"]
     if egress is not None:
         argv += _egress_args(layout, "claude", egress)
+    if family_mount is not None:
+        argv += _family_runtime_args(layout, family_mount)
     argv += ["--env", f"AGENT_PROJECT_ID={layout.project_id}", image]
     if egress is not None:
         argv += ["agent-egress-runtime", "--"]
@@ -669,8 +714,9 @@ def run_command(
 
 def run_command_supervised(
     spec: CommandSpec,
-    gateway: EgressBrokerRuntime,
-    egress: EgressRuntimeMount,
+    gateway: EgressBrokerRuntime | None,
+    egress: EgressRuntimeMount | None,
+    family_runtime=None,
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.update(spec.environment)
@@ -689,11 +735,43 @@ def run_command_supervised(
     gateway_failed = False
     failure: BaseException | None = None
     try:
-        process = subprocess.Popen(spec.argv, env=environment, text=True)
+        launch_argv = spec.argv
+        if family_runtime is not None:
+            launch_argv = (
+                "/bin/sh",
+                "-c",
+                'kill -STOP $$; exec "$@"',
+                "agent-runtime",
+                *spec.argv,
+            )
+        process = subprocess.Popen(launch_argv, env=environment, text=True)
+        if family_runtime is not None:
+            try:
+                stopped_pid, stopped_status = os.waitpid(process.pid, os.WUNTRACED)
+                if (
+                    stopped_pid != process.pid
+                    or not os.WIFSTOPPED(stopped_status)
+                    or os.WSTOPSIG(stopped_status) != signal.SIGSTOP
+                ):
+                    raise RuntimeError("family runtime launch handoff failed")
+                family_runtime.register_runtime(process.pid)
+            except BaseException:
+                try:
+                    os.kill(process.pid, signal.SIGKILL)
+                finally:
+                    try:
+                        process.wait(timeout=5)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                process = None
+                raise
+            os.kill(process.pid, signal.SIGCONT)
         while process.poll() is None and not interrupted:
-            if gateway.wait_failed(0.1):
+            if gateway is not None and gateway.wait_failed(0.1):
                 gateway_failed = True
                 break
+            if family_runtime is not None:
+                family_runtime.check()
     except BaseException as error:
         failure = error
     finally:
@@ -705,15 +783,17 @@ def run_command_supervised(
         raise failure
     if gateway_failed or interrupted or failure is not None:
         _reap_process(process)
-        _stop_egress_container(egress)
-        if isinstance(failure, KeyboardInterrupt):
+        if egress is not None:
+            _stop_egress_container(egress)
+        if failure is not None:
             raise failure
         raise EgressBrokerRuntimeError("egress gateway failed")
     try:
         returncode = process.wait(timeout=5)
     except (OSError, subprocess.TimeoutExpired):
         _reap_process(process)
-        _stop_egress_container(egress)
+        if egress is not None:
+            _stop_egress_container(egress)
         raise EgressBrokerRuntimeError("egress gateway failed") from None
     if returncode != 0:
         raise subprocess.CalledProcessError(returncode, spec.argv)

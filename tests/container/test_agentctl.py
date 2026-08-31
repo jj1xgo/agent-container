@@ -26,6 +26,7 @@ from agent_container.family_issue import CanonicalFamilyIssue
 from agent_container.family_issue_create import CreatedIssue
 from agent_container.family_issue_create import SendNotStarted
 from agent_container.family_issue_create import SendOutcomeUnknown
+from agent_container.family_intake_runtime import FamilyRuntimeMount
 from agent_container.family_pending import create_pending
 from agent_container.family_pending import append_family_audit
 from agent_container.family_pending import load_pending
@@ -2072,6 +2073,69 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             )
             self.assertNotIn(str(root / "shared-auth/codex/auth.json"), output.getvalue())
             self.assertEqual(os.getuid(), root.stat().st_uid)
+
+    def test_bound_run_starts_family_runtime_and_uses_pid_supervisor(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _handover_project = self._runtime_state(temp)
+            family_layout = FamilyStateLayout(root, "agent-container")
+            for directory in (
+                family_layout.family_root,
+                family_layout.family_root / "projects",
+                family_layout.family_project_dir,
+            ):
+                directory.mkdir(mode=0o700)
+            write_family_binding(
+                family_layout.family_binding_file,
+                FamilyBinding(Repository.parse("family/roadmap"), 42),
+            )
+            run_dir = (
+                family_layout.family_intake_run_root / "0123456789abcdef"
+            )
+            capability = "A" * 43
+            mount = FamilyRuntimeMount(
+                run_dir,
+                capability,
+                {
+                    "AGENT_FAMILY_SOCKET": "/run/agent-family/intake.sock",
+                    "AGENT_FAMILY_CAPABILITY": capability,
+                },
+            )
+            events = []
+
+            class Runtime:
+                def __enter__(self):
+                    events.append("start")
+                    return mount
+
+                def __exit__(self, *_args):
+                    events.append("stop")
+
+            def supervisor(spec, gateway, egress, runtime):
+                events.append(("supervise", gateway, egress, runtime))
+                joined = " ".join(spec.argv)
+                self.assertIn(str(run_dir), joined)
+                self.assertNotIn("family/roadmap", joined)
+                return subprocess.CompletedProcess(spec.argv, 0)
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=successful_podman_result,
+                git_remote_reader=lambda _path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                family_runtime_factory=lambda layout: (
+                    events.append(("factory", layout)) or Runtime()
+                ),
+                runtime_supervisor=supervisor,
+                stdout=StringIO(),
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(events[0][0], "factory")
+            self.assertEqual(events[1], "start")
+            self.assertEqual(events[2][0], "supervise")
+            self.assertEqual(events[-1], "stop")
 
     def test_run_builds_and_uses_missing_project_image(self) -> None:
         with TemporaryDirectory() as temp:

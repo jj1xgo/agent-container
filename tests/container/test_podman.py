@@ -29,12 +29,14 @@ from agent_container.podman import podman_stats_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.podman import run_command_supervised
+from agent_container.family_intake_runtime import FamilyRuntimeMount
 from agent_container.egress_broker_runtime import EgressBrokerRuntimeError
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
 from agent_container.egress_broker_runtime import EgressRuntimeMount
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.state import Repository
 from agent_container.state import StateLayout
+from agent_container.state import github_broker_project_label
 
 
 IMAGE = "localhost/agent-container:dev"
@@ -43,6 +45,167 @@ HANDOVER_BROKER = HandoverRuntimeMount(Path("/state/handover-broker/one"))
 
 
 class PodmanCommandTest(unittest.TestCase):
+    def test_family_supervision_registers_stopped_runtime_before_resume(self) -> None:
+        events = []
+
+        class Process:
+            pid = 4321
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        family = mock.Mock()
+        family.check.return_value = None
+        gateway = mock.Mock()
+        gateway.wait_failed.return_value = False
+        egress = EgressRuntimeMount(
+            Path("/state/egress/codex"), "agent-container", "codex"
+        )
+        with mock.patch(
+            "agent_container.podman.subprocess.Popen", return_value=Process()
+        ) as popen, mock.patch(
+            "agent_container.podman.os.waitpid",
+            side_effect=lambda pid, flags: events.append(("stopped", pid, flags))
+            or (pid, (signal.SIGSTOP << 8) | 0x7F),
+        ), mock.patch(
+            "agent_container.podman.os.kill",
+            side_effect=lambda pid, signum: events.append(("signal", pid, signum)),
+        ):
+            family.register_runtime.side_effect = lambda pid: events.append(
+                ("registered", pid)
+            )
+            result = run_command_supervised(
+                CommandSpec(("podman", "run", "image"), {}),
+                gateway,
+                egress,
+                family,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            events,
+            [
+                ("stopped", 4321, os.WUNTRACED),
+                ("registered", 4321),
+                ("signal", 4321, signal.SIGCONT),
+            ],
+        )
+        self.assertEqual(
+            popen.call_args.args[0][:4],
+            ("/bin/sh", "-c", 'kill -STOP $$; exec "$@"', "agent-runtime"),
+        )
+
+    def test_family_registration_failure_kills_stopped_runtime_without_resume(self) -> None:
+        class Process:
+            pid = 4321
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.returncode = -signal.SIGKILL
+                return self.returncode
+
+        family = mock.Mock()
+        family.register_runtime.side_effect = RuntimeError("registration failed")
+        signals = []
+        with mock.patch(
+            "agent_container.podman.subprocess.Popen", return_value=Process()
+        ), mock.patch(
+            "agent_container.podman.os.waitpid",
+            return_value=(4321, (signal.SIGSTOP << 8) | 0x7F),
+        ), mock.patch(
+            "agent_container.podman.os.kill",
+            side_effect=lambda pid, signum: signals.append((pid, signum)),
+        ), self.assertRaises(RuntimeError):
+            run_command_supervised(
+                CommandSpec(("podman", "run", "image"), {}),
+                mock.Mock(),
+                EgressRuntimeMount(
+                    Path("/state/egress/codex"), "agent-container", "codex"
+                ),
+                family,
+            )
+
+        self.assertEqual(signals, [(4321, signal.SIGKILL)])
+
+    def test_family_runtime_mount_is_exactly_bounded_for_both_agents(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        handover = Path("/handovers/agent-container")
+        capability = "A" * 43
+        run_dir = (
+            Path("/state/family/intake/r")
+            / github_broker_project_label(layout.project_id)
+            / "0123456789abcdef"
+        )
+        family = FamilyRuntimeMount(
+            run_dir,
+            capability,
+            {
+                "AGENT_FAMILY_SOCKET": "/run/agent-family/intake.sock",
+                "AGENT_FAMILY_CAPABILITY": capability,
+            },
+        )
+
+        specs = (
+            run_codex_spec(
+                layout, handover, IMAGE, os.getuid(), os.getgid(),
+                family_mount=family,
+            ),
+            run_claude_spec(
+                layout, handover, IMAGE, os.getuid(), os.getgid(),
+                HANDOVER_BROKER, family_mount=family,
+            ),
+        )
+        for spec in specs:
+            with self.subTest(agent=spec.argv[-1]):
+                self.assertEqual(
+                    spec.argv.count(
+                        f"type=bind,src={run_dir},dst=/run/agent-family"
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    spec.argv.count(
+                        "AGENT_FAMILY_SOCKET=/run/agent-family/intake.sock"
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    spec.argv.count(f"AGENT_FAMILY_CAPABILITY={capability}"), 1
+                )
+                rendered = " ".join(spec.argv)
+                for forbidden in (
+                    "family/app.json", "private-key", "installation-token",
+                    "family/roadmap", "repository_id", "/pending",
+                    "family issue approve",
+                ):
+                    self.assertNotIn(forbidden, rendered)
+
+    def test_family_runtime_mount_rejects_unsafe_or_inconsistent_values(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        handover = Path("/handovers/agent-container")
+        capability = "A" * 43
+        family = object.__new__(FamilyRuntimeMount)
+        object.__setattr__(family, "socket_dir", Path("relative"))
+        object.__setattr__(family, "capability", capability)
+        object.__setattr__(family, "environment", {
+            "AGENT_FAMILY_SOCKET": "/run/agent-family/intake.sock",
+            "AGENT_FAMILY_CAPABILITY": capability,
+        })
+        cases = (family,)
+        for family in cases:
+            with self.assertRaises(ValueError):
+                run_codex_spec(
+                    layout, handover, IMAGE, os.getuid(), os.getgid(),
+                    family_mount=family,
+                )
+
     def test_supervised_process_stops_named_container_when_cli_cannot_be_reaped(
         self,
     ) -> None:
