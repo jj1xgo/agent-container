@@ -116,8 +116,8 @@ class PodmanCommandTest(unittest.TestCase):
             "agent_container.podman.subprocess.Popen", return_value=Process()
         ) as popen, mock.patch(
             "agent_container.podman._wait_for_stopped_container",
-            side_effect=lambda name, process: events.append(
-                ("stopped", name, process.pid)
+            side_effect=lambda pidfile, process: events.append(
+                ("stopped", pidfile.name, process.pid)
             ) or 9876,
             create=True,
         ), mock.patch(
@@ -140,12 +140,15 @@ class PodmanCommandTest(unittest.TestCase):
             events,
             [
                 "revalidated",
-                ("stopped", egress.container_name, 4321),
+                ("stopped", "container.pid", 4321),
                 ("registered", 9876),
                 ("signal", 9876, signal.SIGCONT),
             ],
         )
-        self.assertEqual(popen.call_args.args[0], ("podman", "run", "image"))
+        launched = popen.call_args.args[0]
+        self.assertEqual(launched[:2], ("podman", "run"))
+        self.assertTrue(launched[2].startswith("--pidfile="))
+        self.assertEqual(launched[3:], ("image",))
         self.assertEqual(popen.call_args.kwargs["pass_fds"], (77,))
 
     def test_family_registration_failure_kills_stopped_runtime_without_resume(self) -> None:

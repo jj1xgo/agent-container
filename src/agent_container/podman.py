@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import signal
 import subprocess
+from tempfile import TemporaryDirectory
 import time
 
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
@@ -284,22 +285,19 @@ def _runtime_launcher_args(
 
 
 def _wait_for_stopped_container(
-    container_name: str,
+    pidfile: Path,
     process: subprocess.Popen[str],
 ) -> int:
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError("family runtime launch handoff failed")
-        inspected = subprocess.run(
-            ("podman", "inspect", "--format", "{{.State.Pid}}", container_name),
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=5,
-        )
-        if inspected.returncode == 0 and inspected.stdout.strip().isdigit():
-            pid = int(inspected.stdout.strip())
+        try:
+            rendered_pid = pidfile.read_text("ascii").strip()
+        except (OSError, UnicodeError):
+            rendered_pid = ""
+        if rendered_pid.isdigit():
+            pid = int(rendered_pid)
             try:
                 process_stat = Path(f"/proc/{pid}/stat").read_text("ascii")
             except (OSError, UnicodeError):
@@ -813,6 +811,7 @@ def run_command_supervised(
     for signum in watched_signals:
         signal.signal(signum, handle_signal)
     process = None
+    registration_temp: TemporaryDirectory[str] | None = None
     gateway_failed = False
     failure: BaseException | None = None
     try:
@@ -820,8 +819,17 @@ def run_command_supervised(
             if family_mount is None:
                 raise FamilyRuntimeError("family runtime mount is unavailable")
             family_runtime.validate_mount()
+            registration_temp = TemporaryDirectory(prefix="agent-family-registration-")
+            registration_root = Path(registration_temp.name)
+            registration_root.chmod(0o700)
+            pidfile = registration_root / "container.pid"
+            if spec.argv[:2] != ("podman", "run"):
+                raise RuntimeError("family runtime launch handoff failed")
+            launch_argv = spec.argv[:2] + (f"--pidfile={pidfile}",) + spec.argv[2:]
+        else:
+            launch_argv = spec.argv
         process = subprocess.Popen(
-            spec.argv,
+            launch_argv,
             env=environment,
             text=True,
             pass_fds=spec.pass_fds,
@@ -833,7 +841,7 @@ def run_command_supervised(
                     if egress is not None
                     else family_mount.container_name
                 )
-                stopped_pid = _wait_for_stopped_container(container_name, process)
+                stopped_pid = _wait_for_stopped_container(pidfile, process)
                 family_runtime.register_runtime(stopped_pid)
             except BaseException:
                 try:
@@ -859,6 +867,8 @@ def run_command_supervised(
     finally:
         for signum in watched_signals:
             signal.signal(signum, previous_handlers[signum])
+        if registration_temp is not None:
+            registration_temp.cleanup()
 
     if process is None:
         assert failure is not None
