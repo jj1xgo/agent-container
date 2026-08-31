@@ -271,23 +271,6 @@ _MISSING = (
 
 
 class FamilyIntakePodmanFixtureTest(unittest.TestCase):
-    def test_inspection_runtime_surface_omits_command_but_keeps_exposure_fields(self) -> None:
-        inspected = {
-            "Config": {
-                "Cmd": ["grep", "family/roadmap"],
-                "Env": ["SAFE=value", "SECRET=repository_id"],
-            },
-            "HostConfig": {"Binds": ["/private-key.pem:/run/key:ro"]},
-            "Mounts": [{"Source": "/family/pending", "Destination": "/data"}],
-        }
-
-        surface = _inspection_runtime_surface(inspected)
-
-        self.assertNotIn("family/roadmap", surface)
-        self.assertIn("repository_id", surface)
-        self.assertIn("private-key.pem", surface)
-        self.assertIn("family/pending", surface)
-
     def test_concurrent_marker_release_is_idempotent_after_safe_create(self) -> None:
         with TemporaryDirectory() as temp:
             marker = Path(temp) / "done"
@@ -395,6 +378,19 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
         self.assertIn("os.fstat", _PROBE_SCRIPT)
         self.assertIn("intake.sock", _PROBE_SCRIPT)
         self.assertIn("SystemExit(94)", _PROBE_SCRIPT)
+        inspected = {
+            "Config": {
+                "Cmd": ["grep", "family/roadmap"],
+                "Env": ["SAFE=value", "SECRET=repository_id"],
+            },
+            "HostConfig": {"Binds": ["/private-key.pem:/run/key:ro"]},
+            "Mounts": [{"Source": "/family/pending", "Destination": "/data"}],
+        }
+        surface = _inspection_runtime_surface(inspected)
+        self.assertNotIn("family/roadmap", surface)
+        self.assertIn("repository_id", surface)
+        self.assertIn("private-key.pem", surface)
+        self.assertIn("family/pending", surface)
 
     def test_both_real_specs_have_pinned_fd_shape_without_podman(self) -> None:
         state = StateLayout(Path("/state"), "demo")
@@ -660,7 +656,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     self.assertEqual(completed.returncode, 0)
                     pending = list_pending(layout.family_pending_dir, "demo")
                     self.assertEqual(len(pending), 1)
-                    rendered = " ".join(argv)
+                    rendered = " ".join(base.argv)
                     for forbidden in (
                         str(layout.family_app_file),
                         str(layout.family_private_key_file),
