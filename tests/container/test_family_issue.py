@@ -28,8 +28,8 @@ class FamilyIssueTest(unittest.TestCase):
 
         self.assertEqual(
             render_family_issue_body(draft),
-            "## Summary\n\nUsers need a portable copy.\n\n"
-            "## Context\n\nThe current UI has no export action.\n\n"
+            "## Summary\n\nUsers need a portable copy\\.\n\n"
+            "## Context\n\nThe current UI has no export action\\.\n\n"
             "## Acceptance criteria\n\n- A JSON file downloads\n- Errors are visible\n",
         )
 
@@ -63,7 +63,7 @@ class FamilyIssueTest(unittest.TestCase):
         self.assertEqual(
             render_family_issue_body(draft).encode("utf-8"),
             (
-                "## Summary\n\nCombining e\u0301 and emoji stay unchanged.\n\n"
+                "## Summary\n\nCombining e\u0301 and emoji stay unchanged\\.\n\n"
                 "## Context\n\n日本語もそのまま保存される。\n\n"
                 "## Acceptance criteria\n\n- Déjà vu\n- Пройдено\n"
             ).encode("utf-8"),
@@ -75,25 +75,29 @@ class FamilyIssueTest(unittest.TestCase):
         payload.update(
             {
                 "title": "`*` [title]",
-                "summary": "# custom heading **bold** [link](https://example.invalid)",
-                "context": "- custom bullet\nwould be unsafe",
-                "acceptance_criteria": ["`code`", "---"],
+                "summary": "# custom heading **bold** _under_ [link](https://example.invalid) = \\slash",
+                "context": "> quote + - item **still content** <tag>",
+                "acceptance_criteria": ["`code` {x} | ~strike~", "--- ! <tag>"],
             }
         )
-        payload["context"] = "- custom bullet **still content**"
 
         draft = parse_family_issue_draft(payload)
         body = render_family_issue_body(draft)
 
         self.assertEqual(
             body,
-            "## Summary\n\n# custom heading **bold** [link](https://example.invalid)\n\n"
-            "## Context\n\n- custom bullet **still content**\n\n"
-            "## Acceptance criteria\n\n- `code`\n- ---\n",
+            "## Summary\n\n\\# custom heading \\*\\*bold\\*\\* \\_under\\_ \\[link\\]\\(https://example\\.invalid\\) \\= \\\\slash\n\n"
+            "## Context\n\n\\> quote \\+ \\- item \\*\\*still content\\*\\* \\<tag\\>\n\n"
+            "## Acceptance criteria\n\n- \\`code\\` \\{x\\} \\| \\~strike\\~\n"
+            "- \\-\\-\\- \\! \\<tag\\>\n",
         )
         self.assertEqual(body.count("## Summary"), 1)
         self.assertEqual(body.count("## Context"), 1)
         self.assertEqual(body.count("## Acceptance criteria"), 1)
+        self.assertEqual(
+            [line for line in body.splitlines() if line.startswith("## ")],
+            ["## Summary", "## Context", "## Acceptance criteria"],
+        )
 
     # Break caught: a non-string, empty, or structurally wrong required value being accepted.
     def test_rejects_wrong_types_empty_values_and_non_list_criteria(self) -> None:
@@ -166,9 +170,15 @@ class FamilyIssueTest(unittest.TestCase):
                     parse_family_issue_draft(payload)
 
         for codepoint in (*range(0x202A, 0x202F), *range(0x2066, 0x206A)):
+            for field in ("title", "summary", "context"):
+                payload = valid_payload()
+                payload[field] = f"safe{chr(codepoint)}value"
+                with self.subTest(field=field, codepoint=codepoint):
+                    with self.assertRaises(ValueError):
+                        parse_family_issue_draft(payload)
             payload = valid_payload()
-            payload["summary"] = f"safe{chr(codepoint)}value"
-            with self.subTest(codepoint=codepoint):
+            payload["acceptance_criteria"] = [f"safe{chr(codepoint)}value"]
+            with self.subTest(field="acceptance_criteria", codepoint=codepoint):
                 with self.assertRaises(ValueError):
                     parse_family_issue_draft(payload)
 

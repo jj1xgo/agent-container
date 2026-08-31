@@ -48,9 +48,38 @@ Output: `Ran 12 tests ... OK`; `All checks passed!`.
 ## Self-review and concerns
 
 The module has no credential, filesystem, network, or external-state behavior.
-The canonical renderer intentionally performs no Unicode normalization or
-content rewriting, so the immutable draft and canonical body retain accepted
-input bytes and fixed structure. Duplicate JSON-key rejection belongs to the
+The canonical renderer intentionally performs no Unicode normalization; it
+escapes Markdown syntax in the rendered body while retaining each accepted
+input code point. The immutable draft and canonical body are fixed and shared
+by preview/POST. Duplicate JSON-key rejection belongs to the
 protocol decoder because duplicate keys cannot be represented by a Python
 `dict`; the parser rejects non-exact/custom mapping objects. Full-suite socket
 errors are environment-limited and should be rerun in a socket-capable host.
+
+## Review fix round 1
+
+The renderer now backslash-escapes Markdown metacharacters in summary, context,
+and every acceptance criterion (`\\`, backtick, emphasis/brackets, heading,
+list, quote, punctuation, and related structural characters). Renderer-owned
+headings and bullets remain unescaped and are the only Markdown structure. The
+tests assert exact escaped output and verify that only the three fixed heading
+lines exist. Bidi override coverage now exercises title, summary, context, and
+acceptance criteria for every U+202A–U+202E and U+2066–U+2069 code point.
+
+Review-fix RED command:
+
+```text
+PYTHONPATH=src python3 -m unittest tests.container.test_family_issue -v
+```
+
+Output: 1 failure in `test_keeps_markdown_metacharacters_inside_fixed_sections`
+because the pre-fix renderer emitted raw `#`, `>`, `*`, backticks, and list
+punctuation.
+
+Review-fix GREEN command:
+
+```text
+PYTHONPATH=src python3 -m unittest tests.container.test_family_issue -v && bin/lint
+```
+
+Output: `Ran 12 tests ... OK`; `All checks passed!`.

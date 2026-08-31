@@ -15,6 +15,7 @@ _REQUEST_FIELDS = frozenset(
 _BIDI_OVERRIDES = frozenset(
     (*range(0x202A, 0x202F), *range(0x2066, 0x206A))
 )
+_MARKDOWN_ESCAPES = frozenset("\\`*{}[]()#+-.!_>~|<=")
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,13 @@ def _validate_draft(draft: object) -> FamilyIssueDraft:
     return draft
 
 
+def _escape_markdown_literal(value: str) -> str:
+    return "".join(
+        f"\\{character}" if character in _MARKDOWN_ESCAPES else character
+        for character in value
+    )
+
+
 def parse_family_issue_draft(payload: object) -> FamilyIssueDraft:
     """Parse and validate the exact credential-free request content schema."""
 
@@ -89,10 +97,15 @@ def render_family_issue_body(draft: FamilyIssueDraft) -> str:
     """Render a validated draft with headings and bullets owned by the host."""
 
     draft = _validate_draft(draft)
-    criteria = "".join(f"- {criterion}\n" for criterion in draft.acceptance_criteria)
+    summary = _escape_markdown_literal(draft.summary)
+    context = _escape_markdown_literal(draft.context)
+    criteria = "".join(
+        f"- {_escape_markdown_literal(criterion)}\n"
+        for criterion in draft.acceptance_criteria
+    )
     return (
-        f"## Summary\n\n{draft.summary}\n\n"
-        f"## Context\n\n{draft.context}\n\n"
+        f"## Summary\n\n{summary}\n\n"
+        f"## Context\n\n{context}\n\n"
         f"## Acceptance criteria\n\n{criteria}"
     )
 
