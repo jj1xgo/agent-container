@@ -83,6 +83,14 @@ def _escape_markdown_literal(value: str) -> str:
     else:
         leading_spaces = 0
     block_value = value[leading_spaces:]
+    task = re.match(r"\[(?: |x|X)\](?: |$)", block_value)
+    definition = re.match(r"\[[^\]]+\]:(?: |$)", block_value)
+    if task:
+        escaped.add(leading_spaces)
+        escaped.add(leading_spaces + 2)
+    if definition:
+        close = leading_spaces + block_value.find("]")
+        escaped.update((leading_spaces, close, close + 1))
     if re.match(r"#{1,6}(?: |$)", block_value):
         escaped.add(leading_spaces)
     elif re.match(r">(?: |$)", block_value):

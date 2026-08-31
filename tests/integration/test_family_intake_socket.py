@@ -17,6 +17,7 @@ from agent_container.family_intake_protocol import encode_request_frame
 from agent_container.family_intake_protocol import FamilyIntakeRequest
 from agent_container.family_intake_runtime import FamilyIntakeRuntime
 from agent_container.family_pending import list_pending
+from agent_container.family_pending import inspect_pending_store
 from agent_container.family_state import FamilyBinding
 from agent_container.family_state import FamilyStateLayout
 from agent_container.family_state import write_family_binding
@@ -430,7 +431,7 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
         request = self.request(mount.capability)
 
         with patch(
-            "agent_container.family_intake_broker.append_family_audit",
+            "agent_container.family_pending.append_family_audit",
             side_effect=OSError(marker),
         ):
             with self.assertRaises((OSError, RuntimeError, ValueError)) as client_error:
@@ -447,7 +448,11 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
         exposed = str(client_error.exception) + str(checked.exception) + repr(runtime) + audit
         self.assertNotIn(marker, exposed)
         self.assertNotIn(mount.capability, exposed)
-        self.assertEqual(len(list_pending(self.layout.family_pending_dir, "demo")), 1)
+        self.assertEqual(
+            len(inspect_pending_store(self.layout.family_pending_dir, "demo")), 1
+        )
+        with self.assertRaisesRegex(ValueError, "audit"):
+            list_pending(self.layout.family_pending_dir, "demo")
         with self.assertRaisesRegex(Exception, "^family intake runtime failed$"):
             runtime.close()
         self.assertFalse(mount.socket_dir.exists())

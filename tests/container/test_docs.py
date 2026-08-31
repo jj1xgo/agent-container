@@ -775,6 +775,32 @@ class FamilyIssueBrokerDocumentationTest(unittest.TestCase):
         ):
             self.assertIn(required, self.smoke)
 
+    def test_smoke_commands_use_exact_opt_ins_and_local_unknown_fixture(self) -> None:
+        self.assertIn(
+            "AGENT_CONTAINER_RUN_SOCKET_INTEGRATION=1 PYTHONPATH=src python3 -m unittest",
+            self.smoke,
+        )
+        self.assertIn("AGENT_CONTAINER_RUN_PODMAN_INTEGRATION=1", self.smoke)
+        self.assertIn(
+            "AGENT_FAMILY_TEST_IMAGE=localhost/agent-family-test:local",
+            self.smoke,
+        )
+        self.assertIn(
+            "PYTHONPATH=src python3 -m unittest tests.integration.test_family_forced_unknown -v",
+            self.smoke,
+        )
+        for expected in (
+            "Codex suiteは`Ran 21 tests ... OK`",
+            "container suiteは`Ran 927 tests ... OK`",
+            "socket suiteは`Ran 17 tests ... OK`",
+            "forced-unknown fixtureは`Ran 4 tests ... OK`",
+            "unexpected skipは0件",
+        ):
+            self.assertIn(expected, self.smoke)
+        self.assertIn("Ran 4 tests", self.smoke)
+        self.assertIn("missing prerequisiteごとにnot run", self.smoke)
+        self.assertNotIn("UNOBSERVED", self.operator + self.smoke)
+
     def test_readme_and_changelog_advertise_shipped_scope_without_stale_claim(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")

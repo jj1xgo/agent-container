@@ -93,7 +93,7 @@ Output: `Ran 15 tests ... OK`; `All checks passed!`.
 
 ## Verification
 
-- Focused Task 2 tests: PASS (12 tests).
+- Focused Task 2 tests: PASS (15 tests).
 - `bin/lint`: PASS.
 - `git diff --check`: PASS.
 - Full unittest discovery (`PYTHONPATH=src python3 -m unittest discover -s tests -p

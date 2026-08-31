@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import agent_container.family_pending as family_pending
 from agent_container.family_intake_broker import FamilyIntakeSession
 from agent_container.family_intake_broker import FamilyIntakeDenied
 from agent_container.family_intake_broker import FamilyIntakeInternalError
@@ -309,7 +310,7 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
         session = self.session()
 
         with patch(
-            "agent_container.family_intake_broker.append_family_audit",
+            "agent_container.family_pending.append_family_audit",
             side_effect=OSError("private-audit-marker"),
         ):
             with self.assertRaises(FamilyIntakeInternalError) as raised:
@@ -319,10 +320,16 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
         self.assertNotIn("private-audit-marker", str(raised.exception))
         self.assertTrue(session.failed)
         self.assertTrue(session.consumed)
-        self.assertEqual(len(list_pending(self.store, "demo")), 1)
+        self.assertEqual(
+            len(family_pending.inspect_pending_store(self.store, "demo")), 1
+        )
+        with self.assertRaisesRegex(ValueError, "audit"):
+            list_pending(self.store, "demo")
         with self.assertRaises(FamilyIntakeDenied):
             session.handle(self.request())
-        self.assertEqual(len(list_pending(self.store, "demo")), 1)
+        self.assertEqual(
+            len(family_pending.inspect_pending_store(self.store, "demo")), 1
+        )
 
     # Break caught: an ordinary request denial poisoning runtime supervision.
     def test_ordinary_denial_is_typed_without_marking_internal_failure(self) -> None:

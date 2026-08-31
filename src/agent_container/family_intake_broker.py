@@ -14,7 +14,6 @@ from agent_container.family_intake_protocol import FamilyIntakeRequest
 from agent_container.family_intake_protocol import FamilyIntakeResponse
 from agent_container.family_issue import canonicalize_family_issue
 from agent_container.family_issue import parse_family_issue_draft
-from agent_container.family_pending import append_family_audit
 from agent_container.family_pending import create_pending
 from agent_container.family_pending import PendingCapacityError
 from agent_container.family_state import load_family_binding
@@ -278,23 +277,11 @@ class FamilyIntakeSession:
                     self.project_id,
                     issue,
                     now=observed_now,
+                    audit_path=self.audit_path,
                     random_bytes=self.random_bytes,
                 )
             except PendingCapacityError:
                 raise FamilyIntakeDenied() from None
-            except (OSError, RuntimeError, TypeError, ValueError):
-                self._fail_locked()
-                raise FamilyIntakeInternalError() from None
-            try:
-                append_family_audit(
-                    self.audit_path,
-                    timestamp=observed_now,
-                    project_id=self.project_id,
-                    request_id=pending.request_id,
-                    operation="intake",
-                    status="pending",
-                    stage="intake",
-                )
             except (OSError, RuntimeError, TypeError, ValueError):
                 self._fail_locked()
                 raise FamilyIntakeInternalError() from None

@@ -434,7 +434,11 @@ class PendingStoreTest(unittest.TestCase):
             raise OSError("private audit open failure")
 
         def fail_audit_write(descriptor: int, body: bytes) -> None:
-            if b'"operation":"recover"' in body:
+            try:
+                target = os.readlink(f"/proc/self/fd/{descriptor}")
+            except OSError:
+                target = ""
+            if target.endswith("events.jsonl"):
                 raise OSError("private audit write failure")
             real_write_all(descriptor, body)
 
@@ -468,9 +472,17 @@ class PendingStoreTest(unittest.TestCase):
                         clock=lambda: NOW + index,
                     )
 
-                stranded = load_pending(self.store, request.request_id, "demo")
+                stranded = next(
+                    item
+                    for item in family_pending.inspect_pending_store(
+                        self.store, "demo"
+                    )
+                    if item.request_id == request.request_id
+                )
                 self.assertEqual(stranded.state, PendingState.UNKNOWN)
-                self.assertTrue(stranded.recovery_audit_pending)
+                self.assertIsNotNone(stranded.audit_event)
+                with self.assertRaisesRegex(ValueError, "audit"):
+                    load_pending(self.store, request.request_id, "demo")
 
                 recovered = family_pending.initialize_pending_store(
                     self.store,
@@ -481,7 +493,7 @@ class PendingStoreTest(unittest.TestCase):
                 self.assertIn(request.request_id, [item.request_id for item in recovered])
                 repaired = load_pending(self.store, request.request_id, "demo")
                 self.assertEqual(repaired.state, PendingState.UNKNOWN)
-                self.assertFalse(repaired.recovery_audit_pending)
+                self.assertIsNone(repaired.audit_event)
 
         events = [
             json.loads(line)
@@ -515,9 +527,13 @@ class PendingStoreTest(unittest.TestCase):
                 audit_path=self.audit,
                 clock=lambda: NOW,
             )
-        crashed = load_pending(self.store, request.request_id, "demo")
+        crashed = next(
+            item
+            for item in family_pending.inspect_pending_store(self.store, "demo")
+            if item.request_id == request.request_id
+        )
         self.assertEqual(crashed.state, PendingState.UNKNOWN)
-        self.assertTrue(crashed.recovery_audit_pending)
+        self.assertIsNotNone(crashed.audit_event)
 
         audit_started = threading.Event()
         allow_audit = threading.Event()
@@ -528,7 +544,7 @@ class PendingStoreTest(unittest.TestCase):
         def delayed_append(*args, **kwargs):
             raw = json.loads(self._record_path(request.request_id).read_text("ascii"))
             self.assertEqual(raw["state"], "unknown")
-            self.assertIs(raw["recovery_audit_pending"], True)
+            self.assertEqual(raw["audit_event"]["operation"], "recover")
             audit_started.set()
             self.assertTrue(allow_audit.wait(1))
             return real_append(*args, **kwargs)
@@ -547,10 +563,10 @@ class PendingStoreTest(unittest.TestCase):
                 )
 
         def reconcile() -> None:
-            competitor_started.set()
-            with pending_lock(self.store, request.request_id, "demo") as locked:
-                competitor_acquired.set()
-                self.assertFalse(locked.request.recovery_audit_pending)
+                competitor_started.set()
+                with pending_lock(self.store, request.request_id, "demo") as locked:
+                    competitor_acquired.set()
+                    self.assertIsNone(locked.request.audit_event)
 
         recovery_thread = threading.Thread(target=initialize)
         recovery_thread.start()
@@ -567,7 +583,7 @@ class PendingStoreTest(unittest.TestCase):
         self.assertFalse(competitor_thread.is_alive())
         self.assertTrue(competitor_acquired.is_set())
         repaired = load_pending(self.store, request.request_id, "demo")
-        self.assertFalse(repaired.recovery_audit_pending)
+        self.assertIsNone(repaired.audit_event)
 
     # Break caught: expiry before its exact deadline or from an in-flight state.
     def test_expiry_requires_pending_state_at_or_after_deadline(self) -> None:
@@ -886,6 +902,357 @@ class PendingStoreTest(unittest.TestCase):
             load_pending(self.store, sending.request_id, "demo").state,
             PendingState.UNKNOWN,
         )
+
+    # Break caught: terminal cleanup becoming durable before its audit event can be retried.
+    def test_audited_terminal_transition_leaves_fixed_outbox_until_startup_drain(self) -> None:
+        transition_audited = getattr(
+            family_pending, "transition_pending_audited", None
+        )
+        self.assertTrue(callable(transition_audited))
+        request = self._create()
+        self._transition(request.request_id, PendingState.SENDING)
+
+        with pending_lock(self.store, request.request_id, "demo") as locked:
+            with patch.object(
+                family_pending,
+                "append_family_audit",
+                side_effect=OSError("private raw exception marker"),
+            ):
+                with self.assertRaises(OSError):
+                    transition_audited(
+                        locked,
+                        PendingState.CREATED,
+                        audit_path=self.audit,
+                        timestamp=NOW + 1,
+                        operation="approve",
+                        status="created",
+                        stage="cleanup",
+                        issue_number=42,
+                        issue_url="https://github.com/family/roadmap/issues/42",
+                    )
+
+        payload = json.loads(self._record_path(request.request_id).read_text("ascii"))
+        self.assertEqual(payload["state"], "created")
+        self.assertNotIn("title", payload)
+        self.assertNotIn("body", payload)
+        self.assertEqual(
+            payload["audit_event"],
+            {
+                "operation": "approve",
+                "project_id": "demo",
+                "request_id": request.request_id,
+                "stage": "cleanup",
+                "status": "created",
+                "timestamp": NOW + 1,
+            },
+        )
+        self.assertNotIn("private raw exception marker", json.dumps(payload))
+        with self.assertRaisesRegex(ValueError, "audit"):
+            load_pending(self.store, request.request_id, "demo")
+
+        family_pending.initialize_pending_store(
+            self.store,
+            "demo",
+            audit_path=self.audit,
+            clock=lambda: NOW + 2,
+        )
+        repaired = load_pending(self.store, request.request_id, "demo")
+        self.assertEqual(repaired.state, PendingState.CREATED)
+        self.assertNotIn(
+            "audit_event",
+            json.loads(self._record_path(request.request_id).read_text("ascii")),
+        )
+        self.assertEqual(
+            json.loads(self.audit.read_text("ascii"))["status"], "created"
+        )
+
+    # Break caught: a crash after append but before marker clear silently losing recovery.
+    def test_outbox_is_at_least_once_after_append_before_clear_crash(self) -> None:
+        transition_audited = getattr(
+            family_pending, "transition_pending_audited", None
+        )
+        self.assertTrue(callable(transition_audited))
+        request = self._create()
+        real_clear = getattr(family_pending, "_clear_audit_event", None)
+        self.assertTrue(callable(real_clear))
+
+        with pending_lock(self.store, request.request_id, "demo") as locked:
+            with patch.object(
+                family_pending,
+                "_clear_audit_event",
+                side_effect=KeyboardInterrupt(),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    transition_audited(
+                        locked,
+                        PendingState.REJECTED,
+                        audit_path=self.audit,
+                        timestamp=NOW,
+                        operation="reject",
+                        status="rejected",
+                        stage="cleanup",
+                    )
+
+        self.assertEqual(len(self.audit.read_text("ascii").splitlines()), 1)
+        family_pending.initialize_pending_store(
+            self.store,
+            "demo",
+            audit_path=self.audit,
+            clock=lambda: NOW + 1,
+        )
+        events = [json.loads(line) for line in self.audit.read_text("ascii").splitlines()]
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0], events[1])
+        self.assertEqual(
+            load_pending(self.store, request.request_id, "demo").state,
+            PendingState.REJECTED,
+        )
+
+    # Break caught: ten stale pending records permanently exhausting intake capacity.
+    def test_capacity_is_checked_only_after_bounded_expiry_sweep(self) -> None:
+        requests = [self._create(byte, now=NOW) for byte in range(1, 11)]
+
+        replacement = create_pending(
+            self.store,
+            "demo",
+            self.issue,
+            now=NOW + 86_400,
+            audit_path=self.audit,
+            random_bytes=lambda size: b"\x0b" * size,
+        )
+
+        self.assertEqual(replacement.state, PendingState.PENDING)
+        states = {item.request_id: item.state for item in list_pending(self.store, "demo")}
+        self.assertEqual(states[replacement.request_id], PendingState.PENDING)
+        self.assertTrue(
+            all(states[item.request_id] is PendingState.EXPIRED for item in requests)
+        )
+        events = [json.loads(line) for line in self.audit.read_text("ascii").splitlines()]
+        self.assertEqual(len(events), 11)
+        self.assertEqual(
+            sum(event["operation"] == "expire" for event in events),
+            10,
+        )
+        self.assertEqual(events[-1]["operation"], "intake")
+
+    # Break caught: approval/rejection publishing after the startup sweep expired it.
+    def test_startup_expiry_and_rejection_race_has_one_terminal_audited_winner(self) -> None:
+        request = self._create()
+        barrier = threading.Barrier(3)
+        failures: list[Exception] = []
+
+        def sweep() -> None:
+            barrier.wait()
+            try:
+                family_pending.initialize_pending_store(
+                    self.store,
+                    "demo",
+                    audit_path=self.audit,
+                    clock=lambda: request.expires_at,
+                )
+            except Exception as error:
+                failures.append(error)
+
+        def reject() -> None:
+            barrier.wait()
+            try:
+                with pending_lock(self.store, request.request_id, "demo") as locked:
+                    family_pending.transition_pending_audited(
+                        locked,
+                        PendingState.REJECTED,
+                        audit_path=self.audit,
+                        timestamp=request.expires_at,
+                        operation="reject",
+                        status="rejected",
+                        stage="cleanup",
+                    )
+            except ValueError:
+                pass
+            except Exception as error:
+                failures.append(error)
+
+        threads = [threading.Thread(target=sweep), threading.Thread(target=reject)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+
+        self.assertEqual(failures, [])
+        terminal = load_pending(self.store, request.request_id, "demo")
+        self.assertIn(terminal.state, {PendingState.EXPIRED, PendingState.REJECTED})
+        self.assertIsNone(terminal.issue)
+        events = [json.loads(line) for line in self.audit.read_text("ascii").splitlines()]
+        matching = [event for event in events if event["request_id"] == request.request_id]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["status"], terminal.state.value)
+
+    # Break caught: compatibility recovery metadata bypassing the generic outbox schema.
+    def test_startup_migrates_legacy_recovery_marker_to_generic_outbox(self) -> None:
+        request = self._create()
+        with pending_lock(self.store, request.request_id, "demo") as locked:
+            transition_pending(
+                locked,
+                PendingState.SENDING,
+            )
+            transition_pending(
+                locked,
+                PendingState.UNKNOWN,
+                recovery_audit_pending=True,
+            )
+        observed: list[dict[str, object]] = []
+        real_append = family_pending.append_family_audit
+
+        def observe(path: Path, **values: object) -> None:
+            observed.append(
+                json.loads(self._record_path(request.request_id).read_text("ascii"))
+            )
+            real_append(path, **values)
+
+        with patch.object(family_pending, "append_family_audit", side_effect=observe):
+            family_pending.initialize_pending_store(
+                self.store,
+                "demo",
+                audit_path=self.audit,
+                clock=lambda: NOW + 7,
+            )
+
+        self.assertEqual(len(observed), 1)
+        self.assertNotIn("recovery_audit_pending", observed[0])
+        self.assertEqual(observed[0]["audit_event"]["operation"], "recover")
+        self.assertNotIn(
+            "audit_event",
+            json.loads(self._record_path(request.request_id).read_text("ascii")),
+        )
+
+    # Break caught: one lifecycle outcome retaining the old state/audit omission window.
+    def test_every_terminal_and_reconciliation_outcome_uses_the_same_outbox(self) -> None:
+        real_write_all = family_pending._write_all
+        real_fsync = family_pending.os.fsync
+
+        def audit_failure(kind: str):
+            if kind == "open":
+                return patch.object(
+                    family_pending,
+                    "_open_audit",
+                    side_effect=OSError("private audit open failure"),
+                )
+
+            if kind == "write":
+                def fail_audit_write(descriptor: int, body: bytes) -> None:
+                    target = os.readlink(f"/proc/self/fd/{descriptor}")
+                    if target.endswith("events.jsonl"):
+                        raise OSError("private audit write failure")
+                    real_write_all(descriptor, body)
+
+                return patch.object(
+                    family_pending,
+                    "_write_all",
+                    side_effect=fail_audit_write,
+                )
+
+            fsync_failed = False
+
+            def fail_first_audit_fsync(descriptor: int) -> None:
+                nonlocal fsync_failed
+                target = os.readlink(f"/proc/self/fd/{descriptor}")
+                if not fsync_failed and target.endswith("events.jsonl"):
+                    fsync_failed = True
+                    raise OSError("private audit fsync failure")
+                real_fsync(descriptor)
+
+            return patch.object(
+                family_pending.os,
+                "fsync",
+                side_effect=fail_first_audit_fsync,
+            )
+
+        cases = (
+            ("approve", PendingState.CREATED, "created", "cleanup", "sending"),
+            ("reject", PendingState.REJECTED, "rejected", "cleanup", "pending"),
+            ("expire", PendingState.EXPIRED, "expired", "cleanup", "pending"),
+            ("approve", PendingState.UNKNOWN, "unknown", "response", "sending"),
+            (
+                "resolve-created",
+                PendingState.CREATED,
+                "created",
+                "cleanup",
+                "unknown",
+            ),
+            (
+                "resolve-not-created",
+                PendingState.PENDING,
+                "pending",
+                "reconcile",
+                "unknown",
+            ),
+        )
+        byte = 0x50
+        for operation, target, status, stage, source in cases:
+            for failure_kind in ("open", "write", "fsync"):
+                byte += 1
+                with self.subTest(
+                    operation=operation,
+                    target=target.value,
+                    failure=failure_kind,
+                ):
+                    request = self._create(byte)
+                    if source in {"sending", "unknown"}:
+                        self._transition(request.request_id, PendingState.SENDING)
+                    if source == "unknown":
+                        self._transition(request.request_id, PendingState.UNKNOWN)
+                    kwargs: dict[str, object] = {}
+                    if target is PendingState.CREATED:
+                        kwargs = {
+                            "issue_number": byte,
+                            "issue_url": (
+                                "https://github.com/family/roadmap/issues/" + str(byte)
+                            ),
+                        }
+                    with pending_lock(self.store, request.request_id, "demo") as locked:
+                        with audit_failure(failure_kind):
+                            with self.assertRaises(OSError):
+                                family_pending.transition_pending_audited(
+                                    locked,
+                                    target,
+                                    audit_path=self.audit,
+                                    timestamp=NOW + byte,
+                                    operation=operation,
+                                    status=status,
+                                    stage=stage,
+                                    **kwargs,
+                                )
+                    observed = next(
+                        item
+                        for item in family_pending.inspect_pending_store(
+                            self.store, "demo"
+                        )
+                        if item.request_id == request.request_id
+                    )
+                    self.assertEqual(observed.state, target)
+                    self.assertEqual(observed.audit_event.operation, operation)
+                    self.assertEqual(observed.audit_event.status, status)
+                    self.assertEqual(observed.audit_event.stage, stage)
+                    self.assertEqual(
+                        observed.issue is None,
+                        target
+                        in {
+                            PendingState.CREATED,
+                            PendingState.REJECTED,
+                            PendingState.EXPIRED,
+                        },
+                    )
+                    family_pending.initialize_pending_store(
+                        self.store,
+                        "demo",
+                        audit_path=self.audit,
+                        clock=lambda: NOW + byte + 1,
+                    )
+                    self.assertEqual(
+                        load_pending(self.store, request.request_id, "demo").state,
+                        target,
+                    )
 
 
 class FamilyAuditTest(unittest.TestCase):

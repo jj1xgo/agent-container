@@ -19,19 +19,22 @@ checkoutしたcommitを記録し、次をホスト側Codexが実行して日本�
 bin/lint
 PYTHONPATH=src python3 -m unittest discover -s tests/codex -v
 PYTHONPATH=src python3 -m unittest discover -s tests/container -v
-PYTHONPATH=src python3 -m unittest tests.integration.test_github_broker_socket tests.integration.test_handover_broker_socket tests.integration.test_egress_broker_socket tests.integration.test_family_intake_socket -v
+AGENT_CONTAINER_RUN_SOCKET_INTEGRATION=1 PYTHONPATH=src python3 -m unittest tests.integration.test_github_broker_socket tests.integration.test_handover_broker_socket tests.integration.test_egress_broker_socket tests.integration.test_family_intake_socket -v
+PYTHONPATH=src python3 -m unittest tests.integration.test_family_forced_unknown -v
 git diff --check
 ```
 
-duplicate denial、content-free audit、credential non-exposure、terminal cleanup、forced unknownとcreated / not-created reconciliationがunit／socket testで通ったことをtest名と件数で記録します。秘密値やcanonical本文を記録しません。
+固定期待値はCodex suiteは`Ran 21 tests ... OK`、container suiteは`Ran 927 tests ... OK`、socket suiteは`Ran 17 tests ... OK`、forced-unknown fixtureは`Ran 4 tests ... OK`です。すべてのcommandでunexpected skipは0件を要求し、件数不一致または1件でも想定外skipがあればPASSにしません。duplicate denial、content-free audit、credential non-exposure、terminal cleanup、forced unknownとcreated / not-created reconciliationがunit／socket testで通ったことをtest名と件数で記録します。秘密値やcanonical本文を記録しません。
 
 ## 2. Real Podman gate
 
 これはunit testで代替できない必須gateです。Podman 5.8以降、local rootless Podman、crun、instrumented imageが必要です。remote Podmanや別OCI runtimeではnot runです。
 
 ```bash
-PYTHONPATH=src python3 -m unittest tests.integration.test_project_image_podman tests.integration.test_egress_podman tests.integration.test_family_intake_podman -v
+AGENT_CONTAINER_RUN_SOCKET_INTEGRATION=1 AGENT_CONTAINER_RUN_PODMAN_INTEGRATION=1 AGENT_FAMILY_TEST_IMAGE=localhost/agent-family-test:local PYTHONPATH=src python3 -m unittest tests.integration.test_project_image_podman tests.integration.test_egress_podman tests.integration.test_family_intake_podman -v
 ```
+
+`localhost/agent-family-test:local`はこのcheckoutから事前に構築し、probe commandを実行できる使い捨てinstrumented imageだけに付けるlocal tagです。通常のproduction imageやremote registry imageへ置き換えません。Podman、socket許可、crun、imageのmissing prerequisiteごとにnot runと理由を個別記録し、skipをまとめてPASSにしません。
 
 Family gateではCodex pathとClaude pathの両方について、次を実観測します。
 
@@ -89,6 +92,12 @@ promptへは正確に`approve <request-id>`を入力します。成功後はnumb
 ## 6. Forced unknown／reconcile
 
 実Issueを増やさずに可能な、送信後response喪失を模擬するhost fixtureを使います。`unknown`では通常approveと自動retryが拒否され、private canonical contentが照合まで残ることを確認します。
+
+```bash
+PYTHONPATH=src python3 -m unittest tests.integration.test_family_forced_unknown -v
+```
+
+このfixtureはhost-only fake provider／creator／inventoryだけを使い、5秒以内に終了します。network、Podman、GitHub、外部状態mutationを使わず、production CLIへforced-unknown bypassを追加しません。固定期待値は`Ran 4 tests ... OK`で、temporary stateはtest終了時にcleanupされます。
 
 - GitHub側に作成済みと確認できるfixtureは`resolve-created`でexact issue number、repository、title/bodyを照合する。
 - 未作成を確認できるfixtureだけ`resolve-not-created`でpendingへ戻す。

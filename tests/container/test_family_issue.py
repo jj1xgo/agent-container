@@ -172,6 +172,26 @@ class FamilyIssueTest(unittest.TestCase):
         self.assertIn("- 1\\. ordered", body)
         self.assertIn("- 1\\) ordered", body)
 
+    # Break caught: user fields producing GFM tasks or reference-definition structure.
+    def test_literalizes_task_lists_link_definitions_and_footnote_definitions(self) -> None:
+        payload = valid_payload()
+        payload.update(
+            {
+                "summary": "[docs]: https://example.invalid/private",
+                "context": "[^secret]: hidden context",
+                "acceptance_criteria": ["[ ] unchecked", "[x] checked"],
+            }
+        )
+
+        body = render_family_issue_body(parse_family_issue_draft(payload))
+
+        self.assertIn("\\[docs\\]\\: https://example.invalid/private", body)
+        self.assertIn("\\[^secret\\]\\: hidden context", body)
+        self.assertIn("- \\[ \\] unchecked", body)
+        self.assertIn("- \\[x\\] checked", body)
+        self.assertNotIn("- [ ]", body)
+        self.assertNotIn("- [x]", body)
+
     # Break caught: a non-string, empty, or structurally wrong required value being accepted.
     def test_rejects_wrong_types_empty_values_and_non_list_criteria(self) -> None:
         cases: list[dict[str, object]] = []

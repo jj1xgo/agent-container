@@ -23,7 +23,7 @@ from agent_container.family_pending import pending_lock
 from agent_container.family_pending import PendingSnapshotMismatch
 from agent_container.family_pending import PendingState
 from agent_container.family_pending import snapshot_pending
-from agent_container.family_pending import transition_pending
+from agent_container.family_pending import transition_pending_audited
 from agent_container.family_pending import validate_family_audit
 from agent_container.family_state import FamilyBinding
 from agent_container.family_state import FamilyStateLayout
@@ -377,11 +377,11 @@ def _validate_created_result(
 
 
 def _expire_locked(layout: FamilyStateLayout, locked, *, now: int) -> None:
-    transition_pending(locked, PendingState.EXPIRED)
-    _audit(
-        layout,
-        locked.request.request_id,
-        now=now,
+    transition_pending_audited(
+        locked,
+        PendingState.EXPIRED,
+        audit_path=layout.family_audit_file,
+        timestamp=now,
         operation="expire",
         status="expired",
         stage="cleanup",
@@ -560,18 +560,17 @@ def approve_family_issue(
         if observed_now >= locked.request.expires_at:
             _expire_locked(layout, locked, now=observed_now)
             raise ValueError("family pending request expired")
-        transition_pending(locked, PendingState.SENDING)
         try:
-            _audit(
-                layout,
-                request_id,
-                now=observed_now,
+            transition_pending_audited(
+                locked,
+                PendingState.SENDING,
+                audit_path=layout.family_audit_file,
+                timestamp=observed_now,
                 operation="approve",
                 status="sending",
                 stage="send",
             )
         except Exception:
-            transition_pending(locked, PendingState.PENDING)
             raise ValueError("family approval audit failed") from None
         try:
             created = creator.create(
@@ -580,33 +579,33 @@ def approve_family_issue(
                 provider,
             )
         except SendNotStarted as error:
-            transition_pending(locked, PendingState.PENDING)
-            _audit(
-                layout,
-                request_id,
-                now=observed_now,
+            transition_pending_audited(
+                locked,
+                PendingState.PENDING,
+                audit_path=layout.family_audit_file,
+                timestamp=observed_now,
                 operation="approve",
                 status="error",
                 stage=error.stage,
             )
             raise ValueError("family Issue send did not start") from None
         except SendOutcomeUnknown as error:
-            transition_pending(locked, PendingState.UNKNOWN)
-            _audit(
-                layout,
-                request_id,
-                now=observed_now,
+            transition_pending_audited(
+                locked,
+                PendingState.UNKNOWN,
+                audit_path=layout.family_audit_file,
+                timestamp=observed_now,
                 operation="approve",
                 status="unknown",
                 stage=error.stage,
             )
             raise ValueError("family Issue send outcome is unknown") from None
         except Exception:
-            transition_pending(locked, PendingState.UNKNOWN)
-            _audit(
-                layout,
-                request_id,
-                now=observed_now,
+            transition_pending_audited(
+                locked,
+                PendingState.UNKNOWN,
+                audit_path=layout.family_audit_file,
+                timestamp=observed_now,
                 operation="approve",
                 status="unknown",
                 stage="send",
@@ -615,44 +614,30 @@ def approve_family_issue(
         try:
             created = _validate_created_result(created, current_binding)
         except Exception:
-            transition_pending(locked, PendingState.UNKNOWN)
-            _audit(
-                layout,
-                request_id,
-                now=observed_now,
+            transition_pending_audited(
+                locked,
+                PendingState.UNKNOWN,
+                audit_path=layout.family_audit_file,
+                timestamp=observed_now,
                 operation="approve",
                 status="unknown",
                 stage="response",
             )
             raise ValueError("family Issue send outcome is unknown")
         try:
-            transition_pending(
+            transition_pending_audited(
                 locked,
                 PendingState.CREATED,
+                audit_path=layout.family_audit_file,
+                timestamp=observed_now,
+                operation="approve",
+                status="created",
+                stage="cleanup",
                 issue_number=created.number,
                 issue_url=created.url,
             )
         except Exception:
-            try:
-                _audit(
-                    layout,
-                    request_id,
-                    now=observed_now,
-                    operation="approve",
-                    status="error",
-                    stage="cleanup",
-                )
-            except Exception:
-                pass
             raise ValueError("family Issue cleanup failed") from None
-        _audit(
-            layout,
-            request_id,
-            now=observed_now,
-            operation="approve",
-            status="created",
-            stage="cleanup",
-        )
     print(f"request-id: {request_id}", file=stdout)
     print(f"issue-number: {created.number}", file=stdout)
     print(f"issue-url: {created.url}", file=stdout)
@@ -676,28 +661,17 @@ def reject_family_issue(
             _expire_locked(layout, locked, now=now)
             raise ValueError("family pending request expired")
         try:
-            transition_pending(locked, PendingState.REJECTED)
+            transition_pending_audited(
+                locked,
+                PendingState.REJECTED,
+                audit_path=layout.family_audit_file,
+                timestamp=now,
+                operation="reject",
+                status="rejected",
+                stage="cleanup",
+            )
         except Exception:
-            try:
-                _audit(
-                    layout,
-                    request_id,
-                    now=now,
-                    operation="reject",
-                    status="error",
-                    stage="cleanup",
-                )
-            except Exception:
-                pass
             raise ValueError("family Issue cleanup failed") from None
-        _audit(
-            layout,
-            request_id,
-            now=now,
-            operation="reject",
-            status="rejected",
-            stage="cleanup",
-        )
     print(f"request-id: {request_id}", file=stdout)
     print("state: rejected", file=stdout)
     return 0
@@ -772,33 +746,19 @@ def resolve_created_family_issue(
             )
             raise ValueError("family Issue reconciliation failed")
         try:
-            transition_pending(
+            transition_pending_audited(
                 locked,
                 PendingState.CREATED,
+                audit_path=layout.family_audit_file,
+                timestamp=now,
+                operation="resolve-created",
+                status="created",
+                stage="cleanup",
                 issue_number=created.number,
                 issue_url=created.url,
             )
         except Exception:
-            try:
-                _audit(
-                    layout,
-                    request_id,
-                    now=now,
-                    operation="resolve-created",
-                    status="error",
-                    stage="cleanup",
-                )
-            except Exception:
-                pass
             raise ValueError("family Issue cleanup failed") from None
-        _audit(
-            layout,
-            request_id,
-            now=now,
-            operation="resolve-created",
-            status="created",
-            stage="cleanup",
-        )
     print(f"request-id: {request_id}", file=stdout)
     print(f"issue-number: {created.number}", file=stdout)
     print(f"issue-url: {created.url}", file=stdout)
@@ -865,11 +825,11 @@ def resolve_not_created_family_issue(
                 or locked.request.state is not PendingState.UNKNOWN
             ):
                 raise ValueError("family pending request changed")
-            transition_pending(locked, PendingState.PENDING)
-            _audit(
-                layout,
-                request_id,
-                now=now,
+            transition_pending_audited(
+                locked,
+                PendingState.PENDING,
+                audit_path=layout.family_audit_file,
+                timestamp=now,
                 operation="resolve-not-created",
                 status="pending",
                 stage="reconcile",
@@ -907,6 +867,7 @@ def doctor_family(
         if any(
             request.state is PendingState.SENDING
             or request.recovery_audit_pending
+            or request.audit_event is not None
             for request in requests
         ):
             raise ValueError("family pending recovery is required")
@@ -926,7 +887,7 @@ def doctor_family(
     except Exception:
         checks.append(("FAIL", "app-metadata-permissions", "invalid"))
         failures = True
-    checks.append(("UNOBSERVED", "remote-availability", "not checked"))
+    checks.append(("not run", "remote-availability", "not checked"))
     for level, name, detail in checks:
         print(f"{level}  {name}: {detail}", file=stdout)
     return 1 if failures else 0

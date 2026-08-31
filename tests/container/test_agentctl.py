@@ -5213,7 +5213,7 @@ class AgentCtlFamilyTest(unittest.TestCase):
         write_family_binding(layout.family_binding_file, self.binding)
         return layout
 
-    def _pending(self, layout: FamilyStateLayout, *, now: int = 100):
+    def _pending(self, layout: FamilyStateLayout, *, now: int = 2_000_000_000):
         return create_pending(
             layout.family_pending_dir,
             "demo",
@@ -5609,6 +5609,7 @@ class AgentCtlFamilyTest(unittest.TestCase):
                 line for line in output.splitlines() if "remote-availability" in line
             )
             self.assertNotIn("pass", remote_line)
+            self.assertIn("not run", remote_line)
             self.assertEqual(
                 load_pending(
                     layout.family_pending_dir, pending.request_id, "demo"
@@ -5896,7 +5897,7 @@ class AgentCtlFamilyTest(unittest.TestCase):
                 append_family_audit(path, **event)
 
             with patch(
-                "agent_container.family_cli.append_family_audit",
+                "agent_container.family_pending.append_family_audit",
                 side_effect=inspect_audit,
                 create=True,
             ):
@@ -5909,6 +5910,9 @@ class AgentCtlFamilyTest(unittest.TestCase):
 
             self.assertEqual((result, error), (0, ""))
             self.assertEqual(len(creator.create_calls), 1)
+            self.assertEqual(creator.create_calls[0][1], self.issue)
+            self.assertIn(self.issue.title, output)
+            self.assertIn(self.issue.body, output)
             self.assertEqual(observed[0][:3], ("created", False, False))
             self.assertEqual(
                 observed[0][3],
@@ -5939,7 +5943,7 @@ class AgentCtlFamilyTest(unittest.TestCase):
             def fail_second_cleanup(parent, name, expected):
                 nonlocal calls
                 calls += 1
-                if calls == 2:
+                if calls == 3:
                     raise OSError("cleanup private marker")
                 return real_unlink(parent, name, expected)
 

@@ -52,7 +52,7 @@ class FamilyIntakeProtocolTest(unittest.TestCase):
 
         self.assertEqual(decoded, request)
         self.assertEqual((encoded + b"following")[consumed:], b"following")
-        self.assertLessEqual(len(encoded) - 4, MAX_REQUEST_BYTES)
+        self.assertLessEqual(len(encoded), MAX_REQUEST_BYTES)
 
     def test_response_round_trip_uses_pending_receipt_only(self) -> None:
         response = FamilyIntakeResponse(1, "pending", "request-123", 1_800_086_400)
@@ -62,7 +62,38 @@ class FamilyIntakeProtocolTest(unittest.TestCase):
 
         self.assertEqual(decoded, response)
         self.assertEqual(consumed, len(encoded))
-        self.assertLessEqual(len(encoded) - 4, MAX_RESPONSE_BYTES)
+        self.assertLessEqual(len(encoded), MAX_RESPONSE_BYTES)
+
+    # Break caught: treating the 16 KiB frame limit as a body-only limit.
+    def test_request_total_frame_accepts_16384_and_rejects_16385_bytes(self) -> None:
+        criteria = ["a" * 512 for _ in range(19)] + ["a" * 54]
+        boundary = FamilyIntakeRequest(
+            1,
+            "issue_create_request",
+            "c",
+            {
+                "title": "t" * 256,
+                "summary": "s" * 2048,
+                "context": "c" * 4096,
+                "acceptance_criteria": criteria,
+            },
+        )
+        encoded = encode_request_frame(boundary)
+        self.assertEqual(len(encoded), MAX_REQUEST_BYTES)
+        self.assertEqual(decode_request_frame(encoded)[0], boundary)
+
+        oversized = FamilyIntakeRequest(
+            boundary.version,
+            boundary.operation,
+            boundary.capability,
+            boundary.payload
+            | {"acceptance_criteria": criteria[:-1] + ["a" * 55]},
+        )
+        with self.assertRaises(ValueError):
+            encode_request_frame(oversized)
+        oversized_body = encoded[4:] + b" "
+        with self.assertRaises(ValueError):
+            decode_request_frame(struct.pack(">I", len(oversized_body)) + oversized_body)
 
     def test_readers_and_writers_handle_split_streams(self) -> None:
         request = FamilyIntakeRequest(

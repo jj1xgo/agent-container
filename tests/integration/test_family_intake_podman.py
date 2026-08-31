@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
@@ -32,7 +33,63 @@ from agent_container.egress_broker_runtime import EgressRuntimeMount
 
 
 _IMAGE = os.environ.get("AGENT_FAMILY_TEST_IMAGE", "")
-def _probe_script(marker_id: str) -> str:
+_ANCESTOR_DEPTH = 8
+
+
+def _ancestor_sentinel_reachable(
+    descriptors: tuple[int, ...], sentinel_name: str
+) -> bool:
+    """Model the container probe's bounded descriptor-relative ancestor search."""
+
+    if re.fullmatch(r"\.family-ancestor-[0-9a-f]{32}", sentinel_name) is None:
+        raise ValueError("ancestor sentinel name is invalid")
+    for descriptor in descriptors:
+        try:
+            if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                continue
+        except OSError:
+            continue
+        for depth in range(_ANCESTOR_DEPTH + 1):
+            relative = "../" * depth + sentinel_name
+            try:
+                os.stat(relative, dir_fd=descriptor, follow_symlinks=False)
+            except OSError:
+                continue
+            return True
+    return False
+
+
+def _fd_probe_command(sentinel_name: str) -> str:
+    if re.fullmatch(r"\.family-ancestor-[0-9a-f]{32}", sentinel_name) is None:
+        raise ValueError("ancestor sentinel name is invalid")
+    code = "\n".join(
+        (
+            "import os, stat, sys",
+            "sentinel = sys.argv[1]",
+            "target = '/run/agent-family/intake.sock'",
+            "if not stat.S_ISSOCK(os.stat(target, follow_symlinks=False).st_mode): raise SystemExit(93)",
+            "mounts = [line for line in open('/proc/self/mountinfo', encoding='ascii') if f' {target} ' in line]",
+            "if len(mounts) != 1: raise SystemExit(93)",
+            "for text in os.listdir('/proc/self/fd'):",
+            "    try: fd = int(text); details = os.fstat(fd)",
+            "    except (OSError, ValueError): continue",
+            "    if not stat.S_ISDIR(details.st_mode): continue",
+            "    try: linked = os.readlink(f'/proc/self/fd/{fd}')",
+            "    except OSError: linked = ''",
+            "    if '/run/agent-family' in linked or '/family/' in linked or '/state/' in linked: raise SystemExit(94)",
+            f"    for depth in range({_ANCESTOR_DEPTH + 1}):",
+            "        try: os.stat('../' * depth + sentinel, dir_fd=fd, follow_symlinks=False)",
+            "        except OSError: continue",
+            "        raise SystemExit(94)",
+        )
+    )
+    return f"python3 -c {shlex.quote(code)} {shlex.quote(sentinel_name)}"
+
+
+def _probe_script(
+    marker_id: str,
+    sentinel_name: str = ".family-ancestor-0123456789abcdef0123456789abcdef",
+) -> str:
     if re.fullmatch(r"[0-9a-f]{16}", marker_id) is None:
         raise ValueError("inspection marker id is invalid")
     ready = f"/workspace/.family-inspect-{marker_id}-ready"
@@ -43,6 +100,7 @@ def _probe_script(marker_id: str) -> str:
     "! env | grep -E 'family/roadmap|repository_id|private-key|token'; "
     "! grep -E 'family/roadmap|private-key|/pending' /proc/self/mountinfo; "
     "! find / -xdev -name 'private-key.pem' -print 2>/dev/null | grep .; "
+    f"{_fd_probe_command(sentinel_name)}; "
     "agent-family issue create --title T --summary S "
     "--context C --acceptance-criterion A; "
     f": > {ready}; "
@@ -184,10 +242,36 @@ def _podman_prerequisite() -> str | None:
     return None
 
 
-_MISSING = _podman_prerequisite()
+_MISSING = (
+    _podman_prerequisite()
+    if os.environ.get("AGENT_CONTAINER_RUN_PODMAN_INTEGRATION") == "1"
+    else "AGENT_CONTAINER_RUN_PODMAN_INTEGRATION=1 is not configured"
+)
 
 
 class FamilyIntakePodmanFixtureTest(unittest.TestCase):
+    def test_preserved_run_directory_fd_negative_fixture_reaches_sentinel(self) -> None:
+        with TemporaryDirectory() as temp:
+            family = Path(temp) / "family"
+            run_dir = family / "intake" / "r" / "project" / "run"
+            run_dir.mkdir(parents=True)
+            sentinel_name = ".family-ancestor-" + secrets.token_hex(16)
+            (family / sentinel_name).write_bytes(b"")
+            directory_fd = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY)
+            pinned_file = run_dir / "pinned-nondirectory"
+            pinned_file.write_bytes(b"")
+            nondirectory_fd = os.open(pinned_file, os.O_PATH | os.O_NOFOLLOW)
+            try:
+                self.assertTrue(
+                    _ancestor_sentinel_reachable((directory_fd,), sentinel_name)
+                )
+                self.assertFalse(
+                    _ancestor_sentinel_reachable((nondirectory_fd,), sentinel_name)
+                )
+            finally:
+                os.close(nondirectory_fd)
+                os.close(directory_fd)
+
     def test_concurrent_marker_release_is_idempotent_after_safe_create(self) -> None:
         with TemporaryDirectory() as temp:
             marker = Path(temp) / "done"
@@ -291,6 +375,10 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
         self.assertNotIn("sleep 2", _PROBE_SCRIPT)
         self.assertIn("deadline=", _PROBE_SCRIPT)
         self.assertIn("exit 92", _PROBE_SCRIPT)
+        self.assertIn("/proc/self/fd", _PROBE_SCRIPT)
+        self.assertIn("os.fstat", _PROBE_SCRIPT)
+        self.assertIn("intake.sock", _PROBE_SCRIPT)
+        self.assertIn("SystemExit(94)", _PROBE_SCRIPT)
 
     def test_both_real_specs_have_pinned_fd_shape_without_podman(self) -> None:
         state = StateLayout(Path("/state"), "demo")
@@ -363,9 +451,14 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
 @unittest.skipIf(_MISSING is not None, _MISSING or "Podman prerequisite missing")
 class FamilyIntakePodmanTest(unittest.TestCase):
     def test_real_runtime_ancestry_allows_one_request_and_denies_second(self) -> None:
-        for agent in ("codex", "claude"):
+        variants = tuple(
+            (agent, with_egress)
+            for agent in ("codex", "claude")
+            for with_egress in (False, True)
+        )
+        for agent, with_egress in variants:
             with (
-                self.subTest(agent=agent),
+                self.subTest(agent=agent, with_egress=with_egress),
                 TemporaryDirectory() as temp,
                 TemporaryDirectory() as handover_temp,
             ):
@@ -382,6 +475,14 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     layout.family_binding_file,
                     FamilyBinding(Repository.parse("family/roadmap"), 42),
                 )
+                sentinel_name = ".family-ancestor-" + secrets.token_hex(16)
+                sentinel_path = layout.family_root / sentinel_name
+                sentinel_descriptor = os.open(
+                    sentinel_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    0o600,
+                )
+                os.close(sentinel_descriptor)
                 runtime = FamilyIntakeRuntime.create(layout)
                 mount = runtime.start()
                 inspector = None
@@ -405,18 +506,23 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     marker_paths = (ready_marker, done_marker)
                     payload = (
                         f"test ! -e /proc/self/fd/{mount.pass_fds[0]}; "
-                        + _probe_script(marker_id)
+                        + _probe_script(marker_id, sentinel_name)
                     )
+                    egress = None
+                    if with_egress:
+                        egress_dir = root / "egress-fixture" / agent
+                        egress_dir.mkdir(parents=True, mode=0o700)
+                        egress = EgressRuntimeMount(egress_dir, "demo", agent)
                     base = (
                         run_codex_spec(
                             state, handover, _IMAGE, os.getuid(), os.getgid(),
-                            family_mount=mount,
+                            family_mount=mount, egress=egress,
                         )
                         if agent == "codex"
                         else run_claude_spec(
                             state, handover, _IMAGE, os.getuid(), os.getgid(),
                             HandoverRuntimeMount(Path(handover_temp) / "broker"),
-                            family_mount=mount,
+                            family_mount=mount, egress=egress,
                         )
                     )
                     image_index = base.argv.index(_IMAGE)
@@ -426,6 +532,11 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     )
 
                     inspection = []
+                    container_name = (
+                        egress.container_name
+                        if egress is not None
+                        else mount.container_name
+                    )
 
                     def inspect_running_container():
                         deadline = time.monotonic() + 5
@@ -434,7 +545,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                                 if _marker_exists(ready_marker):
                                     inspection.append(
                                         subprocess.run(
-                                            ("podman", "inspect", mount.container_name),
+                                            ("podman", "inspect", container_name),
                                             text=True, capture_output=True,
                                             check=False, timeout=5,
                                         )
@@ -449,7 +560,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     try:
                         completed = run_command_supervised(
                             CommandSpec(argv, {}, base.pass_fds),
-                            None, None, runtime, mount,
+                            None, egress, runtime, mount,
                         )
                     finally:
                         _release_marker(done_marker)
@@ -457,6 +568,22 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     self.assertFalse(inspector.is_alive())
                     self.assertEqual(len(inspection), 1)
                     self.assertEqual(inspection[0].returncode, 0)
+                    inspected = json.loads(inspection[0].stdout)
+                    self.assertIs(type(inspected), list)
+                    self.assertEqual(len(inspected), 1)
+                    family_mounts = [
+                        item
+                        for item in inspected[0].get("Mounts", ())
+                        if item.get("Destination", "").startswith(
+                            "/run/agent-family"
+                        )
+                    ]
+                    self.assertEqual(len(family_mounts), 1)
+                    self.assertEqual(
+                        family_mounts[0].get("Destination"),
+                        "/run/agent-family/intake.sock",
+                    )
+                    self.assertEqual(family_mounts[0].get("Type"), "bind")
                     for forbidden in (
                         "family/roadmap", "repository_id", "private-key.pem",
                         str(layout.family_pending_dir), "family issue approve",
@@ -483,6 +610,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     for marker in marker_paths:
                         marker.unlink(missing_ok=True)
                     runtime.close()
+                    sentinel_path.unlink(missing_ok=True)
                 self.assertFalse(mount.socket_dir.exists())
                 self.assertNotEqual(
                     subprocess.run(
@@ -512,13 +640,13 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                 failed_base = (
                     run_codex_spec(
                         state, handover, _IMAGE, os.getuid(), os.getgid(),
-                        family_mount=failed_mount,
+                        family_mount=failed_mount, egress=egress,
                     )
                     if agent == "codex"
                     else run_claude_spec(
                         state, handover, _IMAGE, os.getuid(), os.getgid(),
                         HandoverRuntimeMount(Path(handover_temp) / "broker"),
-                        family_mount=failed_mount,
+                        family_mount=failed_mount, egress=egress,
                     )
                 )
                 failed_image_index = failed_base.argv.index(_IMAGE)
@@ -553,7 +681,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                             failed_argv, {}, failed_base.pass_fds
                         ),
                         None,
-                        None,
+                        egress,
                         failed_runtime,
                         failed_mount,
                     )

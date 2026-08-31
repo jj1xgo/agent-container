@@ -6,7 +6,7 @@
 
 - containerへ渡るのはrunごとのsocketとone-time capabilityだけです。App private key、JWT、installation token、repository名／ID、pending host path、approval commandは渡りません。
 - requestはhost canonical rendererが`title`と、`## Summary`、`## Context`、`## Acceptance criteria`からなるbodyへ固定します。previewとGitHub POSTは同じ内容を使います。
-- requestは24時間で失効し、projectごとの未完了requestは最大10件、1 runにつき作成案は1件です。
+- requestは24時間で失効し、projectごとの未完了requestは最大10件、1 runにつき作成案は1件です。startupと次のintakeでは期限切れpendingを先にbounded sweepし、そのauditを完了してから10件のcapacityを判定します。
 - approveは対話TTYから正確に`approve <request-id>`と1行入力したときだけ進みます。`--yes`やnon-interactive bypassはありません。
 - bindingがないunbound projectは従来どおり起動し、family socket／capabilityを追加しません。family intakeが失敗しても開発App、`gh`、通常networkへfallbackしません。
 
@@ -57,6 +57,9 @@ doctorの表示は次のように解釈します。
 - `FAIL`: fail-closedで停止する。修正前にapproveやruntime起動を続けない。
 - `not run`: Podman、image、GitHub承認など具体的な前提不足で未実行。PASSではない。
 
+`family doctor`のremote availabilityも、実際にremoteへ接続しないlocal checkでは
+`not run`と表示します。独自の未観測ラベルや推測したPASSは使いません。
+
 ## 通常のoperator workflow
 
 runtime内のagentは`agent-family issue create`でtitle、summary、context、acceptance criterionを送ります。host operatorは本文を一覧へ自動表示せず、次を順番に実行します。
@@ -100,6 +103,8 @@ bin/agentctl family issue resolve-not-created PROJECT REQUEST_ID
 ## Auditと秘密情報
 
 auditはtimestamp、project ID、request ID、固定operation／status／stageだけです。title、body、repository、ID、URL、credential、raw request／response、exception本文を含めません。preview本文をtranscriptやhandoverへ自動転記しません。
+
+state transition、terminal時のtitle/body cleanup、固定audit event markerは1つのpending recordへ原子的に保存されます。startupは同じrequest lockのままmarkerをaudit JSONLへappend・fsyncしてからmarkerを消し、未完了markerがある間はlist、preview、approve、reject、reconciliationを進めません。append後・marker消去前のcrashでは同じcontent-free eventが重複することがありますが、eventを省略して通常処理へ進むことはありません。旧`recovery_audit_pending` recordもstartupでこの固定markerへ移行してからdrainします。
 
 ## Disable／rollback
 

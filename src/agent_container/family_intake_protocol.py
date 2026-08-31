@@ -111,7 +111,7 @@ def _encode(values: dict[str, Any], *, maximum: int, kind: str) -> bytes:
         ).encode("utf-8")
     except (TypeError, UnicodeEncodeError, ValueError):
         raise ValueError(f"family intake {kind} is invalid") from None
-    if not body or len(body) > maximum:
+    if not body or len(body) > maximum - _HEADER_BYTES:
         raise ValueError(f"family intake {kind} is too large")
     return struct.pack(">I", len(body)) + body
 
@@ -148,7 +148,7 @@ def _frame_body(data: bytes, *, maximum: int, kind: str) -> tuple[bytes, int]:
     if type(data) is not bytes or len(data) < _HEADER_BYTES:
         raise ValueError(f"family intake {kind} frame is incomplete")
     length = struct.unpack(">I", data[:_HEADER_BYTES])[0]
-    if length == 0 or length > maximum:
+    if length == 0 or length > maximum - _HEADER_BYTES:
         raise ValueError(f"family intake {kind} frame size is invalid")
     consumed = _HEADER_BYTES + length
     if len(data) < consumed:
@@ -218,7 +218,7 @@ def _read_exact(stream: BinaryIO, size: int) -> bytes:
 def _read_frame(stream: BinaryIO, *, maximum: int, kind: str) -> bytes:
     header = _read_exact(stream, _HEADER_BYTES)
     length = struct.unpack(">I", header)[0]
-    if length == 0 or length > maximum:
+    if length == 0 or length > maximum - _HEADER_BYTES:
         raise ValueError(f"family intake {kind} frame size is invalid")
     return header + _read_exact(stream, length)
 

@@ -1,5 +1,7 @@
 """Private persistence and lifecycle for host-approved family Issues."""
 
+from __future__ import annotations
+
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
@@ -31,6 +33,7 @@ _RECORD_NAME = re.compile(r"^(?P<request_id>[0-9a-f]{32})\.json$")
 _LOCK_NAME = re.compile(r"^\.(?P<request_id>[0-9a-f]{32})\.json\.lock$")
 _TTL_SECONDS = 24 * 60 * 60
 _MAX_UNFINISHED = 10
+_MAX_STORE_RECORDS = 4096
 _MAX_CANONICAL_BODY_BYTES = 64 * 1024
 _MAX_RECORD_BYTES = 128 * 1024
 _MAX_AUDIT_BYTES = 4 * 1024 * 1024
@@ -127,6 +130,7 @@ class PendingRequest:
     issue_number: int | None = None
     issue_url: str | None = None
     recovery_audit_pending: bool = field(default=False, repr=False)
+    audit_event: _AuditEvent | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -286,6 +290,16 @@ def _request_payload(request: PendingRequest) -> dict[str, object]:
         raise _invalid()
     if request.recovery_audit_pending:
         payload["recovery_audit_pending"] = True
+    if request.audit_event is not None:
+        event = request.audit_event.validated()
+        payload["audit_event"] = {
+            "operation": event.operation,
+            "project_id": event.project_id,
+            "request_id": event.request_id,
+            "stage": event.stage,
+            "status": event.status,
+            "timestamp": event.timestamp,
+        }
     return payload
 
 
@@ -305,10 +319,25 @@ def _validate_request(request: PendingRequest) -> PendingRequest:
     issue_number = request.issue_number
     issue_url = request.issue_url
     recovery_audit_pending = request.recovery_audit_pending
+    audit_event = request.audit_event
     if type(recovery_audit_pending) is not bool or (
         recovery_audit_pending and request.state is not PendingState.UNKNOWN
     ):
         raise _invalid()
+    if recovery_audit_pending and audit_event is not None:
+        raise _invalid()
+    if audit_event is not None:
+        if type(audit_event) is not _AuditEvent:
+            raise _invalid()
+        try:
+            audit_event = audit_event.validated()
+        except ValueError:
+            raise _invalid() from None
+        if (
+            audit_event.project_id != project_id
+            or audit_event.request_id != request_id
+        ):
+            raise _invalid()
     if request.state in _CONTENT_STATES:
         if type(issue) is not CanonicalFamilyIssue:
             raise _invalid()
@@ -341,6 +370,7 @@ def _validate_request(request: PendingRequest) -> PendingRequest:
         issue_number,
         issue_url,
         recovery_audit_pending,
+        audit_event,
     )
 
 
@@ -374,11 +404,33 @@ def _decode_request(body: bytes) -> PendingRequest:
             "state",
         }
         state = PendingState(payload.get("state"))
+        marker = payload.get("audit_event")
+        audit_event = None
+        if marker is not None:
+            if not isinstance(marker, dict) or set(marker) != {
+                "operation",
+                "project_id",
+                "request_id",
+                "stage",
+                "status",
+                "timestamp",
+            }:
+                raise _invalid()
+            audit_event = _AuditEvent(
+                marker["timestamp"],
+                marker["project_id"],
+                marker["request_id"],
+                marker["operation"],
+                marker["status"],
+                marker["stage"],
+            ).validated()
+        marker_key = {"audit_event"} if marker is not None else set()
         if state in _CONTENT_STATES:
-            allowed = common | {"body", "title"}
+            allowed = common | {"body", "title"} | marker_key
             recovery_audit_pending = False
             if (
                 state is PendingState.UNKNOWN
+                and marker is None
                 and set(payload) == allowed | {"recovery_audit_pending"}
                 and payload["recovery_audit_pending"] is True
             ):
@@ -392,14 +444,14 @@ def _decode_request(body: bytes) -> PendingRequest:
             issue_number = None
             issue_url = None
         elif state is PendingState.CREATED:
-            if set(payload) != common | {"issue_number", "issue_url"}:
+            if set(payload) != common | {"issue_number", "issue_url"} | marker_key:
                 raise _invalid()
             issue = None
             issue_number = payload["issue_number"]
             issue_url = payload["issue_url"]
             recovery_audit_pending = False
         else:
-            if set(payload) != common:
+            if set(payload) != common | marker_key:
                 raise _invalid()
             issue = None
             issue_number = None
@@ -416,6 +468,7 @@ def _decode_request(body: bytes) -> PendingRequest:
                 issue_number,
                 issue_url,
                 recovery_audit_pending,
+                audit_event,
             )
         )
     except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
@@ -510,6 +563,8 @@ def _inventory(parent_descriptor: int) -> list[str]:
                 raise ValueError("family pending inventory is invalid")
         _validate_private_file(_entry_stat(parent_descriptor, name))
     if not locks.issubset(records):
+        raise ValueError("family pending inventory is invalid")
+    if len(records) > _MAX_STORE_RECORDS:
         raise ValueError("family pending inventory is invalid")
     return sorted(records)
 
@@ -662,6 +717,7 @@ def create_pending(
     issue: CanonicalFamilyIssue,
     *,
     now: int,
+    audit_path: Path | None = None,
     random_bytes: Callable[[int], bytes] = os.urandom,
 ) -> PendingRequest:
     """Create one durable pending record without overwriting any sibling."""
@@ -680,11 +736,50 @@ def create_pending(
         issue,
     )
     _validate_request(prototype)
+    if audit_path is not None:
+        if not isinstance(audit_path, Path):
+            raise ValueError("family pending audit path is invalid")
+        validate_family_audit(audit_path, validated_project)
     parent_descriptor = _open_private_parent(store / "record")
     store_lock: int | None = None
     try:
         store_lock = _open_lock(parent_descriptor, _STORE_LOCK)
         records = _inventory(parent_descriptor)
+        if audit_path is not None:
+            for existing_id in records:
+                with pending_lock(
+                    store,
+                    existing_id,
+                    validated_project,
+                    _allow_audit_pending=True,
+                    _store_locked=True,
+                ) as locked:
+                    if locked.request.recovery_audit_pending:
+                        _migrate_recovery_audit_pending(
+                            locked, timestamp=created_at
+                        )
+                    if locked.request.audit_event is not None:
+                        _drain_audit_event(locked, audit_path=audit_path)
+                    if locked.request.state is PendingState.SENDING:
+                        _recover_locked(
+                            locked,
+                            audit_path=audit_path,
+                            timestamp=created_at,
+                        )
+                    if (
+                        locked.request.state is PendingState.PENDING
+                        and created_at >= locked.request.expires_at
+                    ):
+                        transition_pending_audited(
+                            locked,
+                            PendingState.EXPIRED,
+                            audit_path=audit_path,
+                            timestamp=created_at,
+                            operation="expire",
+                            status="expired",
+                            stage="cleanup",
+                        )
+            records = _inventory(parent_descriptor)
         unfinished = 0
         for request_id in records:
             request, _metadata = _read_record(
@@ -716,6 +811,18 @@ def create_pending(
                     created_at + _TTL_SECONDS,
                     PendingState.PENDING,
                     issue,
+                    audit_event=(
+                        _AuditEvent(
+                            created_at,
+                            validated_project,
+                            request_id,
+                            "intake",
+                            "pending",
+                            "intake",
+                        ).validated()
+                        if audit_path is not None
+                        else None
+                    ),
                 )
                 try:
                     _publish_new(
@@ -725,7 +832,16 @@ def create_pending(
                     )
                 except FileExistsError:
                     continue
-                return _validate_request(request)
+                if audit_path is None:
+                    return _validate_request(request)
+                with pending_lock(
+                    store,
+                    request_id,
+                    validated_project,
+                    _allow_audit_pending=True,
+                    _store_locked=True,
+                ) as locked:
+                    return _drain_audit_event(locked, audit_path=audit_path)
         raise FileExistsError("could not allocate family pending request")
     finally:
         if store_lock is not None:
@@ -740,6 +856,8 @@ def pending_lock(
     expected_project_id: str,
     *,
     snapshot: PendingSnapshot | None = None,
+    _allow_audit_pending: bool = False,
+    _store_locked: bool = False,
 ) -> Iterator[LockedPending]:
     """Hold the request's validated flock until approval/reconciliation completes."""
 
@@ -747,11 +865,16 @@ def pending_lock(
     validated_project = _validate_expected_project_id(expected_project_id)
     if snapshot is not None and type(snapshot) is not PendingSnapshot:
         raise ValueError("family pending snapshot is invalid")
+    if type(_allow_audit_pending) is not bool or type(_store_locked) is not bool:
+        raise ValueError("family pending audit access is invalid")
     record_name = f"{validated_id}.json"
     parent_descriptor = _open_private_parent(store / "record")
+    store_descriptor: int | None = None
     lock_descriptor: int | None = None
     locked: LockedPending | None = None
     try:
+        if not _store_locked:
+            store_descriptor = _open_lock(parent_descriptor, _STORE_LOCK)
         _inventory(parent_descriptor)
         record_metadata = _entry_stat(parent_descriptor, record_name)
         _validate_private_file(record_metadata)
@@ -767,6 +890,10 @@ def pending_lock(
             or request.project_id != validated_project
         ):
             raise _invalid()
+        if (
+            request.recovery_audit_pending or request.audit_event is not None
+        ) and not _allow_audit_pending:
+            raise ValueError("family pending audit is incomplete")
         if snapshot is not None and (
             snapshot._request != request
             or snapshot._request.request_id != validated_id
@@ -790,6 +917,8 @@ def pending_lock(
             locked._active = False
         if lock_descriptor is not None:
             os.close(lock_descriptor)
+        if store_descriptor is not None:
+            os.close(store_descriptor)
         os.close(parent_descriptor)
 
 
@@ -889,23 +1018,20 @@ def _recover_locked(
     timestamp: int,
 ) -> PendingRequest:
     if locked.request.state is PendingState.SENDING:
-        transition_pending(
+        return transition_pending_audited(
             locked,
             PendingState.UNKNOWN,
-            recovery_audit_pending=True,
+            audit_path=audit_path,
+            timestamp=timestamp,
+            operation="recover",
+            status="unknown",
+            stage="reconcile",
         )
-    if not locked.request.recovery_audit_pending:
+    if locked.request.recovery_audit_pending:
+        _migrate_recovery_audit_pending(locked, timestamp=timestamp)
+    if locked.request.audit_event is None:
         raise ValueError("family pending request cannot be recovered")
-    append_family_audit(
-        audit_path,
-        timestamp=timestamp,
-        project_id=locked.request.project_id,
-        request_id=locked.request.request_id,
-        operation="recover",
-        status="unknown",
-        stage="reconcile",
-    )
-    return _clear_recovery_audit_pending(locked)
+    return _drain_audit_event(locked, audit_path=audit_path)
 
 
 def initialize_pending_store(
@@ -931,18 +1057,51 @@ def initialize_pending_store(
         request_ids = _inventory(parent_descriptor)
         recovered: list[RecoveredPending] = []
         for request_id in request_ids:
-            with pending_lock(store, request_id, validated_project) as locked:
-                if (
+            with pending_lock(
+                store,
+                request_id,
+                validated_project,
+                _allow_audit_pending=True,
+                _store_locked=True,
+            ) as locked:
+                was_recovery = (
                     locked.request.state is PendingState.SENDING
                     or locked.request.recovery_audit_pending
-                ):
-                    changed = _recover_locked(
+                    or (
+                        locked.request.audit_event is not None
+                        and locked.request.audit_event.operation == "recover"
+                    )
+                )
+                if locked.request.recovery_audit_pending:
+                    _migrate_recovery_audit_pending(locked, timestamp=timestamp)
+                if locked.request.audit_event is not None:
+                    _drain_audit_event(locked, audit_path=audit_path)
+                if locked.request.state is PendingState.SENDING:
+                    _recover_locked(
                         locked,
                         audit_path=audit_path,
                         timestamp=timestamp,
                     )
+                    was_recovery = True
+                if (
+                    locked.request.state is PendingState.PENDING
+                    and timestamp >= locked.request.expires_at
+                ):
+                    transition_pending_audited(
+                        locked,
+                        PendingState.EXPIRED,
+                        audit_path=audit_path,
+                        timestamp=timestamp,
+                        operation="expire",
+                        status="expired",
+                        stage="cleanup",
+                    )
+                if was_recovery:
                     recovered.append(
-                        RecoveredPending(changed.request_id, changed.project_id)
+                        RecoveredPending(
+                            locked.request.request_id,
+                            locked.request.project_id,
+                        )
                     )
         return tuple(
             sorted(recovered, key=lambda item: item.request_id)
@@ -960,6 +1119,7 @@ def transition_pending(
     issue_number: int | None = None,
     issue_url: str | None = None,
     recovery_audit_pending: bool = False,
+    _audit_event: _AuditEvent | None = None,
 ) -> PendingRequest:
     """Durably transition a request while its caller-owned flock remains held."""
 
@@ -969,8 +1129,15 @@ def transition_pending(
         recovery_audit_pending and target is not PendingState.UNKNOWN
     ):
         raise ValueError("family pending transition is invalid")
-    if locked._request.recovery_audit_pending:
-        raise ValueError("family pending recovery audit is incomplete")
+    if recovery_audit_pending and _audit_event is not None:
+        raise ValueError("family pending transition is invalid")
+    if _audit_event is not None and type(_audit_event) is not _AuditEvent:
+        raise ValueError("family pending transition is invalid")
+    if (
+        locked._request.recovery_audit_pending
+        or locked._request.audit_event is not None
+    ):
+        raise ValueError("family pending audit is incomplete")
     if type(target) is not PendingState or target not in _TRANSITIONS[locked._request.state]:
         raise ValueError("family pending transition is invalid")
     current = _entry_stat(locked._parent_descriptor, locked._record_name)
@@ -1004,6 +1171,7 @@ def transition_pending(
             validated_number,
             validated_url,
             recovery_audit_pending,
+            _audit_event,
         )
     )
     locked._expected = _atomic_replace(
@@ -1017,16 +1185,16 @@ def transition_pending(
     return changed
 
 
-def _clear_recovery_audit_pending(locked: LockedPending) -> PendingRequest:
-    """Durably clear the internal recovery marker after its audit append."""
+def _replace_audit_metadata(
+    locked: LockedPending,
+    *,
+    recovery_audit_pending: bool,
+    audit_event: _AuditEvent | None,
+) -> PendingRequest:
+    """Atomically replace only the fixed audit metadata on a locked request."""
 
     if type(locked) is not LockedPending or not locked._active:
         raise ValueError("pending request lock is invalid")
-    if (
-        locked._request.state is not PendingState.UNKNOWN
-        or not locked._request.recovery_audit_pending
-    ):
-        raise ValueError("family pending recovery audit is not pending")
     current = _entry_stat(locked._parent_descriptor, locked._record_name)
     _validate_private_file(current)
     if not _same_inode(locked._expected, current):
@@ -1046,7 +1214,8 @@ def _clear_recovery_audit_pending(locked: LockedPending) -> PendingRequest:
             observed.issue,
             observed.issue_number,
             observed.issue_url,
-            False,
+            recovery_audit_pending,
+            audit_event,
         )
     )
     body = _encode_request(changed)
@@ -1059,6 +1228,96 @@ def _clear_recovery_audit_pending(locked: LockedPending) -> PendingRequest:
     locked._request = changed
     locked._body = body
     return changed
+
+
+def _migrate_recovery_audit_pending(
+    locked: LockedPending, *, timestamp: int
+) -> PendingRequest:
+    """Replace the Task 8 legacy recovery bit with the exact generic marker."""
+
+    if (
+        locked.request.state is not PendingState.UNKNOWN
+        or not locked.request.recovery_audit_pending
+        or locked.request.audit_event is not None
+    ):
+        raise ValueError("family pending recovery audit is not pending")
+    event = _AuditEvent(
+        timestamp,
+        locked.request.project_id,
+        locked.request.request_id,
+        "recover",
+        "unknown",
+        "reconcile",
+    ).validated()
+    return _replace_audit_metadata(
+        locked,
+        recovery_audit_pending=False,
+        audit_event=event,
+    )
+
+
+def _clear_audit_event(locked: LockedPending) -> PendingRequest:
+    """Durably clear a generic outbox marker after the durable audit append."""
+
+    if locked.request.audit_event is None:
+        raise ValueError("family pending audit is not pending")
+    return _replace_audit_metadata(
+        locked,
+        recovery_audit_pending=False,
+        audit_event=None,
+    )
+
+
+def _drain_audit_event(
+    locked: LockedPending, *, audit_path: Path
+) -> PendingRequest:
+    """Append and fsync one marker, then atomically clear it under the same lock."""
+
+    event = locked.request.audit_event
+    if event is None:
+        raise ValueError("family pending audit is not pending")
+    append_family_audit(
+        audit_path,
+        timestamp=event.timestamp,
+        project_id=event.project_id,
+        request_id=event.request_id,
+        operation=event.operation,
+        status=event.status,
+        stage=event.stage,
+    )
+    return _clear_audit_event(locked)
+
+
+def transition_pending_audited(
+    locked: LockedPending,
+    target: PendingState,
+    *,
+    audit_path: Path,
+    timestamp: int,
+    operation: str,
+    status: str,
+    stage: str,
+    issue_number: int | None = None,
+    issue_url: str | None = None,
+) -> PendingRequest:
+    """Atomically publish state/content cleanup plus a retryable fixed audit event."""
+
+    event = _AuditEvent(
+        timestamp,
+        locked.request.project_id,
+        locked.request.request_id,
+        operation,
+        status,
+        stage,
+    ).validated()
+    transition_pending(
+        locked,
+        target,
+        issue_number=issue_number,
+        issue_url=issue_url,
+        _audit_event=event,
+    )
+    return _drain_audit_event(locked, audit_path=audit_path)
 
 
 def expire_pending(
