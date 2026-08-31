@@ -3,6 +3,9 @@ from pathlib import Path
 import json
 import re
 import subprocess
+import shutil
+import sys
+from tempfile import TemporaryDirectory
 import unittest
 
 
@@ -405,6 +408,41 @@ class ContainerImageContractTest(unittest.TestCase):
             self.assertNotIn(
                 "from agent_container.family_intake_runtime import", top_level
             )
+
+    def test_effective_image_tree_imports_host_entrypoints_without_host_modules(self) -> None:
+        patterns = (ROOT / ".containerignore").read_text("utf-8").splitlines()
+        with TemporaryDirectory() as temp:
+            target = Path(temp) / "src" / "agent_container"
+            target.mkdir(parents=True)
+            for source in (ROOT / "src/agent_container").glob("*.py"):
+                relative = source.relative_to(ROOT).as_posix()
+                if containerignore_includes(relative, patterns):
+                    shutil.copy2(source, target / source.name)
+            for forbidden in (
+                "family_state.py",
+                "family_intake_runtime.py",
+                "family_intake_broker.py",
+                "family_intake_transport.py",
+                "family_pending.py",
+            ):
+                self.assertFalse((target / forbidden).exists())
+            probe = subprocess.run(
+                (
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    (
+                        "import sys; sys.path.insert(0, 'src'); "
+                        "import agent_container.agentctl; "
+                        "import agent_container.podman"
+                    ),
+                ),
+                cwd=temp,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual((probe.returncode, probe.stderr), (0, ""))
 
     def test_containerignore_includes_every_tracked_copy_input(self) -> None:
         patterns = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()

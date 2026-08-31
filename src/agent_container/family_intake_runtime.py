@@ -231,6 +231,12 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
             self._listener = None
             if self.session is not None:
                 self.session.deactivate()
+            if self._mount is not None:
+                try:
+                    self._mount.close()
+                except OSError:
+                    pass
+                self._mount = None
             try:
                 self._cleanup_artifacts()
             except (OSError, ValueError):
@@ -412,10 +418,16 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
                 raise FamilyIntakeRuntimeError(
                     "family intake runtime did not stop"
                 ) from None
+        mount = self._mount
         try:
             self._cleanup_artifacts()
         except (OSError, ValueError):
             cleanup_failed = True
+        if mount is not None:
+            try:
+                mount.close()
+            except OSError:
+                cleanup_failed = True
         if cleanup_failed:
             raise FamilyIntakeRuntimeError(
                 "family intake runtime cleanup failed"

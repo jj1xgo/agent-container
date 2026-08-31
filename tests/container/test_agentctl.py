@@ -2102,6 +2102,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                     "AGENT_FAMILY_CAPABILITY": capability,
                 },
             )
+            object.__setattr__(mount, "_directory_descriptor", 77)
             events = []
 
             class Runtime:
@@ -2112,10 +2113,11 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                 def __exit__(self, *_args):
                     events.append("stop")
 
-            def supervisor(spec, gateway, egress, runtime):
+            def supervisor(spec, gateway, egress, runtime, observed_mount):
+                self.assertIs(observed_mount, mount)
                 events.append(("supervise", gateway, egress, runtime))
                 joined = " ".join(spec.argv)
-                self.assertIn(str(run_dir), joined)
+                self.assertIn("/proc/self/fd/77", joined)
                 self.assertNotIn("family/roadmap", joined)
                 return subprocess.CompletedProcess(spec.argv, 0)
 
@@ -4355,8 +4357,11 @@ class AgentCtlFamilyRuntimeTest(unittest.TestCase):
                     events.append(("spec", agent))
                     return CommandSpec(("podman", "run", agent), {})
 
-                def supervisor(spec, gateway, egress, observed_runtime):
+                def supervisor(
+                    spec, gateway, egress, observed_runtime, observed_mount
+                ):
                     self.assertIs(observed_runtime, runtime)
+                    self.assertIs(observed_mount, mount)
                     events.append(("supervise", spec.argv[-1], gateway, egress))
                     observed_runtime.register_runtime(4321)
                     observed_runtime.check()
@@ -4382,93 +4387,101 @@ class AgentCtlFamilyRuntimeTest(unittest.TestCase):
                 self.assertFalse(any(call.argv == ("podman", "run", agent) for call in calls))
 
     def test_startup_and_spec_failure_cleanup_without_fallback(self) -> None:
-        for stage in ("startup", "spec"):
-            with self.subTest(stage=stage), TemporaryDirectory() as temp:
-                root, _environment = self._state(temp)
-                self._bind(root)
-                events = []
+        for agent in ("codex", "claude"):
+            for stage in ("startup", "spec"):
+                with self.subTest(agent=agent, stage=stage), TemporaryDirectory() as temp:
+                    root, _environment = self._state(temp)
+                    self._bind(root)
+                    events = []
 
-                class Runtime:
-                    def __enter__(self):
-                        events.append("start")
-                        if stage == "startup":
-                            raise FamilyRuntimeError("start failed")
-                        return mock.sentinel.mount
+                    class Runtime:
+                        def __enter__(self):
+                            events.append("start")
+                            if stage == "startup":
+                                raise FamilyRuntimeError("start failed")
+                            return mock.sentinel.mount
 
-                    def __exit__(self, *_args):
-                        events.append("cleanup")
+                        def __exit__(self, *_args):
+                            events.append("cleanup")
 
-                def builder(*_args, **_kwargs):
-                    events.append("spec")
-                    raise ValueError("spec failed")
+                    def builder(*_args, **_kwargs):
+                        events.append("spec")
+                        raise ValueError("spec failed")
 
-                result, calls, stderr = self._run(
-                    root,
-                    agent="codex",
-                    factory=lambda _layout: Runtime(),
-                    supervisor=lambda *_args: self.fail("supervisor called"),
-                    builders={"codex": builder},
-                )
+                    result, calls, stderr = self._run(
+                        root,
+                        agent=agent,
+                        factory=lambda _layout: Runtime(),
+                        supervisor=lambda *_args: self.fail("supervisor called"),
+                        builders={agent: builder},
+                    )
 
-                self.assertEqual(result, 1)
-                self.assertNotEqual(stderr.getvalue(), "")
-                self.assertFalse(any(call.argv[:2] == ("podman", "run") for call in calls))
-                self.assertEqual(
-                    events,
-                    ["start"] if stage == "startup" else ["start", "spec", "cleanup"],
-                )
+                    self.assertEqual(result, 1)
+                    self.assertNotEqual(stderr.getvalue(), "")
+                    self.assertFalse(
+                        any(call.argv == ("podman", "run", agent) for call in calls)
+                    )
+                    self.assertEqual(
+                        events,
+                        ["start"]
+                        if stage == "startup"
+                        else ["start", "spec", "cleanup"],
+                    )
 
     def test_register_health_and_supervision_failure_cleanup_without_fallback(self) -> None:
-        for stage in ("register", "health", "supervision"):
-            with self.subTest(stage=stage), TemporaryDirectory() as temp:
-                root, _environment = self._state(temp)
-                self._bind(root)
-                events = []
+        for agent in ("codex", "claude"):
+            for stage in ("register", "health", "supervision"):
+                with self.subTest(agent=agent, stage=stage), TemporaryDirectory() as temp:
+                    root, _environment = self._state(temp)
+                    self._bind(root)
+                    events = []
 
-                class Runtime:
-                    def __enter__(self):
-                        events.append("start")
-                        return mock.sentinel.mount
+                    class Runtime:
+                        def __enter__(self):
+                            events.append("start")
+                            return mock.sentinel.mount
 
-                    def __exit__(self, *_args):
-                        events.append("cleanup")
+                        def __exit__(self, *_args):
+                            events.append("cleanup")
 
-                    def register_runtime(self, _pid):
-                        events.append("register")
-                        if stage == "register":
-                            raise FamilyRuntimeError("register failed")
+                        def register_runtime(self, _pid):
+                            events.append("register")
+                            if stage == "register":
+                                raise FamilyRuntimeError("register failed")
 
-                    def check(self):
-                        events.append("health")
-                        if stage == "health":
-                            raise FamilyRuntimeError("health failed")
+                        def check(self):
+                            events.append("health")
+                            if stage == "health":
+                                raise FamilyRuntimeError("health failed")
 
-                runtime = Runtime()
+                    runtime = Runtime()
 
-                def supervisor(spec, _gateway, _egress, observed):
-                    observed.register_runtime(4321)
-                    if stage != "register":
-                        observed.check()
-                    if stage == "supervision":
-                        raise FamilyRuntimeError("supervision failed")
-                    return subprocess.CompletedProcess(spec.argv, 0)
+                    def supervisor(spec, _gateway, _egress, observed, _mount):
+                        observed.register_runtime(4321)
+                        if stage != "register":
+                            observed.check()
+                        if stage == "supervision":
+                            raise FamilyRuntimeError("supervision failed")
+                        return subprocess.CompletedProcess(spec.argv, 0)
 
-                result, calls, stderr = self._run(
-                    root,
-                    agent="codex",
-                    factory=lambda _layout: runtime,
-                    supervisor=supervisor,
-                    builders={
-                        "codex": lambda *_args, **_kwargs: CommandSpec(
-                            ("podman", "run", "codex"), {}
-                        )
-                    },
-                )
+                    result, calls, stderr = self._run(
+                        root,
+                        agent=agent,
+                        factory=lambda _layout: runtime,
+                        supervisor=supervisor,
+                        builders={
+                            agent: lambda *_args, **_kwargs: CommandSpec(
+                                ("podman", "run", agent), {}
+                            )
+                        },
+                    )
 
-                self.assertEqual(result, 1)
-                self.assertNotEqual(stderr.getvalue(), "")
-                self.assertEqual(events[-1], "cleanup")
-                self.assertFalse(any(call.argv == ("podman", "run", "codex") for call in calls))
+                    self.assertEqual(result, 1)
+                    self.assertNotEqual(stderr.getvalue(), "")
+                    self.assertEqual(events[-1], "cleanup")
+                    self.assertFalse(
+                        any(call.argv == ("podman", "run", agent) for call in calls)
+                    )
 
 
 class AgentCtlMigrationTest(unittest.TestCase):

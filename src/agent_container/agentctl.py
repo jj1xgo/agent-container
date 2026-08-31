@@ -1788,7 +1788,11 @@ def main(
                         else runtime_supervisor
                     )
                     completed = supervisor(
-                        spec, egress_runtime, egress_mount, family_runtime
+                        spec,
+                        egress_runtime,
+                        egress_mount,
+                        family_runtime,
+                        family_mount,
                     )
                 elif egress_runtime is not None and egress_mount is not None:
                     completed = (

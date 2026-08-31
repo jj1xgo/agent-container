@@ -10,6 +10,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import agent_container.family_runtime_mount as family_runtime_mount
+
 from agent_container.family_intake_runtime import FamilyIntakeRuntime
 from agent_container.family_intake_runtime import FamilyIntakeRuntimeError
 from agent_container.family_intake_runtime import FamilyRuntimeMount
@@ -29,6 +31,23 @@ NOW = 1_800_000_000
 
 
 class FamilyIntakeRuntimeTest(unittest.TestCase):
+    def test_ancestor_close_failure_closes_new_child_descriptor(self) -> None:
+        closed = []
+
+        def close(descriptor):
+            closed.append(descriptor)
+            if descriptor == 10:
+                raise OSError("close failed")
+
+        with patch.object(
+            family_runtime_mount.os, "open", side_effect=(10, 11)
+        ), patch.object(
+            family_runtime_mount.os, "close", side_effect=close
+        ), self.assertRaisesRegex(OSError, "close failed"):
+            family_runtime_mount._open_directory(Path("/child"))
+
+        self.assertEqual(closed, [10, 11])
+
     def setUp(self) -> None:
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

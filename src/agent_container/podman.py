@@ -8,6 +8,7 @@ import time
 
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
 from agent_container.family_runtime_mount import FamilyRuntimeMount
+from agent_container.family_runtime_mount import FamilyRuntimeError
 from agent_container.egress_broker_runtime import EgressBrokerRuntime
 from agent_container.egress_broker_runtime import EgressBrokerRuntimeError
 from agent_container.egress_broker_runtime import EgressRuntimeMount
@@ -53,6 +54,7 @@ _RESOURCE_STATS_FORMAT = (
 class CommandSpec:
     argv: tuple[str, ...]
     environment: dict[str, str]
+    pass_fds: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -253,7 +255,7 @@ def _family_runtime_args(
     family.revalidate()
     arguments = [
         "--mount",
-        _mount(socket_dir, _FAMILY_RUNTIME_PATH),
+        _mount(family.mount_source, _FAMILY_RUNTIME_PATH),
         "--env",
         f"AGENT_FAMILY_SOCKET={expected_environment['AGENT_FAMILY_SOCKET']}",
         "--env",
@@ -638,7 +640,9 @@ def run_codex_spec(
         "-c",
         CODEX_STATUS_LINE_CONFIG,
     ]
-    return CommandSpec(tuple(argv), {})
+    return CommandSpec(
+        tuple(argv), {}, () if family_mount is None else family_mount.pass_fds
+    )
 
 
 def run_claude_spec(
@@ -688,7 +692,9 @@ def run_claude_spec(
     if egress is not None:
         argv += ["agent-egress-runtime", "--"]
     argv += _CLAUDE_LAUNCHER_PREFIX
-    return CommandSpec(tuple(argv), {})
+    return CommandSpec(
+        tuple(argv), {}, () if family_mount is None else family_mount.pass_fds
+    )
 
 
 def podman_version_spec() -> CommandSpec:
@@ -718,6 +724,7 @@ def run_command(
         text=True,
         check=check,
         capture_output=capture_output,
+        pass_fds=spec.pass_fds,
     )
 
 
@@ -726,6 +733,7 @@ def run_command_supervised(
     gateway: EgressBrokerRuntime | None,
     egress: EgressRuntimeMount | None,
     family_runtime=None,
+    family_mount: FamilyRuntimeMount | None = None,
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.update(spec.environment)
@@ -746,6 +754,8 @@ def run_command_supervised(
     try:
         launch_argv = spec.argv
         if family_runtime is not None:
+            if family_mount is None:
+                raise FamilyRuntimeError("family runtime mount is unavailable")
             family_runtime.validate_mount()
             launch_argv = (
                 "/bin/sh",
@@ -754,7 +764,12 @@ def run_command_supervised(
                 "agent-runtime",
                 *spec.argv,
             )
-        process = subprocess.Popen(launch_argv, env=environment, text=True)
+        process = subprocess.Popen(
+            launch_argv,
+            env=environment,
+            text=True,
+            pass_fds=spec.pass_fds,
+        )
         if family_runtime is not None:
             try:
                 stopped_pid, stopped_status = os.waitpid(process.pid, os.WUNTRACED)
@@ -797,8 +812,8 @@ def run_command_supervised(
         _reap_process(process)
         if egress is not None:
             _stop_egress_container(egress)
-        elif family_runtime is not None:
-            _stop_named_container(family_runtime.container_name)
+        elif family_mount is not None:
+            _stop_named_container(family_mount.container_name)
         if failure is not None:
             raise failure
         raise EgressBrokerRuntimeError("egress gateway failed")
@@ -808,8 +823,8 @@ def run_command_supervised(
         _reap_process(process)
         if egress is not None:
             _stop_egress_container(egress)
-        elif family_runtime is not None:
-            _stop_named_container(family_runtime.container_name)
+        elif family_mount is not None:
+            _stop_named_container(family_mount.container_name)
         raise EgressBrokerRuntimeError("egress gateway failed") from None
     if returncode != 0:
         raise subprocess.CalledProcessError(returncode, spec.argv)
