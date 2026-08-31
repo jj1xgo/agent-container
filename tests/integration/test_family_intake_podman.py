@@ -416,12 +416,12 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
             )
             image_index = spec.argv.index("image")
             self.assertEqual(
-                spec.argv[image_index + 1 : image_index + 3],
-                ("agent-runtime-launcher", "--"),
+                spec.argv[image_index + 1 : image_index + 4],
+                ("agent-runtime-launcher", "--registration-stop", "--"),
             )
             if "agent-egress-runtime" in spec.argv:
                 self.assertGreater(
-                    spec.argv.index("agent-egress-runtime"), image_index + 2
+                    spec.argv.index("agent-egress-runtime"), image_index + 3
                 )
 
 

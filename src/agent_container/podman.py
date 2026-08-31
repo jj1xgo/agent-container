@@ -275,10 +275,45 @@ def _runtime_launcher_args(
     family: FamilyRuntimeMount | None,
 ) -> list[str]:
     arguments = [_RUNTIME_LAUNCHER]
+    if family is not None:
+        arguments.append("--registration-stop")
     if family is not None and family.pass_fds:
         arguments.append(f"--close-fd={family.pass_fds[0]}")
     arguments.append("--")
     return arguments
+
+
+def _wait_for_stopped_container(
+    container_name: str,
+    process: subprocess.Popen[str],
+) -> int:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("family runtime launch handoff failed")
+        inspected = subprocess.run(
+            ("podman", "inspect", "--format", "{{.State.Pid}}", container_name),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+        if inspected.returncode == 0 and inspected.stdout.strip().isdigit():
+            pid = int(inspected.stdout.strip())
+            try:
+                process_stat = Path(f"/proc/{pid}/stat").read_text("ascii")
+            except (OSError, UnicodeError):
+                pass
+            else:
+                closing = process_stat.rfind(")")
+                if (
+                    pid > 0
+                    and closing >= 0
+                    and process_stat[closing + 2 : closing + 3] == "T"
+                ):
+                    return pid
+        time.sleep(0.05)
+    raise RuntimeError("family runtime launch handoff failed")
 
 
 def build_image_spec(
@@ -781,37 +816,28 @@ def run_command_supervised(
     gateway_failed = False
     failure: BaseException | None = None
     try:
-        launch_argv = spec.argv
         if family_runtime is not None:
             if family_mount is None:
                 raise FamilyRuntimeError("family runtime mount is unavailable")
             family_runtime.validate_mount()
-            launch_argv = (
-                "/bin/sh",
-                "-c",
-                'kill -STOP $$; exec "$@"',
-                "agent-runtime",
-                *spec.argv,
-            )
         process = subprocess.Popen(
-            launch_argv,
+            spec.argv,
             env=environment,
             text=True,
             pass_fds=spec.pass_fds,
         )
         if family_runtime is not None:
             try:
-                stopped_pid, stopped_status = os.waitpid(process.pid, os.WUNTRACED)
-                if (
-                    stopped_pid != process.pid
-                    or not os.WIFSTOPPED(stopped_status)
-                    or os.WSTOPSIG(stopped_status) != signal.SIGSTOP
-                ):
-                    raise RuntimeError("family runtime launch handoff failed")
-                family_runtime.register_runtime(process.pid)
+                container_name = (
+                    egress.container_name
+                    if egress is not None
+                    else family_mount.container_name
+                )
+                stopped_pid = _wait_for_stopped_container(container_name, process)
+                family_runtime.register_runtime(stopped_pid)
             except BaseException:
                 try:
-                    os.kill(process.pid, signal.SIGKILL)
+                    _stop_named_container(container_name)
                 finally:
                     try:
                         process.wait(timeout=5)
@@ -819,7 +845,7 @@ def run_command_supervised(
                         pass
                 process = None
                 raise
-            os.kill(process.pid, signal.SIGCONT)
+            os.kill(stopped_pid, signal.SIGCONT)
         while process.poll() is None and not interrupted:
             if gateway is not None and gateway.wait_failed(0.1):
                 gateway_failed = True

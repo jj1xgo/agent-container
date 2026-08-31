@@ -3,10 +3,14 @@
 
 import os
 import re
+import signal
 import sys
 
 
 arguments = sys.argv[1:]
+if arguments and arguments[0] == "--registration-stop":
+    arguments.pop(0)
+    os.kill(os.getpid(), signal.SIGSTOP)
 if arguments and arguments[0].startswith("--close-fd="):
     match = re.fullmatch(r"--close-fd=([0-9]+)", arguments.pop(0))
     if match is None or int(match.group(1)) < 3:

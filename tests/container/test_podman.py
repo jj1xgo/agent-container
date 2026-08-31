@@ -118,9 +118,11 @@ class PodmanCommandTest(unittest.TestCase):
         with mock.patch(
             "agent_container.podman.subprocess.Popen", return_value=Process()
         ) as popen, mock.patch(
-            "agent_container.podman.os.waitpid",
-            side_effect=lambda pid, flags: events.append(("stopped", pid, flags))
-            or (pid, (signal.SIGSTOP << 8) | 0x7F),
+            "agent_container.podman._wait_for_stopped_container",
+            side_effect=lambda name, process: events.append(
+                ("stopped", name, process.pid)
+            ) or 9876,
+            create=True,
         ), mock.patch(
             "agent_container.podman.os.kill",
             side_effect=lambda pid, signum: events.append(("signal", pid, signum)),
@@ -141,15 +143,12 @@ class PodmanCommandTest(unittest.TestCase):
             events,
             [
                 "revalidated",
-                ("stopped", 4321, os.WUNTRACED),
-                ("registered", 4321),
-                ("signal", 4321, signal.SIGCONT),
+                ("stopped", egress.container_name, 4321),
+                ("registered", 9876),
+                ("signal", 9876, signal.SIGCONT),
             ],
         )
-        self.assertEqual(
-            popen.call_args.args[0][:4],
-            ("/bin/sh", "-c", 'kill -STOP $$; exec "$@"', "agent-runtime"),
-        )
+        self.assertEqual(popen.call_args.args[0], ("podman", "run", "image"))
         self.assertEqual(popen.call_args.kwargs["pass_fds"], (77,))
 
     def test_family_registration_failure_kills_stopped_runtime_without_resume(self) -> None:
@@ -172,11 +171,14 @@ class PodmanCommandTest(unittest.TestCase):
         with mock.patch(
             "agent_container.podman.subprocess.Popen", return_value=Process()
         ), mock.patch(
-            "agent_container.podman.os.waitpid",
-            return_value=(4321, (signal.SIGSTOP << 8) | 0x7F),
+            "agent_container.podman._wait_for_stopped_container",
+            return_value=9876,
         ), mock.patch(
             "agent_container.podman.os.kill",
             side_effect=lambda pid, signum: signals.append((pid, signum)),
+        ), mock.patch(
+            "agent_container.podman.subprocess.run",
+            return_value=subprocess.CompletedProcess((), 0),
         ), self.assertRaises(RuntimeError):
             run_command_supervised(
                 CommandSpec(("podman", "run", "image"), {}),
@@ -188,7 +190,7 @@ class PodmanCommandTest(unittest.TestCase):
                 family_mount,
             )
 
-        self.assertEqual(signals, [(4321, signal.SIGKILL)])
+        self.assertEqual(signals, [])
 
     def test_family_health_failure_stops_then_kills_exact_named_container(self) -> None:
         class Process:
@@ -217,8 +219,8 @@ class PodmanCommandTest(unittest.TestCase):
         with mock.patch(
             "agent_container.podman.subprocess.Popen", return_value=Process()
         ), mock.patch(
-            "agent_container.podman.os.waitpid",
-            return_value=(4321, (signal.SIGSTOP << 8) | 0x7F),
+            "agent_container.podman._wait_for_stopped_container",
+            return_value=9876,
         ), mock.patch("agent_container.podman.os.kill"), mock.patch(
             "agent_container.podman.time.sleep"
         ) as slept, mock.patch(
@@ -339,8 +341,8 @@ class PodmanCommandTest(unittest.TestCase):
         with mock.patch(
             "agent_container.podman.subprocess.Popen", return_value=Process()
         ), mock.patch(
-            "agent_container.podman.os.waitpid",
-            return_value=(4321, (signal.SIGSTOP << 8) | 0x7F),
+            "agent_container.podman._wait_for_stopped_container",
+            return_value=9876,
         ), mock.patch("agent_container.podman.os.kill"), mock.patch(
             "agent_container.podman.subprocess.run",
             side_effect=lambda argv, **_kwargs: cleanups.append(tuple(argv))
@@ -381,8 +383,8 @@ class PodmanCommandTest(unittest.TestCase):
         with mock.patch(
             "agent_container.podman.subprocess.Popen", return_value=Process()
         ), mock.patch(
-            "agent_container.podman.os.waitpid",
-            return_value=(4321, (signal.SIGSTOP << 8) | 0x7F),
+            "agent_container.podman._wait_for_stopped_container",
+            return_value=9876,
         ), mock.patch("agent_container.podman.os.kill"), mock.patch(
             "agent_container.podman.subprocess.run",
             side_effect=lambda argv, **_kwargs: cleanups.append(tuple(argv))
@@ -419,8 +421,8 @@ class PodmanCommandTest(unittest.TestCase):
         with mock.patch(
             "agent_container.podman.subprocess.Popen", return_value=Process()
         ), mock.patch(
-            "agent_container.podman.os.waitpid",
-            return_value=(4321, (signal.SIGSTOP << 8) | 0x7F),
+            "agent_container.podman._wait_for_stopped_container",
+            return_value=9876,
         ), mock.patch("agent_container.podman.os.kill"), mock.patch(
             "agent_container.podman.subprocess.run",
             side_effect=lambda argv, **_kwargs: cleanups.append(tuple(argv))
