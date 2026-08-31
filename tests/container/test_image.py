@@ -306,6 +306,7 @@ class ContainerImageContractTest(unittest.TestCase):
                 "!src/",
                 "!src/**",
                 "src/agent_container/family_github_app.py",
+                "src/agent_container/family_issue_create.py",
                 "src/agent_container/family_state.py",
                 "!profiles/",
                 "!profiles/codex/",
@@ -410,6 +411,7 @@ class ContainerImageContractTest(unittest.TestCase):
             with self.subTest(path=path):
                 if path in {
                     "src/agent_container/family_github_app.py",
+                    "src/agent_container/family_issue_create.py",
                     "src/agent_container/family_state.py",
                 }:
                     self.assertFalse(containerignore_includes(path, patterns))
