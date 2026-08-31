@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest import mock
 
+import agent_container.podman as podman_module
 from agent_container.podman import auth_codex_spec
 from agent_container.podman import BrokerRuntimeMount
 from agent_container.podman import CommandSpec
@@ -32,7 +33,7 @@ from agent_container.podman import podman_stats_spec
 from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.podman import run_command_supervised
-from agent_container.podman import _wait_for_stopped_container
+from agent_container.podman import _wait_for_container_pid
 from agent_container.family_intake_runtime import FamilyRuntimeMount
 from agent_container.family_intake_runtime import FamilyIntakeRuntime
 from agent_container.egress_broker_runtime import EgressBrokerRuntimeError
@@ -50,6 +51,74 @@ HANDOVER_BROKER = HandoverRuntimeMount(Path("/state/handover-broker/one"))
 
 
 class PodmanCommandTest(unittest.TestCase):
+    def test_family_gate_argv_preserves_exact_fd_and_replaces_placeholder(
+        self,
+    ) -> None:
+        argv = podman_module._family_gate_argv(
+            (
+                "podman",
+                "run",
+                "image",
+                "agent-runtime-launcher",
+                "--registration-gate",
+                "--",
+                "codex",
+            ),
+            19,
+            Path("/private/container.pid"),
+        )
+
+        self.assertEqual(
+            argv[:4],
+            (
+                "podman",
+                "run",
+                "--pidfile=/private/container.pid",
+                "--preserve-fd=19",
+            ),
+        )
+        self.assertEqual(
+            argv[5:8],
+            (
+                "agent-runtime-launcher",
+                "--registration-gate-fd=19",
+                "--",
+            ),
+        )
+        for invalid in (
+            ("podman", "run", "image"),
+            (
+                "podman",
+                "run",
+                "image",
+                "agent-runtime-launcher",
+                "--registration-gate",
+                "--registration-gate",
+                "--",
+                "codex",
+            ),
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                podman_module._family_gate_argv(
+                    invalid, 19, Path("/private/container.pid")
+                )
+
+    def test_family_pid_wait_accepts_live_nonstopped_container(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        with mock.patch.object(
+            Path,
+            "read_text",
+            side_effect=["123", "123 (agent-runtime) S 1 2 3"],
+        ), mock.patch(
+            "agent_container.podman.time.monotonic", side_effect=[0, 0]
+        ):
+            pid = podman_module._wait_for_container_pid(
+                Path("/private/container.pid"), process
+            )
+
+        self.assertEqual(pid, 123)
+
     def test_family_handoff_reports_podman_early_exit(self) -> None:
         process = mock.Mock()
         process.poll.side_effect = [None, 125]
@@ -61,7 +130,7 @@ class PodmanCommandTest(unittest.TestCase):
         ), mock.patch("agent_container.podman.time.sleep"), self.assertRaisesRegex(
             RuntimeError, "podman exited after pidfile missing"
         ):
-            _wait_for_stopped_container(Path("/secret/container.pid"), process)
+            _wait_for_container_pid(Path("/secret/container.pid"), process)
 
     def test_family_handoff_timeout_reports_last_safe_observation(self) -> None:
         class Process:
@@ -79,7 +148,7 @@ class PodmanCommandTest(unittest.TestCase):
                 "agent_container.podman.time.monotonic", side_effect=[0, 0, 11]
             ), mock.patch("agent_container.podman.time.sleep"):
                 with self.assertRaisesRegex(RuntimeError, expected):
-                    _wait_for_stopped_container(
+                    _wait_for_container_pid(
                         Path("/secret/container.pid"), Process()
                     )
 
@@ -97,26 +166,10 @@ class PodmanCommandTest(unittest.TestCase):
         ), mock.patch("agent_container.podman.time.sleep"), self.assertRaisesRegex(
             RuntimeError, "process state unavailable"
         ) as raised:
-            _wait_for_stopped_container(Path("/secret/container.pid"), Process())
+            _wait_for_container_pid(Path("/secret/container.pid"), Process())
 
         self.assertNotIn("123", str(raised.exception))
         self.assertNotIn("/secret", str(raised.exception))
-
-    def test_family_handoff_timeout_reports_process_not_stopped(self) -> None:
-        class Process:
-            def poll(self):
-                return None
-
-        with mock.patch.object(
-            Path,
-            "read_text",
-            side_effect=["123", "123 (agent-runtime) S 1 2 3"],
-        ), mock.patch(
-            "agent_container.podman.time.monotonic", side_effect=[0, 0, 11]
-        ), mock.patch("agent_container.podman.time.sleep"), self.assertRaisesRegex(
-            RuntimeError, "process not stopped"
-        ):
-            _wait_for_stopped_container(Path("/secret/container.pid"), Process())
 
     def test_preserved_fd_reaches_fake_podman_and_oci_child(self) -> None:
         with TemporaryDirectory() as temp:
@@ -158,8 +211,22 @@ class PodmanCommandTest(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0)
 
-    def test_family_supervision_registers_stopped_runtime_before_resume(self) -> None:
+    def test_family_supervision_registers_runtime_before_gate_release(self) -> None:
         events = []
+        real_close = os.close
+        real_write = os.write
+
+        def record_close(fd):
+            if fd in (88, 89):
+                events.append(("closed", fd))
+            else:
+                real_close(fd)
+
+        def record_write(fd, value):
+            if fd == 89:
+                events.append(("released", fd, value))
+                return len(value)
+            return real_write(fd, value)
 
         class Process:
             pid = 4321
@@ -181,23 +248,38 @@ class PodmanCommandTest(unittest.TestCase):
         )
         family_mount = mock.create_autospec(FamilyRuntimeMount, instance=True)
         family_mount.container_name = "agent-family-safe"
-        with mock.patch(
+        with mock.patch("agent_container.podman.os.pipe2", return_value=(88, 89)), mock.patch(
             "agent_container.podman.subprocess.Popen", return_value=Process()
         ) as popen, mock.patch(
-            "agent_container.podman._wait_for_stopped_container",
+            "agent_container.podman._wait_for_container_pid",
             side_effect=lambda pidfile, process: events.append(
-                ("stopped", pidfile.name, process.pid)
+                ("pid-ready", pidfile.name, process.pid)
             ) or 9876,
             create=True,
         ), mock.patch(
-            "agent_container.podman.os.kill",
-            side_effect=lambda pid, signum: events.append(("signal", pid, signum)),
+            "agent_container.podman.os.write",
+            side_effect=record_write,
+        ), mock.patch(
+            "agent_container.podman.os.close",
+            side_effect=record_close,
         ):
             family.register_runtime.side_effect = lambda pid: events.append(
                 ("registered", pid)
             )
             result = run_command_supervised(
-                CommandSpec(("podman", "run", "image"), {}, (77,)),
+                CommandSpec(
+                    (
+                        "podman",
+                        "run",
+                        "image",
+                        "agent-runtime-launcher",
+                        "--registration-gate",
+                        "--",
+                        "codex",
+                    ),
+                    {},
+                    (77,),
+                ),
                 gateway,
                 egress,
                 family,
@@ -209,18 +291,21 @@ class PodmanCommandTest(unittest.TestCase):
             events,
             [
                 "revalidated",
-                ("stopped", "container.pid", 4321),
+                ("closed", 88),
+                ("pid-ready", "container.pid", 4321),
                 ("registered", 9876),
-                ("signal", 9876, signal.SIGCONT),
+                ("released", 89, b"1"),
+                ("closed", 89),
             ],
         )
         launched = popen.call_args.args[0]
         self.assertEqual(launched[:2], ("podman", "run"))
         self.assertTrue(launched[2].startswith("--pidfile="))
-        self.assertEqual(launched[3:], ("image",))
-        self.assertEqual(popen.call_args.kwargs["pass_fds"], (77,))
+        self.assertEqual(launched[3], "--preserve-fd=88")
+        self.assertIn("--registration-gate-fd=88", launched)
+        self.assertEqual(popen.call_args.kwargs["pass_fds"], (77, 88))
 
-    def test_family_registration_failure_kills_stopped_runtime_without_resume(self) -> None:
+    def test_family_registration_failure_closes_gate_without_release(self) -> None:
         class Process:
             pid = 4321
             returncode = None
@@ -236,21 +321,40 @@ class PodmanCommandTest(unittest.TestCase):
         family_mount = mock.create_autospec(FamilyRuntimeMount, instance=True)
         family_mount.container_name = "agent-family-safe"
         family.register_runtime.side_effect = RuntimeError("registration failed")
-        signals = []
-        with mock.patch(
+        closed = []
+        real_close = os.close
+
+        def record_close(fd):
+            if fd in (88, 89):
+                closed.append(fd)
+            else:
+                real_close(fd)
+
+        with mock.patch("agent_container.podman.os.pipe2", return_value=(88, 89)), mock.patch(
             "agent_container.podman.subprocess.Popen", return_value=Process()
         ), mock.patch(
-            "agent_container.podman._wait_for_stopped_container",
+            "agent_container.podman._wait_for_container_pid",
             return_value=9876,
-        ), mock.patch(
-            "agent_container.podman.os.kill",
-            side_effect=lambda pid, signum: signals.append((pid, signum)),
+        ), mock.patch("agent_container.podman.os.write") as written, mock.patch(
+            "agent_container.podman.os.close",
+            side_effect=record_close,
         ), mock.patch(
             "agent_container.podman.subprocess.run",
             return_value=subprocess.CompletedProcess((), 0),
         ), self.assertRaises(RuntimeError):
             run_command_supervised(
-                CommandSpec(("podman", "run", "image"), {}),
+                CommandSpec(
+                    (
+                        "podman",
+                        "run",
+                        "image",
+                        "agent-runtime-launcher",
+                        "--registration-gate",
+                        "--",
+                        "codex",
+                    ),
+                    {},
+                ),
                 mock.Mock(),
                 EgressRuntimeMount(
                     Path("/state/egress/codex"), "agent-container", "codex"
@@ -259,7 +363,8 @@ class PodmanCommandTest(unittest.TestCase):
                 family_mount,
             )
 
-        self.assertEqual(signals, [])
+        written.assert_not_called()
+        self.assertEqual(closed, [88, 89])
 
     def test_family_health_failure_stops_then_kills_exact_named_container(self) -> None:
         class Process:
@@ -288,9 +393,9 @@ class PodmanCommandTest(unittest.TestCase):
         with mock.patch(
             "agent_container.podman.subprocess.Popen", return_value=Process()
         ), mock.patch(
-            "agent_container.podman._wait_for_stopped_container",
+            "agent_container.podman._wait_for_container_pid",
             return_value=9876,
-        ), mock.patch("agent_container.podman.os.kill"), mock.patch(
+        ), mock.patch("agent_container.podman.os.write", return_value=1), mock.patch(
             "agent_container.podman.time.sleep"
         ) as slept, mock.patch(
             "agent_container.podman.subprocess.run",
@@ -298,7 +403,13 @@ class PodmanCommandTest(unittest.TestCase):
             or subprocess.CompletedProcess(argv, 1 if len(cleanups) == 1 else 0),
         ), self.assertRaisesRegex(RuntimeError, "broker failed"):
             run_command_supervised(
-                CommandSpec(("podman", "run", "image"), {}),
+                CommandSpec(
+                    (
+                        "podman", "run", "image", "agent-runtime-launcher",
+                        "--registration-gate", "--", "codex",
+                    ),
+                    {},
+                ),
                 None,
                 None,
                 family,
@@ -410,15 +521,21 @@ class PodmanCommandTest(unittest.TestCase):
         with mock.patch(
             "agent_container.podman.subprocess.Popen", return_value=Process()
         ), mock.patch(
-            "agent_container.podman._wait_for_stopped_container",
+            "agent_container.podman._wait_for_container_pid",
             return_value=9876,
-        ), mock.patch("agent_container.podman.os.kill"), mock.patch(
+        ), mock.patch("agent_container.podman.os.write", return_value=1), mock.patch(
             "agent_container.podman.subprocess.run",
             side_effect=lambda argv, **_kwargs: cleanups.append(tuple(argv))
             or subprocess.CompletedProcess(argv, 0),
         ), self.assertRaises(subprocess.CalledProcessError) as raised:
             run_command_supervised(
-                CommandSpec(("podman", "run", "image"), {}),
+                CommandSpec(
+                    (
+                        "podman", "run", "image", "agent-runtime-launcher",
+                        "--registration-gate", "--", "codex",
+                    ),
+                    {},
+                ),
                 None,
                 None,
                 family,
@@ -452,15 +569,21 @@ class PodmanCommandTest(unittest.TestCase):
         with mock.patch(
             "agent_container.podman.subprocess.Popen", return_value=Process()
         ), mock.patch(
-            "agent_container.podman._wait_for_stopped_container",
+            "agent_container.podman._wait_for_container_pid",
             return_value=9876,
-        ), mock.patch("agent_container.podman.os.kill"), mock.patch(
+        ), mock.patch("agent_container.podman.os.write", return_value=1), mock.patch(
             "agent_container.podman.subprocess.run",
             side_effect=lambda argv, **_kwargs: cleanups.append(tuple(argv))
             or subprocess.CompletedProcess(argv, 0),
         ), self.assertRaises(subprocess.CalledProcessError):
             run_command_supervised(
-                CommandSpec(("podman", "run", "image"), {}),
+                CommandSpec(
+                    (
+                        "podman", "run", "image", "agent-runtime-launcher",
+                        "--registration-gate", "--", "codex",
+                    ),
+                    {},
+                ),
                 mock.Mock(wait_failed=lambda _timeout: False),
                 egress,
                 family,
@@ -490,15 +613,21 @@ class PodmanCommandTest(unittest.TestCase):
         with mock.patch(
             "agent_container.podman.subprocess.Popen", return_value=Process()
         ), mock.patch(
-            "agent_container.podman._wait_for_stopped_container",
+            "agent_container.podman._wait_for_container_pid",
             return_value=9876,
-        ), mock.patch("agent_container.podman.os.kill"), mock.patch(
+        ), mock.patch("agent_container.podman.os.write", return_value=1), mock.patch(
             "agent_container.podman.subprocess.run",
             side_effect=lambda argv, **_kwargs: cleanups.append(tuple(argv))
             or subprocess.CompletedProcess(argv, 1),
         ), self.assertRaises(EgressBrokerRuntimeError):
             run_command_supervised(
-                CommandSpec(("podman", "run", "image"), {}),
+                CommandSpec(
+                    (
+                        "podman", "run", "image", "agent-runtime-launcher",
+                        "--registration-gate", "--", "codex",
+                    ),
+                    {},
+                ),
                 None,
                 None,
                 family,
