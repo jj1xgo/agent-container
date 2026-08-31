@@ -35,6 +35,36 @@ PYTHONPATH=src python3 -m unittest tests.container.test_family_issue -v && bin/l
 
 Output: `Ran 12 tests ... OK`; `All checks passed!`.
 
+## Review fix round 2
+
+The Markdown renderer now escapes entity-like ampersands, including named and
+numeric references such as `&copy;` and `&#x202E;`, preventing entity decoding
+from introducing formatting or bidi controls. Escaping is now context-aware:
+active inline constructs (backslash, code, emphasis, links/images,
+HTML/autolinks, and entities) are protected, and block-leading headings,
+quotes, bullets, thematic breaks, and ordered-list markers are protected.
+Ordinary punctuation, including terminal periods and URL periods, remains
+unchanged, preserving the brief's exact canonical example output. Bidi tests
+cover title, summary, context, and criteria across every prohibited code point.
+
+Review-fix RED command:
+
+```text
+PYTHONPATH=src python3 -m unittest tests.container.test_family_issue -v
+```
+
+Output: 4 failures: the new entity/inline tests exposed raw references and
+constructs, and the restored exact example output exposed blanket period
+escaping.
+
+Review-fix GREEN command:
+
+```text
+PYTHONPATH=src python3 -m unittest tests.container.test_family_issue -v && bin/lint && git diff --check
+```
+
+Output: `Ran 14 tests ... OK`; `All checks passed!`.
+
 ## Verification
 
 - Focused Task 2 tests: PASS (12 tests).

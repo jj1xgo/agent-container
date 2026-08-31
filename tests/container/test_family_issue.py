@@ -28,8 +28,8 @@ class FamilyIssueTest(unittest.TestCase):
 
         self.assertEqual(
             render_family_issue_body(draft),
-            "## Summary\n\nUsers need a portable copy\\.\n\n"
-            "## Context\n\nThe current UI has no export action\\.\n\n"
+            "## Summary\n\nUsers need a portable copy.\n\n"
+            "## Context\n\nThe current UI has no export action.\n\n"
             "## Acceptance criteria\n\n- A JSON file downloads\n- Errors are visible\n",
         )
 
@@ -63,7 +63,7 @@ class FamilyIssueTest(unittest.TestCase):
         self.assertEqual(
             render_family_issue_body(draft).encode("utf-8"),
             (
-                "## Summary\n\nCombining e\u0301 and emoji stay unchanged\\.\n\n"
+                "## Summary\n\nCombining e\u0301 and emoji stay unchanged.\n\n"
                 "## Context\n\n日本語もそのまま保存される。\n\n"
                 "## Acceptance criteria\n\n- Déjà vu\n- Пройдено\n"
             ).encode("utf-8"),
@@ -77,7 +77,7 @@ class FamilyIssueTest(unittest.TestCase):
                 "title": "`*` [title]",
                 "summary": "# custom heading **bold** _under_ [link](https://example.invalid) = \\slash",
                 "context": "> quote + - item **still content** <tag>",
-                "acceptance_criteria": ["`code` {x} | ~strike~", "--- ! <tag>"],
+                "acceptance_criteria": ["`code` {x} | ~~strike~~", "--- ! <tag>"],
             }
         )
 
@@ -86,10 +86,10 @@ class FamilyIssueTest(unittest.TestCase):
 
         self.assertEqual(
             body,
-            "## Summary\n\n\\# custom heading \\*\\*bold\\*\\* \\_under\\_ \\[link\\]\\(https://example\\.invalid\\) \\= \\\\slash\n\n"
-            "## Context\n\n\\> quote \\+ \\- item \\*\\*still content\\*\\* \\<tag\\>\n\n"
-            "## Acceptance criteria\n\n- \\`code\\` \\{x\\} \\| \\~strike\\~\n"
-            "- \\-\\-\\- \\! \\<tag\\>\n",
+            "## Summary\n\n\\# custom heading \\*\\*bold\\*\\* \\_under\\_ \\[link\\]\\(https://example.invalid\\) = \\\\slash\n\n"
+            "## Context\n\n\\> quote + - item \\*\\*still content\\*\\* \\<tag\\>\n\n"
+            "## Acceptance criteria\n\n- \\`code\\` {x} | \\~\\~strike\\~\\~\n"
+            "- --- ! \\<tag\\>\n",
         )
         self.assertEqual(body.count("## Summary"), 1)
         self.assertEqual(body.count("## Context"), 1)
@@ -98,6 +98,54 @@ class FamilyIssueTest(unittest.TestCase):
             [line for line in body.splitlines() if line.startswith("## ")],
             ["## Summary", "## Context", "## Acceptance criteria"],
         )
+
+    # Break caught: entity references being interpreted into formatting or bidi controls.
+    def test_escapes_entity_like_ampersands_as_literal_text(self) -> None:
+        payload = valid_payload()
+        payload.update(
+            {
+                "summary": "Copyright &copy; and hidden &#x202E; marker.",
+                "context": "Decimal &#8238; and named &NotAnEntity; stay visible.",
+                "acceptance_criteria": ["Show &amp; exactly"],
+            }
+        )
+
+        body = render_family_issue_body(parse_family_issue_draft(payload))
+
+        self.assertIn("Copyright \\&copy; and hidden \\&#x202E; marker.", body)
+        self.assertIn("Decimal \\&#8238; and named \\&NotAnEntity; stay visible.", body)
+        self.assertIn("- Show \\&amp; exactly", body)
+        self.assertNotIn("&#x202E;", body.replace("\\&#x202E;", ""))
+
+    # Break caught: inline syntax and block-leading markers becoming user-owned structure.
+    def test_escapes_inline_constructs_and_contextual_block_markers(self) -> None:
+        payload = valid_payload()
+        payload.update(
+            {
+                "summary": (
+                    "**bold** `code` [link](https://example.invalid) "
+                    "![image](https://example.invalid/i.png) <https://example.invalid> "
+                    "<em>html</em> \\slash &copy;."
+                ),
+                "context": "# heading",
+                "acceptance_criteria": ["> quote", "- bullet", "+ bullet", "1. ordered", "1) ordered"],
+            }
+        )
+
+        body = render_family_issue_body(parse_family_issue_draft(payload))
+
+        self.assertIn(
+            "\\*\\*bold\\*\\* \\`code\\` \\[link\\]\\(https://example.invalid\\) "
+            "\\!\\[image\\]\\(https://example.invalid/i.png\\) "
+            "\\<https://example.invalid\\> \\<em\\>html\\</em\\> \\\\slash \\&copy;.",
+            body,
+        )
+        self.assertIn("\\# heading", body)
+        self.assertIn("- \\> quote", body)
+        self.assertIn("- \\- bullet", body)
+        self.assertIn("- \\+ bullet", body)
+        self.assertIn("- 1\\. ordered", body)
+        self.assertIn("- 1\\) ordered", body)
 
     # Break caught: a non-string, empty, or structurally wrong required value being accepted.
     def test_rejects_wrong_types_empty_values_and_non_list_criteria(self) -> None:

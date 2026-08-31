@@ -1,6 +1,7 @@
 """Validation and canonical rendering for family Issue intake requests."""
 
 from dataclasses import dataclass
+import re
 
 
 TITLE_BYTES = 256
@@ -15,7 +16,17 @@ _REQUEST_FIELDS = frozenset(
 _BIDI_OVERRIDES = frozenset(
     (*range(0x202A, 0x202F), *range(0x2066, 0x206A))
 )
-_MARKDOWN_ESCAPES = frozenset("\\`*{}[]()#+-.!_>~|<=")
+_ENTITY_REFERENCE = re.compile(
+    r"&(?:#(?:0|[1-9][0-9]{0,6})|#x(?:0|[1-9A-Fa-f][0-9A-Fa-f]{0,5})|"
+    r"[A-Za-z][A-Za-z0-9]{1,31});"
+)
+_LINK = re.compile(r"!?\[[^\]\n]+\]\([^)\n]*\)")
+_REFERENCE_LINK = re.compile(r"!?\[[^\]\n]+\]\[[^\]\n]*\]")
+_HTML_OR_AUTOLINK = re.compile(
+    r"<!--[^\n]*-->|<(?:(?:https?|mailto):[^ <>\n]+|[^ <>@\n]+@[^ <>@\n]+|/?[A-Za-z][^>\n]*)>"
+)
+_DELIMITED = re.compile(r"(?<!\\)(\*{1,3}|_{1,3}|~{2,})(?=\S)(.+?)(?<=\S)\1")
+_THEMATIC_BREAK = re.compile(r"(?P<marker>[-*_])(?: *(?P=marker)){2,} *$")
 
 
 @dataclass(frozen=True)
@@ -70,9 +81,61 @@ def _validate_draft(draft: object) -> FamilyIssueDraft:
 
 
 def _escape_markdown_literal(value: str) -> str:
+    escaped: set[int] = set()
+    if value.startswith(" "):
+        leading_spaces = len(value) - len(value.lstrip(" "))
+    else:
+        leading_spaces = 0
+    block_value = value[leading_spaces:]
+    if re.match(r"#{1,6}(?: |$)", block_value):
+        escaped.add(leading_spaces)
+    elif re.match(r">(?: |$)", block_value):
+        escaped.add(leading_spaces)
+    elif re.match(r"[-+*](?: |$)", block_value):
+        escaped.add(leading_spaces)
+        if block_value.startswith("---") or block_value.startswith("***"):
+            escaped.update(
+                leading_spaces + index
+                for index, character in enumerate(block_value)
+                if character in "-*"
+            )
+    elif _THEMATIC_BREAK.fullmatch(block_value):
+        escaped.update(
+            leading_spaces + index
+            for index, character in enumerate(block_value)
+            if character in "-*_"
+        )
+    else:
+        ordered = re.match(r"[0-9]{1,9}([.)])(?: |$)", block_value)
+        if ordered:
+            escaped.add(leading_spaces + ordered.start(1))
+
+    for match in _ENTITY_REFERENCE.finditer(value):
+        escaped.add(match.start())
+    for match in (*_LINK.finditer(value), *_REFERENCE_LINK.finditer(value)):
+        start = match.start()
+        if value[start] == "!":
+            escaped.add(start)
+            start += 1
+        escaped.add(start)
+        first_close = value.find("]", start)
+        escaped.add(first_close)
+        escaped.add(first_close + 1)
+        escaped.add(match.end() - 1)
+    for match in _HTML_OR_AUTOLINK.finditer(value):
+        escaped.add(match.start())
+        escaped.add(match.end() - 1)
+    for match in _DELIMITED.finditer(value):
+        escaped.update(range(match.start(), match.start(1) + len(match.group(1))))
+        escaped.update(
+            range(match.end() - len(match.group(1)), match.end())
+        )
+
     return "".join(
-        f"\\{character}" if character in _MARKDOWN_ESCAPES else character
-        for character in value
+        f"\\{character}"
+        if index in escaped or character in "\\`"
+        else character
+        for index, character in enumerate(value)
     )
 
 
