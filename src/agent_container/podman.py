@@ -244,6 +244,9 @@ def _family_runtime_args(
         "AGENT_FAMILY_SOCKET": f"{_FAMILY_RUNTIME_PATH}/intake.sock",
         "AGENT_FAMILY_CAPABILITY": family.capability,
     }
+    preserved_fds = family.pass_fds
+    if len(preserved_fds) != 1 or preserved_fds[0] < 3:
+        raise ValueError("family runtime mount is invalid")
     if (
         not socket_dir.is_absolute()
         or socket_dir.parent != expected_parent
@@ -254,6 +257,7 @@ def _family_runtime_args(
         raise ValueError("family runtime mount is invalid")
     family.revalidate()
     arguments = [
+        f"--preserve-fd={preserved_fds[0]}",
         "--mount",
         _mount(family.mount_source, _FAMILY_RUNTIME_PATH),
         "--env",
@@ -827,6 +831,10 @@ def run_command_supervised(
             _stop_named_container(family_mount.container_name)
         raise EgressBrokerRuntimeError("egress gateway failed") from None
     if returncode != 0:
+        if egress is not None:
+            _stop_egress_container(egress)
+        elif family_mount is not None:
+            _stop_named_container(family_mount.container_name)
         raise subprocess.CalledProcessError(returncode, spec.argv)
     return subprocess.CompletedProcess(spec.argv, returncode)
 

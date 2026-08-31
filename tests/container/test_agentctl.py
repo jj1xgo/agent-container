@@ -793,6 +793,7 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
             podman.write_text(
                 "#!/bin/sh\n"
                 "case \"$*\" in\n"
+                "  '--version') echo 'podman version 5.8.0' ;;\n"
                 "  'info --format {{.Host.Security.Rootless}}') echo true ;;\n"
                 "  *'auth status') echo status-output-private; "
                 "echo runner-stderr-private >&2 ;;\n"
@@ -4246,6 +4247,34 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
 
 
 class AgentCtlFamilyRuntimeTest(unittest.TestCase):
+    def test_podman_without_preserve_fd_support_fails_before_family_start(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _environment = self._state(temp)
+            self._bind(root)
+
+            def runner(spec):
+                if spec.argv == ("podman", "--version"):
+                    return subprocess.CompletedProcess(
+                        spec.argv, 0, stdout="podman version 5.7.2\n"
+                    )
+                return successful_podman_result(spec)
+
+            result = main(
+                ["run", "agent-container"],
+                environment={"AGENT_CONTAINER_HOME": str(root)},
+                runner=runner,
+                git_remote_reader=lambda _path: (
+                    "https://github.com/jj1xgo/agent-container.git"
+                ),
+                family_runtime_factory=lambda _layout: self.fail(
+                    "family runtime started"
+                ),
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+
+            self.assertEqual(result, 1)
+
     def _state(self, temp: str) -> tuple[Path, dict[str, str]]:
         helper = AgentCtlRunDoctorTest()
         root, _handover = helper._runtime_state(temp)

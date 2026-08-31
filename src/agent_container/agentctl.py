@@ -5,6 +5,7 @@ import getpass
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -798,7 +799,16 @@ def _podman_preflight(
     runner: Callable[[CommandSpec], subprocess.CompletedProcess],
     image_required: str | None = None,
 ) -> None:
-    _required_probe_run(runner, podman_version_spec())
+    version_result = _required_probe_run(runner, podman_version_spec())
+    version_text = (version_result.stdout or "").strip()
+    version_match = re.fullmatch(
+        r"podman version ([0-9]+)\.([0-9]+)(?:\.[0-9]+)?", version_text
+    )
+    if (
+        version_match is None
+        or (int(version_match.group(1)), int(version_match.group(2))) < (5, 8)
+    ):
+        raise ValueError("Podman 5.8 or newer is required")
     rootless = _required_probe_run(runner, podman_rootless_spec())
     if (rootless.stdout or "").strip().lower() != "true":
         raise ValueError("rootless Podman is required")

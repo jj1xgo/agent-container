@@ -1,4 +1,5 @@
 import ast
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -176,6 +177,12 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
                 "AGENT_FAMILY_CAPABILITY",
             })
             self.assertFalse(runtime.session.consumed)
+            self.assertEqual(len(mount.pass_fds), 1)
+            self.assertGreaterEqual(mount.pass_fds[0], 3)
+            self.assertTrue(
+                fcntl.fcntl(mount.pass_fds[0], fcntl.F_GETFD)
+                & fcntl.FD_CLOEXEC
+            )
 
         self.assertFalse(run_dir.exists())
         runtime.close()

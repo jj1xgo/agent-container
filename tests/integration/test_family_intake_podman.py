@@ -8,9 +8,11 @@ import threading
 import time
 from tempfile import TemporaryDirectory
 import unittest
+from unittest import mock
 
 from agent_container.family_intake_runtime import FamilyIntakeRuntime
 from agent_container.family_intake_runtime import FamilyIntakeRuntimeError
+from agent_container.family_runtime_mount import FamilyRuntimeMount
 from agent_container.family_pending import list_pending
 from agent_container.family_state import FamilyBinding
 from agent_container.family_state import FamilyStateLayout
@@ -33,7 +35,9 @@ _PROBE_SCRIPT = (
     "! find / -xdev -name 'private-key.pem' -print 2>/dev/null | grep .; "
     "agent-family issue create --title T --summary S "
     "--context C --acceptance-criterion A; "
-    "sleep 2; "
+    ": > /run/agent-family/inspect-ready; "
+    "while ! test -e /run/agent-family/inspect-done; do sleep 0.05; done; "
+    "rm -f /run/agent-family/inspect-ready /run/agent-family/inspect-done; "
     "if agent-family issue create --title T --summary S "
     "--context C --acceptance-criterion A >/tmp/second 2>&1; "
     "then exit 91; fi"
@@ -75,7 +79,50 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
         self.assertEqual((checked.returncode, checked.stderr), (0, ""))
         self.assertTrue(_PROBE_SCRIPT.startswith("set -eu;"))
         self.assertIn("if agent-family issue create", _PROBE_SCRIPT)
+        self.assertIn("inspect-ready", _PROBE_SCRIPT)
+        self.assertIn("inspect-done", _PROBE_SCRIPT)
         self.assertNotIn("; test $?", _PROBE_SCRIPT)
+        self.assertNotIn("sleep 2", _PROBE_SCRIPT)
+
+    def test_both_real_specs_have_pinned_fd_shape_without_podman(self) -> None:
+        state = StateLayout(Path("/state"), "demo")
+        capability = "A" * 43
+        mount = object.__new__(FamilyRuntimeMount)
+        object.__setattr__(
+            mount,
+            "socket_dir",
+            Path("/state/family/intake/r/2a97516c354b/0123456789abcdef"),
+        )
+        object.__setattr__(mount, "capability", capability)
+        object.__setattr__(mount, "environment", {
+            "AGENT_FAMILY_SOCKET": "/run/agent-family/intake.sock",
+            "AGENT_FAMILY_CAPABILITY": capability,
+        })
+        object.__setattr__(mount, "_directory_identity", (1, 2))
+        object.__setattr__(mount, "_socket_identity", (1, 3))
+        object.__setattr__(mount, "_directory_descriptor", 77)
+        with mock.patch.object(type(mount), "revalidate"):
+            specs = (
+                run_codex_spec(
+                    state, Path("/handover/demo"), "image", os.getuid(),
+                    os.getgid(), family_mount=mount,
+                ),
+                run_claude_spec(
+                    state, Path("/handover/demo"), "image", os.getuid(),
+                    os.getgid(), HandoverRuntimeMount(Path("/handover/broker")),
+                    family_mount=mount,
+                ),
+            )
+        for spec in specs:
+            self.assertEqual(spec.pass_fds, (77,))
+            self.assertEqual(spec.argv.count("--preserve-fd=77"), 1)
+            self.assertEqual(
+                spec.argv.count(
+                    "type=bind,src=/proc/self/fd/77,dst=/run/agent-family"
+                ),
+                1,
+            )
+            self.assertLess(spec.argv.index("--preserve-fd=77"), spec.argv.index("image"))
 
 
 @unittest.skipIf(_MISSING is not None, _MISSING or "Podman prerequisite missing")
@@ -135,10 +182,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     def inspect_running_container():
                         deadline = time.monotonic() + 5
                         while time.monotonic() < deadline:
-                            pending_now = list_pending(
-                                layout.family_pending_dir, "demo"
-                            )
-                            if pending_now:
+                            if (mount.socket_dir / "inspect-ready").exists():
                                 inspection.append(
                                     subprocess.run(
                                         ("podman", "inspect", mount.container_name),
@@ -147,6 +191,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                                         check=False,
                                     )
                                 )
+                                (mount.socket_dir / "inspect-done").touch()
                                 return
                             time.sleep(0.05)
 

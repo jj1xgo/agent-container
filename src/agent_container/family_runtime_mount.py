@@ -141,7 +141,7 @@ class FamilyRuntimeMount:
 
     @property
     def pass_fds(self) -> tuple[int, ...]:
-        if self._directory_descriptor < 0:
+        if self._directory_descriptor < 3:
             raise ValueError("family runtime mount is invalid")
         return (self._directory_descriptor,)
 
