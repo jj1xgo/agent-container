@@ -81,6 +81,10 @@ class PendingCapacityError(ValueError):
     pass
 
 
+class PendingSnapshotMismatch(ValueError):
+    pass
+
+
 class PendingState(str, Enum):
     PENDING = "pending"
     SENDING = "sending"
@@ -124,7 +128,40 @@ class PendingRequest:
     issue_url: str | None = None
 
 
+@dataclass(frozen=True)
+class RecoveredPending:
+    """Content-free identity for one interrupted send recovered at startup."""
+
+    request_id: str
+    project_id: str
+
+
 _LOCK_CONSTRUCTOR = object()
+_SNAPSHOT_CONSTRUCTOR = object()
+
+
+class PendingSnapshot:
+    """Opaque pre-prompt identity for one validated pending-record inode."""
+
+    __slots__ = ("_body", "_device", "_inode", "_request")
+
+    def __init__(
+        self,
+        token: object,
+        request: PendingRequest,
+        metadata: os.stat_result,
+        body: bytes,
+    ) -> None:
+        if token is not _SNAPSHOT_CONSTRUCTOR:
+            raise TypeError("pending snapshots cannot be constructed")
+        self._request = request
+        self._device = metadata.st_dev
+        self._inode = metadata.st_ino
+        self._body = body
+
+    @property
+    def request(self) -> PendingRequest:
+        return self._request
 
 
 class LockedPending:
@@ -132,6 +169,7 @@ class LockedPending:
 
     __slots__ = (
         "_active",
+        "_body",
         "_expected",
         "_parent_descriptor",
         "_record_name",
@@ -145,6 +183,7 @@ class LockedPending:
         record_name: str,
         expected: os.stat_result,
         request: PendingRequest,
+        body: bytes,
     ) -> None:
         if token is not _LOCK_CONSTRUCTOR:
             raise TypeError("locked pending handles cannot be constructed")
@@ -153,6 +192,7 @@ class LockedPending:
         self._record_name = record_name
         self._expected = expected
         self._request = request
+        self._body = body
 
     @property
     def request(self) -> PendingRequest:
@@ -169,6 +209,13 @@ def _validate_request_id(value: object) -> str:
     if type(value) is not str or _REQUEST_ID.fullmatch(value) is None:
         raise _invalid()
     return value
+
+
+def _validate_expected_project_id(value: object) -> str:
+    try:
+        return validate_project_id(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise _invalid() from None
 
 
 def _exact_integer(value: object) -> int:
@@ -355,9 +402,9 @@ def _decode_request(body: bytes) -> PendingRequest:
         raise _invalid() from None
 
 
-def _read_record(
+def _read_record_body(
     parent_descriptor: int, record_name: str
-) -> tuple[PendingRequest, os.stat_result]:
+) -> tuple[PendingRequest, os.stat_result, bytes]:
     descriptor, expected = _open_private_file(parent_descriptor, record_name)
     try:
         body = bytearray()
@@ -377,7 +424,15 @@ def _read_record(
     _validate_private_file(current)
     if not _same_inode(expected, current):
         raise ValueError("family pending record changed")
-    return _decode_request(bytes(body)), expected
+    immutable_body = bytes(body)
+    return _decode_request(immutable_body), expected, immutable_body
+
+
+def _read_record(
+    parent_descriptor: int, record_name: str
+) -> tuple[PendingRequest, os.stat_result]:
+    request, expected, _body = _read_record_body(parent_descriptor, record_name)
+    return request, expected
 
 
 def _open_lock(parent_descriptor: int, lock_name: str) -> int:
@@ -615,6 +670,8 @@ def create_pending(
             request, _metadata = _read_record(
                 parent_descriptor, f"{request_id}.json"
             )
+            if request.project_id != validated_project:
+                raise _invalid()
             if request.state in _CONTENT_STATES:
                 unfinished += 1
         if unfinished >= _MAX_UNFINISHED:
@@ -657,10 +714,19 @@ def create_pending(
 
 
 @contextmanager
-def pending_lock(store: Path, request_id: str) -> Iterator[LockedPending]:
+def pending_lock(
+    store: Path,
+    request_id: str,
+    expected_project_id: str,
+    *,
+    snapshot: PendingSnapshot | None = None,
+) -> Iterator[LockedPending]:
     """Hold the request's validated flock until approval/reconciliation completes."""
 
     validated_id = _validate_request_id(request_id)
+    validated_project = _validate_expected_project_id(expected_project_id)
+    if snapshot is not None and type(snapshot) is not PendingSnapshot:
+        raise ValueError("family pending snapshot is invalid")
     record_name = f"{validated_id}.json"
     parent_descriptor = _open_private_parent(store / "record")
     lock_descriptor: int | None = None
@@ -673,15 +739,30 @@ def pending_lock(store: Path, request_id: str) -> Iterator[LockedPending]:
             parent_descriptor, f".{record_name}.lock"
         )
         _inventory(parent_descriptor)
-        request, expected = _read_record(parent_descriptor, record_name)
-        if request.request_id != validated_id:
+        request, expected, body = _read_record_body(
+            parent_descriptor, record_name
+        )
+        if (
+            request.request_id != validated_id
+            or request.project_id != validated_project
+        ):
             raise _invalid()
+        if snapshot is not None and (
+            snapshot._request != request
+            or snapshot._request.request_id != validated_id
+            or snapshot._request.project_id != validated_project
+            or snapshot._device != expected.st_dev
+            or snapshot._inode != expected.st_ino
+            or snapshot._body != body
+        ):
+            raise PendingSnapshotMismatch("family pending request changed")
         locked = LockedPending(
             _LOCK_CONSTRUCTOR,
             parent_descriptor,
             record_name,
             expected,
             request,
+            body,
         )
         yield locked
     finally:
@@ -692,12 +773,33 @@ def pending_lock(store: Path, request_id: str) -> Iterator[LockedPending]:
         os.close(parent_descriptor)
 
 
-def load_pending(store: Path, request_id: str) -> PendingRequest:
-    with pending_lock(store, request_id) as locked:
+def snapshot_pending(
+    store: Path,
+    request_id: str,
+    expected_project_id: str,
+) -> PendingSnapshot:
+    """Capture one validated request's value, exact bytes, and inode identity."""
+
+    with pending_lock(store, request_id, expected_project_id) as locked:
+        return PendingSnapshot(
+            _SNAPSHOT_CONSTRUCTOR,
+            locked._request,
+            locked._expected,
+            locked._body,
+        )
+
+
+def load_pending(
+    store: Path, request_id: str, expected_project_id: str
+) -> PendingRequest:
+    with pending_lock(store, request_id, expected_project_id) as locked:
         return locked.request
 
 
-def list_pending(store: Path) -> tuple[PendingRequest, ...]:
+def list_pending(
+    store: Path, expected_project_id: str
+) -> tuple[PendingRequest, ...]:
+    validated_project = _validate_expected_project_id(expected_project_id)
     parent_descriptor = _open_private_parent(store / "record")
     store_lock: int | None = None
     try:
@@ -707,29 +809,66 @@ def list_pending(store: Path) -> tuple[PendingRequest, ...]:
         if store_lock is not None:
             os.close(store_lock)
         os.close(parent_descriptor)
-    requests = [load_pending(store, request_id) for request_id in request_ids]
+    requests = [
+        load_pending(store, request_id, validated_project)
+        for request_id in request_ids
+    ]
     return tuple(sorted(requests, key=lambda item: (item.created_at, item.request_id)))
 
 
-def initialize_pending_store(store: Path) -> tuple[PendingRequest, ...]:
+def inspect_pending_store(
+    store: Path, expected_project_id: str
+) -> tuple[PendingRequest, ...]:
+    """Read-only bounded validation for doctor; never creates lock files."""
+
+    validated_project = _validate_expected_project_id(expected_project_id)
+    parent_descriptor = _open_private_parent(store / "record")
+    try:
+        request_ids = _inventory(parent_descriptor)
+        requests: list[PendingRequest] = []
+        for request_id in request_ids:
+            request, _metadata = _read_record(
+                parent_descriptor, f"{request_id}.json"
+            )
+            if (
+                request.request_id != request_id
+                or request.project_id != validated_project
+            ):
+                raise _invalid()
+            requests.append(request)
+        if _inventory(parent_descriptor) != request_ids:
+            raise ValueError("family pending inventory changed")
+        return tuple(
+            sorted(
+                requests,
+                key=lambda item: (item.created_at, item.request_id),
+            )
+        )
+    finally:
+        os.close(parent_descriptor)
+
+
+def initialize_pending_store(
+    store: Path, expected_project_id: str
+) -> tuple[RecoveredPending, ...]:
     """Validate a stable inventory and recover every interrupted send."""
 
+    validated_project = _validate_expected_project_id(expected_project_id)
     parent_descriptor = _open_private_parent(store / "record")
     store_lock: int | None = None
     try:
         store_lock = _open_lock(parent_descriptor, _STORE_LOCK)
         request_ids = _inventory(parent_descriptor)
-        requests: list[PendingRequest] = []
+        recovered: list[RecoveredPending] = []
         for request_id in request_ids:
-            with pending_lock(store, request_id) as locked:
+            with pending_lock(store, request_id, validated_project) as locked:
                 if locked.request.state is PendingState.SENDING:
-                    requests.append(
-                        transition_pending(locked, PendingState.UNKNOWN)
+                    changed = transition_pending(locked, PendingState.UNKNOWN)
+                    recovered.append(
+                        RecoveredPending(changed.request_id, changed.project_id)
                     )
-                else:
-                    requests.append(locked.request)
         return tuple(
-            sorted(requests, key=lambda item: (item.created_at, item.request_id))
+            sorted(recovered, key=lambda item: item.request_id)
         )
     finally:
         if store_lock is not None:
@@ -789,12 +928,19 @@ def transition_pending(
         _encode_request(changed),
     )
     locked._request = changed
+    locked._body = _encode_request(changed)
     return changed
 
 
-def expire_pending(store: Path, request_id: str, *, now: int) -> PendingRequest:
+def expire_pending(
+    store: Path,
+    request_id: str,
+    expected_project_id: str,
+    *,
+    now: int,
+) -> PendingRequest:
     timestamp = _exact_integer(now)
-    with pending_lock(store, request_id) as locked:
+    with pending_lock(store, request_id, expected_project_id) as locked:
         if (
             locked.request.state is not PendingState.PENDING
             or timestamp < locked.request.expires_at
@@ -803,8 +949,10 @@ def expire_pending(store: Path, request_id: str, *, now: int) -> PendingRequest:
         return transition_pending(locked, PendingState.EXPIRED)
 
 
-def recover_sending(store: Path, request_id: str) -> PendingRequest:
-    with pending_lock(store, request_id) as locked:
+def recover_sending(
+    store: Path, request_id: str, expected_project_id: str
+) -> PendingRequest:
+    with pending_lock(store, request_id, expected_project_id) as locked:
         if locked.request.state is not PendingState.SENDING:
             raise ValueError("family pending request cannot be recovered")
         return transition_pending(locked, PendingState.UNKNOWN)
@@ -893,7 +1041,10 @@ def _decode_audit_line(body: bytes) -> _AuditEvent:
         raise ValueError("family audit file is invalid") from None
 
 
-def _validate_audit_contents(descriptor: int) -> int:
+def _validate_audit_contents(
+    descriptor: int,
+    expected_project_id: str | None = None,
+) -> tuple[int, int]:
     size = os.fstat(descriptor).st_size
     if size > _MAX_AUDIT_BYTES:
         raise ValueError("family audit file is invalid")
@@ -907,9 +1058,16 @@ def _validate_audit_contents(descriptor: int) -> int:
         offset += len(chunk)
     if body and body[-1:] != b"\n":
         raise ValueError("family audit file is invalid")
+    count = 0
     for line in body.splitlines():
-        _decode_audit_line(bytes(line))
-    return size
+        event = _decode_audit_line(bytes(line))
+        if (
+            expected_project_id is not None
+            and event.project_id != expected_project_id
+        ):
+            raise ValueError("family audit file is invalid")
+        count += 1
+    return size, count
 
 
 def _open_audit(parent_descriptor: int, name: str) -> tuple[int, int]:
@@ -952,7 +1110,8 @@ def _open_audit(parent_descriptor: int, name: str) -> tuple[int, int]:
         _validate_private_file(current)
         if not _same_inode(opened, current):
             raise ValueError("family audit file changed")
-        return descriptor, _validate_audit_contents(descriptor)
+        size, _count = _validate_audit_contents(descriptor)
+        return descriptor, size
     except BaseException:
         os.close(descriptor)
         raise
@@ -974,6 +1133,50 @@ def _require_audit_identity(
         raise ValueError("family audit file changed") from None
     if not _same_inode(opened, current):
         raise ValueError("family audit file changed")
+
+
+def validate_family_audit(path: Path, expected_project_id: str) -> int:
+    """Read-only validation of a bounded exact audit JSONL file, if present."""
+
+    validated_project = _validate_expected_project_id(expected_project_id)
+    parent_descriptor = _open_private_parent(path)
+    descriptor: int | None = None
+    try:
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY | _NOFOLLOW | _CLOEXEC | _NONBLOCK,
+                dir_fd=parent_descriptor,
+            )
+        except FileNotFoundError:
+            return 0
+        except OSError:
+            raise ValueError("family audit file is invalid") from None
+        opened = os.fstat(descriptor)
+        _validate_private_file(opened)
+        current = os.stat(
+            path.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        _validate_private_file(current)
+        if not _same_inode(opened, current):
+            raise ValueError("family audit file changed")
+        fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        _require_audit_identity(
+            parent_descriptor, path.name, descriptor
+        )
+        _size, count = _validate_audit_contents(
+            descriptor, validated_project
+        )
+        _require_audit_identity(
+            parent_descriptor, path.name, descriptor
+        )
+        return count
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent_descriptor)
 
 
 def _audit_identity_matches(

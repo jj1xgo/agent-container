@@ -182,3 +182,131 @@ OK (skipped=12)
 ```
 
 No real GitHub operation was performed.
+
+## Review fix round 1
+
+The first review fix round hardened the host boundary in four connected areas:
+
+- every pending lock now requires the expected project ID, and the opaque
+  pre-prompt `PendingSnapshot` binds the decoded request to its exact validated
+  bytes and file device/inode; approval reacquisition rejects even an
+  equal-bytes replacement inode before any creator call;
+- approval receives a clock callable and samples it under the request lock,
+  after confirmation and provider/inventory preflight, immediately before the
+  `pending -> sending` transition; equality with `expires_at` durably expires
+  and cleans the request without sending;
+- every post-send `CreatedIssue` is validated as an exact class with an exact
+  non-boolean positive bounded integer and exact string URL before the created
+  transition; malformed results durably become `unknown` with a response-stage
+  audit;
+- family command startup recovers surviving `sending` records to `unknown` and
+  emits only the fixed `recover/unknown/reconcile` event after each durable
+  recovery. The initializer returns only content-free recovered request and
+  project IDs. Intake-runtime recovery emits the same event.
+
+Doctor now uses a bounded read-only pending inspector and bounded exact JSONL
+audit validator. It does not create lock files, mutate requests, recover, or
+append audit. A surviving `sending` record is a recovery-required failure, and
+malformed, cross-project, oversized, replaced, or insecure audit files fail the
+audit check. Irreversible confirmation now requires `fileno()` plus
+`os.isatty(fd)` and performs one bounded line read; Task 8 tests use real PTYs
+and reject `isatty()` spoofing, absent/unusable file descriptors, and overlong
+confirmation.
+
+Review-round production changes also touch:
+
+- `src/agent_container/family_pending.py`
+- `src/agent_container/family_intake_runtime.py`
+- the corresponding family pending, intake broker/runtime/transport, and
+  intake socket tests whose layout-aware API calls now supply the exact project
+  ID.
+
+### Review round 1 RED
+
+The complete new regression selection was first run against the reviewed
+implementation:
+
+```text
+PYTHONPATH=src python3 -m unittest \
+  tests.container.test_family_pending.PendingStoreTest.test_pending_lock_requires_and_validates_expected_project_before_yield \
+  tests.container.test_family_pending.PendingStoreTest.test_pending_snapshot_rejects_equal_bytes_on_a_new_inode \
+  tests.container.test_family_pending.PendingStoreTest.test_initializer_returns_only_safe_metadata_for_recovered_sends \
+  tests.container.test_family_pending.FamilyAuditTest.test_read_only_audit_validator_is_bounded_exact_and_project_scoped \
+  tests.container.test_agentctl.AgentCtlFamilyTest.test_family_issue_commands_reject_cross_project_injected_records \
+  tests.container.test_agentctl.AgentCtlFamilyTest.test_approve_rejects_same_content_inode_replacement_without_sending \
+  tests.container.test_agentctl.AgentCtlFamilyTest.test_malformed_created_scalars_become_unknown_at_response_stage \
+  tests.container.test_agentctl.AgentCtlFamilyTest.test_approval_samples_expiry_after_preflight_at_exact_boundary \
+  tests.container.test_agentctl.AgentCtlFamilyTest.test_cli_startup_recovers_sending_then_allows_exact_reconciliation \
+  tests.container.test_agentctl.AgentCtlFamilyTest.test_doctor_is_read_only_and_fails_sending_or_invalid_audit \
+  tests.container.test_agentctl.AgentCtlFamilyTest.test_irreversible_confirmation_requires_real_fd_and_bounded_line \
+  tests.container.test_agentctl.AgentCtlFamilyTest.test_falsy_injected_family_dependencies_are_used_when_not_none -v
+```
+
+Result: exit `1`; 12 test methods produced 21 failures. The observed failures
+were the intended ones: no project argument or snapshot/audit APIs, all four
+cross-project commands succeeded, equal-bytes inode replacement sent, all five
+malformed issue numbers remained `sending`, the boundary-expired request sent,
+startup reconciliation rejected surviving `sending`, doctor passed unsafe
+state, an `isatty()` spoof authorized a send, and falsy injected dependencies
+were discarded.
+
+After the first green pass, the stronger doctor mutation assertion was run
+before its fix:
+
+```text
+PYTHONPATH=src python3 -m unittest \
+  tests.container.test_agentctl.AgentCtlFamilyTest.test_doctor_is_read_only_and_fails_sending_or_invalid_audit -v
+```
+
+Result: exit `1`; one test method produced two subtest failures because doctor
+created `.REQUEST.json.lock` for malformed and insecure audit cases. The
+read-only pending inspector removed that write.
+
+### Review round 1 GREEN and final verification
+
+The original 12-method regression selection passed after the minimal fixes:
+
+```text
+Ran 12 tests in 0.080s
+OK
+```
+
+Final focused Task 8 and pending-store commands:
+
+```text
+PYTHONPATH=src python3 -m unittest \
+  tests.container.test_agentctl.AgentCtlFamilyTest -v
+Ran 35 tests in 0.280s
+OK
+
+PYTHONPATH=src python3 -m unittest tests.container.test_family_pending
+Ran 36 tests in 0.116s
+OK
+```
+
+Full agentctl regression:
+
+```text
+PYTHONPATH=src python3 -m unittest tests.container.test_agentctl -v
+Ran 158 tests in 0.986s
+OK
+```
+
+Full family regression outside the restricted real-socket sandbox:
+
+```text
+PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_family*.py'
+Ran 192 tests in 1.820s
+OK
+```
+
+Final complete verification outside the restricted real-socket sandbox:
+
+```text
+PYTHONPATH=src python3 -m unittest discover -s tests && bin/lint && git diff --check
+Ran 924 tests in 4.837s
+OK (skipped=12)
+All checks passed!
+```
+
+No real GitHub operation was performed in review round 1.

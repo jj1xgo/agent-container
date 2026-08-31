@@ -4588,7 +4588,7 @@ class _FamilyInventory:
             raise ValueError("inventory mismatch secret-marker")
 
 
-class _FakeTTY(StringIO):
+class _SpoofedTTY(StringIO):
     def __init__(self, value: str, before_read=None) -> None:
         super().__init__(value)
         self.before_read = before_read
@@ -4602,6 +4602,47 @@ class _FakeTTY(StringIO):
             self.before_read = None
             callback()
         return super().readline(*args, **kwargs)
+
+
+class _NoFilenoTTY:
+    def isatty(self) -> bool:
+        return True
+
+    def readline(self, _size: int = -1) -> str:
+        raise AssertionError("confirmation read without a terminal fd")
+
+
+class _PtyTTY:
+    """A real terminal-backed input stream with an optional prompt race hook."""
+
+    def __init__(self, value: str, before_read=None) -> None:
+        self._value = value
+        self._master, slave = os.openpty()
+        self._stream = os.fdopen(slave, "r", encoding="utf-8", newline="")
+        self.before_read = before_read
+        self.read_sizes = []
+        os.write(self._master, value.encode("utf-8") if value else b"\x04")
+
+    def fileno(self) -> int:
+        return self._stream.fileno()
+
+    def isatty(self) -> bool:
+        return os.isatty(self.fileno())
+
+    def readline(self, size: int = -1) -> str:
+        self.read_sizes.append(size)
+        if self.before_read is not None:
+            callback = self.before_read
+            self.before_read = None
+            callback()
+        return self._stream.readline(size)
+
+    def getvalue(self) -> str:
+        return self._value
+
+    def close(self) -> None:
+        self._stream.close()
+        os.close(self._master)
 
 
 class _FamilyCreator:
@@ -4630,6 +4671,11 @@ class AgentCtlFamilyTest(unittest.TestCase):
     request_id = "11" * 16
     issue = CanonicalFamilyIssue("Private title sentinel", "Private body sentinel")
     binding = FamilyBinding(Repository("family", "roadmap"), 42)
+
+    def _tty(self, value: str, before_read=None) -> _PtyTTY:
+        stream = _PtyTTY(value, before_read)
+        self.addCleanup(stream.close)
+        return stream
 
     def _registered_state(self, temporary: str) -> tuple[Path, dict[str, str]]:
         root = Path(temporary)
@@ -4673,6 +4719,7 @@ class AgentCtlFamilyTest(unittest.TestCase):
         inventory=None,
         stdin=None,
         now=200,
+        clock=None,
         extra=(),
     ):
         stdout = StringIO()
@@ -4685,14 +4732,18 @@ class AgentCtlFamilyTest(unittest.TestCase):
             stdout=stdout,
             stderr=stderr,
             family_token_provider_factory=lambda _layout: provider,
-            family_inventory=inventory or _FamilyInventory(self.binding),
+            family_inventory=(
+                _FamilyInventory(self.binding) if inventory is None else inventory
+            ),
             family_creator=creator,
-            family_clock=lambda: now,
+            family_clock=(lambda: now) if clock is None else clock,
         )
         return result, stdout.getvalue(), stderr.getvalue(), provider
 
     def _unknown(self, layout: FamilyStateLayout) -> None:
-        with pending_lock(layout.family_pending_dir, self.request_id) as locked:
+        with pending_lock(
+            layout.family_pending_dir, self.request_id, "demo"
+        ) as locked:
             transition_pending(locked, PendingState.SENDING)
             transition_pending(locked, PendingState.UNKNOWN)
 
@@ -5017,7 +5068,9 @@ class AgentCtlFamilyTest(unittest.TestCase):
             root, environment = self._registered_state(temp)
             layout = self._family_state(root)
             pending = self._pending(layout)
-            with pending_lock(layout.family_pending_dir, pending.request_id) as locked:
+            with pending_lock(
+                layout.family_pending_dir, pending.request_id, "demo"
+            ) as locked:
                 transition_pending(locked, PendingState.SENDING)
             stdout = StringIO()
 
@@ -5030,11 +5083,12 @@ class AgentCtlFamilyTest(unittest.TestCase):
             )
 
             output = stdout.getvalue().lower()
-            self.assertEqual(result, 0)
+            self.assertEqual(result, 1)
             for field in (
                 "local-state",
                 "binding",
                 "pending-invariants",
+                "audit",
                 "app-metadata-permissions",
                 "remote-availability",
             ):
@@ -5044,7 +5098,9 @@ class AgentCtlFamilyTest(unittest.TestCase):
             )
             self.assertNotIn("pass", remote_line)
             self.assertEqual(
-                load_pending(layout.family_pending_dir, pending.request_id).state,
+                load_pending(
+                    layout.family_pending_dir, pending.request_id, "demo"
+                ).state,
                 PendingState.SENDING,
             )
 
@@ -5052,9 +5108,9 @@ class AgentCtlFamilyTest(unittest.TestCase):
     def test_approve_requires_tty_and_exact_request_bound_confirmation(self) -> None:
         cases = (
             (StringIO(f"approve {self.request_id}\n"), False),
-            (_FakeTTY(""), True),
-            (_FakeTTY("approve wrong-request\n"), True),
-            (_FakeTTY(f"yes {self.request_id}\n"), True),
+            (self._tty(""), True),
+            (self._tty("approve wrong-request\n"), True),
+            (self._tty(f"yes {self.request_id}\n"), True),
         )
         for stdin, interactive in cases:
             with self.subTest(stdin=stdin.getvalue()):
@@ -5079,7 +5135,9 @@ class AgentCtlFamilyTest(unittest.TestCase):
                     self.assertEqual(result, 1)
                     self.assertEqual(creator.create_calls, [])
                     self.assertEqual(
-                        load_pending(layout.family_pending_dir, self.request_id).state,
+                        load_pending(
+                            layout.family_pending_dir, self.request_id, "demo"
+                        ).state,
                         PendingState.PENDING,
                     )
                     if not interactive:
@@ -5102,7 +5160,9 @@ class AgentCtlFamilyTest(unittest.TestCase):
                 root, environment = self._registered_state(temp)
                 layout = self._family_state(root)
                 self._pending(layout)
-                with pending_lock(layout.family_pending_dir, self.request_id) as locked:
+                with pending_lock(
+                    layout.family_pending_dir, self.request_id, "demo"
+                ) as locked:
                     if state is PendingState.UNKNOWN:
                         transition_pending(locked, PendingState.SENDING)
                         transition_pending(locked, PendingState.UNKNOWN)
@@ -5113,7 +5173,7 @@ class AgentCtlFamilyTest(unittest.TestCase):
                     environment,
                     "approve",
                     creator=creator,
-                    stdin=_FakeTTY(f"approve {self.request_id}\n"),
+                    stdin=self._tty(f"approve {self.request_id}\n"),
                 )
                 self.assertEqual(result, 1)
                 self.assertEqual(creator.create_calls, [])
@@ -5127,13 +5187,15 @@ class AgentCtlFamilyTest(unittest.TestCase):
                 environment,
                 "approve",
                 creator=creator,
-                stdin=_FakeTTY(f"approve {self.request_id}\n"),
+                stdin=self._tty(f"approve {self.request_id}\n"),
                 now=pending.expires_at,
             )
             self.assertEqual(result, 1)
             self.assertEqual(creator.create_calls, [])
             self.assertEqual(
-                load_pending(layout.family_pending_dir, self.request_id).state,
+                load_pending(
+                    layout.family_pending_dir, self.request_id, "demo"
+                ).state,
                 PendingState.EXPIRED,
             )
 
@@ -5168,7 +5230,7 @@ class AgentCtlFamilyTest(unittest.TestCase):
                     "approve",
                     creator=creator,
                     inventory=inventory,
-                    stdin=_FakeTTY(
+                    stdin=self._tty(
                         f"approve {self.request_id}\n", before_read=mutate
                     ),
                 )
@@ -5206,13 +5268,15 @@ class AgentCtlFamilyTest(unittest.TestCase):
                     "approve",
                     creator=creator,
                     inventory=inventory,
-                    stdin=_FakeTTY(f"approve {self.request_id}\n"),
+                    stdin=self._tty(f"approve {self.request_id}\n"),
                 )
 
                 self.assertEqual(result, 1)
                 self.assertEqual(creator.create_calls, [])
                 self.assertEqual(
-                    load_pending(layout.family_pending_dir, self.request_id).state,
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
                     PendingState.PENDING,
                 )
                 self.assertNotIn("private marker", error)
@@ -5227,7 +5291,7 @@ class AgentCtlFamilyTest(unittest.TestCase):
 
                 def concurrent_transition():
                     with pending_lock(
-                        layout.family_pending_dir, self.request_id
+                        layout.family_pending_dir, self.request_id, "demo"
                     ) as locked:
                         transition_pending(locked, target)
 
@@ -5236,7 +5300,7 @@ class AgentCtlFamilyTest(unittest.TestCase):
                     environment,
                     "approve",
                     creator=creator,
-                    stdin=_FakeTTY(
+                    stdin=self._tty(
                         f"approve {self.request_id}\n",
                         before_read=concurrent_transition,
                     ),
@@ -5245,7 +5309,9 @@ class AgentCtlFamilyTest(unittest.TestCase):
                 self.assertEqual(result, 1)
                 self.assertEqual(creator.create_calls, [])
                 self.assertEqual(
-                    load_pending(layout.family_pending_dir, self.request_id).state,
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
                     target,
                 )
 
@@ -5262,13 +5328,15 @@ class AgentCtlFamilyTest(unittest.TestCase):
                     environment,
                     "approve",
                     creator=creator,
-                    stdin=_FakeTTY(f"approve {self.request_id}\n"),
+                    stdin=self._tty(f"approve {self.request_id}\n"),
                 )
 
                 self.assertEqual(result, 1)
                 self.assertEqual(len(creator.create_calls), 1)
                 self.assertEqual(
-                    load_pending(layout.family_pending_dir, self.request_id).state,
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
                     PendingState.PENDING,
                 )
                 self.assertNotIn(str(failure), error)
@@ -5307,7 +5375,7 @@ class AgentCtlFamilyTest(unittest.TestCase):
                     environment,
                     "approve",
                     creator=creator,
-                    stdin=_FakeTTY(f"approve {self.request_id}\n"),
+                    stdin=self._tty(f"approve {self.request_id}\n"),
                 )
 
             self.assertEqual((result, error), (0, ""))
@@ -5318,7 +5386,9 @@ class AgentCtlFamilyTest(unittest.TestCase):
                 [f".{self.request_id}.json.lock", ".pending.lock", f"{self.request_id}.json"],
             )
             self.assertIn("issue-number: 7", output)
-            request = load_pending(layout.family_pending_dir, self.request_id)
+            request = load_pending(
+                layout.family_pending_dir, self.request_id, "demo"
+            )
             self.assertEqual(request.state, PendingState.CREATED)
             self.assertIsNone(request.issue)
             self.assertEqual(self._audit(layout)[-1]["status"], "created")
@@ -5352,7 +5422,7 @@ class AgentCtlFamilyTest(unittest.TestCase):
                     environment,
                     "approve",
                     creator=creator,
-                    stdin=_FakeTTY(f"approve {self.request_id}\n"),
+                    stdin=self._tty(f"approve {self.request_id}\n"),
                 )
 
             self.assertEqual(result, 1)
@@ -5375,13 +5445,15 @@ class AgentCtlFamilyTest(unittest.TestCase):
                     environment,
                     "approve",
                     creator=creator,
-                    stdin=_FakeTTY(f"approve {self.request_id}\n"),
+                    stdin=self._tty(f"approve {self.request_id}\n"),
                 )
 
                 self.assertEqual(result, 1)
                 self.assertEqual(len(creator.create_calls), 1)
                 self.assertEqual(
-                    load_pending(layout.family_pending_dir, self.request_id).state,
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
                     PendingState.UNKNOWN,
                 )
                 self.assertNotIn("private remote body", error)
@@ -5401,13 +5473,15 @@ class AgentCtlFamilyTest(unittest.TestCase):
                     environment,
                     "approve",
                     creator=creator,
-                    stdin=_FakeTTY(f"approve {self.request_id}\n"),
+                    stdin=self._tty(f"approve {self.request_id}\n"),
                 )
 
                 self.assertEqual(result, 1)
                 self.assertEqual(len(creator.create_calls), 1)
                 self.assertEqual(
-                    load_pending(layout.family_pending_dir, self.request_id).state,
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
                     PendingState.UNKNOWN,
                 )
                 self.assertNotIn("issue-number:", output)
@@ -5425,7 +5499,9 @@ class AgentCtlFamilyTest(unittest.TestCase):
             result, output, error, _ = self._run_family(environment, "reject")
 
             self.assertEqual((result, error), (0, ""))
-            request = load_pending(layout.family_pending_dir, self.request_id)
+            request = load_pending(
+                layout.family_pending_dir, self.request_id, "demo"
+            )
             self.assertEqual(request.state, PendingState.REJECTED)
             self.assertIsNone(request.issue)
             self.assertNotIn(self.issue.title, output)
@@ -5443,7 +5519,7 @@ class AgentCtlFamilyTest(unittest.TestCase):
             )
 
     # Break caught: agentctl not exposing the reviewed approval helper contract.
-    def test_approve_helper_accepts_explicit_streams_and_time(self) -> None:
+    def test_approve_helper_accepts_explicit_streams_and_clock(self) -> None:
         with TemporaryDirectory() as temp:
             root, _ = self._registered_state(temp)
             layout = self._family_state(root)
@@ -5459,9 +5535,9 @@ class AgentCtlFamilyTest(unittest.TestCase):
                 provider_factory=lambda _layout: _FamilyProvider(),
                 inventory=_FamilyInventory(self.binding),
                 creator=creator,
-                stdin=_FakeTTY(f"approve {self.request_id}\n"),
+                stdin=self._tty(f"approve {self.request_id}\n"),
                 stdout=stdout,
-                now=200,
+                clock=lambda: 200,
             )
 
             self.assertEqual(result, 0)
@@ -5500,13 +5576,15 @@ class AgentCtlFamilyTest(unittest.TestCase):
                     environment,
                     operation,
                     creator=creator,
-                    stdin=_FakeTTY(f"not-created {self.request_id}\n"),
+                    stdin=self._tty(f"not-created {self.request_id}\n"),
                     extra=extra,
                 )
                 self.assertEqual(result, 1)
                 self.assertEqual(creator.verify_calls, [])
                 self.assertEqual(
-                    load_pending(layout.family_pending_dir, self.request_id).state,
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
                     PendingState.PENDING,
                 )
 
@@ -5537,7 +5615,9 @@ class AgentCtlFamilyTest(unittest.TestCase):
                 [(self.binding, self.issue, 7, provider)],
             )
             self.assertEqual(inventory.verified, [(self.binding, provider)])
-            request = load_pending(layout.family_pending_dir, self.request_id)
+            request = load_pending(
+                layout.family_pending_dir, self.request_id, "demo"
+            )
             self.assertEqual(request.state, PendingState.CREATED)
             self.assertIsNone(request.issue)
             self.assertEqual(request.issue_number, 7)
@@ -5572,7 +5652,9 @@ class AgentCtlFamilyTest(unittest.TestCase):
                 self.assertEqual(result, 1)
                 self.assertEqual(len(creator.verify_calls), 1)
                 self.assertEqual(
-                    load_pending(layout.family_pending_dir, self.request_id).state,
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
                     PendingState.UNKNOWN,
                 )
                 self.assertNotIn("issue-number:", output)
@@ -5617,9 +5699,9 @@ class AgentCtlFamilyTest(unittest.TestCase):
     def test_resolve_not_created_requires_exact_tty_confirmation(self) -> None:
         cases = (
             StringIO(f"not-created {self.request_id}\n"),
-            _FakeTTY(""),
-            _FakeTTY(f"approve {self.request_id}\n"),
-            _FakeTTY("not-created wrong-request\n"),
+            self._tty(""),
+            self._tty(f"approve {self.request_id}\n"),
+            self._tty("not-created wrong-request\n"),
         )
         for stdin in cases:
             with self.subTest(stdin=stdin.getvalue()), TemporaryDirectory() as temp:
@@ -5636,7 +5718,9 @@ class AgentCtlFamilyTest(unittest.TestCase):
 
                 self.assertEqual(result, 1)
                 self.assertEqual(
-                    load_pending(layout.family_pending_dir, self.request_id).state,
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
                     PendingState.UNKNOWN,
                 )
                 if not stdin.isatty():
@@ -5656,13 +5740,15 @@ class AgentCtlFamilyTest(unittest.TestCase):
             result, output, error, _ = self._run_family(
                 environment,
                 "resolve-not-created",
-                stdin=_FakeTTY(f"not-created {self.request_id}\n"),
+                stdin=self._tty(f"not-created {self.request_id}\n"),
             )
 
             self.assertEqual((result, error), (0, ""))
             self.assertIn("later approve", output.lower())
             self.assertIn("external state", output.lower())
-            request = load_pending(layout.family_pending_dir, self.request_id)
+            request = load_pending(
+                layout.family_pending_dir, self.request_id, "demo"
+            )
             self.assertEqual(request.state, PendingState.PENDING)
             self.assertEqual(request.issue, self.issue)
             self.assertEqual(
@@ -5676,6 +5762,374 @@ class AgentCtlFamilyTest(unittest.TestCase):
                     "timestamp": 200,
                 },
             )
+
+    # Break caught: a record injected under one project's layout being exposed or sent.
+    def test_family_issue_commands_reject_cross_project_injected_records(self) -> None:
+        cases = (
+            ("preview", (), None),
+            (
+                "approve",
+                (),
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7"),
+            ),
+            ("reject", (), None),
+            (
+                "resolve-created",
+                ("7",),
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7"),
+            ),
+            ("resolve-not-created", (), None),
+        )
+        for operation, extra, outcome in cases:
+            with self.subTest(operation=operation), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                pending = create_pending(
+                    layout.family_pending_dir,
+                    "other",
+                    self.issue,
+                    now=100,
+                    random_bytes=lambda _: bytes.fromhex(self.request_id),
+                )
+                if operation.startswith("resolve-"):
+                    with pending_lock(
+                        layout.family_pending_dir, pending.request_id, "other"
+                    ) as locked:
+                        transition_pending(locked, PendingState.SENDING)
+                        transition_pending(locked, PendingState.UNKNOWN)
+                creator = _FamilyCreator(outcome)
+                stdin = (
+                    self._tty(f"not-created {self.request_id}\n")
+                    if operation == "resolve-not-created"
+                    else (
+                        self._tty(f"approve {self.request_id}\n")
+                        if operation == "approve"
+                        else None
+                    )
+                )
+
+                result, output, _, _ = self._run_family(
+                    environment,
+                    operation,
+                    creator=creator,
+                    stdin=stdin,
+                    extra=extra,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertNotIn(self.issue.title, output)
+                self.assertNotIn(self.issue.body, output)
+                self.assertEqual(creator.create_calls, [])
+                self.assertEqual(creator.verify_calls, [])
+
+    # Break caught: equal request values hiding replacement of the approved inode.
+    def test_approve_rejects_same_content_inode_replacement_without_sending(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            record = layout.family_pending_dir / f"{self.request_id}.json"
+
+            def replace_with_equal_bytes() -> None:
+                replacement = layout.family_pending_dir / ".replacement"
+                replacement.write_bytes(record.read_bytes())
+                replacement.chmod(0o600)
+                os.replace(replacement, record)
+
+            creator = _FamilyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            result, _, _, _ = self._run_family(
+                environment,
+                "approve",
+                creator=creator,
+                stdin=self._tty(
+                    f"approve {self.request_id}\n",
+                    before_read=replace_with_equal_bytes,
+                ),
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(creator.create_calls, [])
+            self.assertEqual(
+                load_pending(
+                    layout.family_pending_dir, self.request_id, "demo"
+                ).state,
+                PendingState.PENDING,
+            )
+
+    # Break caught: malformed post-send scalar values leaving a retryable sending record.
+    def test_malformed_created_scalars_become_unknown_at_response_stage(self) -> None:
+        outcomes = (
+            CreatedIssue("7", "https://github.com/family/roadmap/issues/7"),
+            CreatedIssue(True, "https://github.com/family/roadmap/issues/True"),
+            CreatedIssue(0, "https://github.com/family/roadmap/issues/0"),
+            CreatedIssue(-1, "https://github.com/family/roadmap/issues/-1"),
+            CreatedIssue(
+                2_147_483_648,
+                "https://github.com/family/roadmap/issues/2147483648",
+            ),
+        )
+        for outcome in outcomes:
+            with self.subTest(number=outcome.number), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                creator = _FamilyCreator(outcome)
+
+                result, output, _, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=self._tty(f"approve {self.request_id}\n"),
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(len(creator.create_calls), 1)
+                self.assertEqual(
+                    load_pending(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ).state,
+                    PendingState.UNKNOWN,
+                )
+                self.assertNotIn("issue-number:", output)
+                self.assertEqual(self._audit(layout)[-1]["stage"], "response")
+                self.assertEqual(self._audit(layout)[-1]["status"], "unknown")
+
+    # Break caught: approval using a time sampled before prompt and remote preflight.
+    def test_approval_samples_expiry_after_preflight_at_exact_boundary(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            pending = self._pending(layout)
+            observed = [pending.expires_at - 1]
+
+            class CrossingInventory(_FamilyInventory):
+                def verify(inner_self, binding, provider):
+                    super().verify(binding, provider)
+                    observed[0] = pending.expires_at
+
+            creator = _FamilyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            result, _, _, _ = self._run_family(
+                environment,
+                "approve",
+                creator=creator,
+                inventory=CrossingInventory(self.binding),
+                stdin=self._tty(f"approve {self.request_id}\n"),
+                clock=lambda: observed[0],
+            )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(creator.create_calls, [])
+            self.assertEqual(
+                load_pending(
+                    layout.family_pending_dir, self.request_id, "demo"
+                ).state,
+                PendingState.EXPIRED,
+            )
+
+    # Break caught: a surviving send being neither recovered nor durably audited.
+    def test_cli_startup_recovers_sending_then_allows_exact_reconciliation(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            with pending_lock(
+                layout.family_pending_dir, self.request_id, "demo"
+            ) as locked:
+                transition_pending(locked, PendingState.SENDING)
+            creator = _FamilyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            recovered_states = []
+
+            def inspect_recovery(path, **event):
+                if event["operation"] == "recover":
+                    recovered_states.append(
+                        load_pending(
+                            layout.family_pending_dir,
+                            self.request_id,
+                            "demo",
+                        ).state
+                    )
+                append_family_audit(path, **event)
+
+            with patch(
+                "agent_container.family_cli.append_family_audit",
+                side_effect=inspect_recovery,
+            ):
+                result, _, error, _ = self._run_family(
+                    environment,
+                    "resolve-created",
+                    creator=creator,
+                    extra=("7",),
+                )
+
+            self.assertEqual((result, error), (0, ""))
+            self.assertEqual(len(creator.verify_calls), 1)
+            self.assertEqual(recovered_states, [PendingState.UNKNOWN])
+            events = self._audit(layout)
+            self.assertEqual(
+                events[0],
+                {
+                    "operation": "recover",
+                    "project_id": "demo",
+                    "request_id": self.request_id,
+                    "stage": "reconcile",
+                    "status": "unknown",
+                    "timestamp": 200,
+                },
+            )
+            self.assertEqual(events[-1]["status"], "created")
+
+    # Break caught: doctor mutating interrupted work or ignoring unsafe audit state.
+    def test_doctor_is_read_only_and_fails_sending_or_invalid_audit(self) -> None:
+        for damage in ("sending", "malformed-audit", "insecure-audit"):
+            with self.subTest(damage=damage), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                if damage == "sending":
+                    with pending_lock(
+                        layout.family_pending_dir, self.request_id, "demo"
+                    ) as locked:
+                        transition_pending(locked, PendingState.SENDING)
+                else:
+                    layout.family_audit_file.write_bytes(b"{not-json}\n")
+                    layout.family_audit_file.chmod(
+                        0o644 if damage == "insecure-audit" else 0o600
+                    )
+                record = layout.family_pending_dir / f"{self.request_id}.json"
+                before_record = record.read_bytes()
+                before_entries = sorted(
+                    path.name for path in layout.family_pending_dir.iterdir()
+                )
+                before_audit = (
+                    layout.family_audit_file.read_bytes()
+                    if layout.family_audit_file.exists()
+                    else None
+                )
+                stdout = StringIO()
+                stderr = StringIO()
+
+                result = main(
+                    ["family", "doctor", "demo"],
+                    environment=environment,
+                    stdout=stdout,
+                    stderr=stderr,
+                    family_token_provider_factory=lambda _layout: _FamilyProvider(),
+                    family_clock=lambda: 200,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertIn("FAIL", stdout.getvalue())
+                self.assertEqual(record.read_bytes(), before_record)
+                self.assertEqual(
+                    sorted(
+                        path.name for path in layout.family_pending_dir.iterdir()
+                    ),
+                    before_entries,
+                )
+                self.assertEqual(
+                    layout.family_audit_file.read_bytes()
+                    if layout.family_audit_file.exists()
+                    else None,
+                    before_audit,
+                )
+
+    # Break caught: isatty spoofing or unbounded confirmation reads authorizing a send.
+    def test_irreversible_confirmation_requires_real_fd_and_bounded_line(self) -> None:
+        for stdin in (
+            _SpoofedTTY(f"approve {self.request_id}\n"),
+            _NoFilenoTTY(),
+        ):
+            with self.subTest(stdin=type(stdin).__name__), TemporaryDirectory() as temp:
+                root, environment = self._registered_state(temp)
+                layout = self._family_state(root)
+                self._pending(layout)
+                creator = _FamilyCreator(
+                    CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+                )
+                result, output, _, _ = self._run_family(
+                    environment,
+                    "approve",
+                    creator=creator,
+                    stdin=stdin,
+                )
+                self.assertEqual(result, 1)
+                self.assertEqual(creator.create_calls, [])
+                self.assertNotIn(self.issue.title, output)
+                self.assertNotIn(self.issue.body, output)
+
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            creator = _FamilyCreator()
+            confirmation = self._tty(
+                f"approve {self.request_id}" + ("x" * 256) + "\n"
+            )
+            result, _, _, _ = self._run_family(
+                environment,
+                "approve",
+                creator=creator,
+                stdin=confirmation,
+            )
+            self.assertEqual(result, 1)
+            self.assertEqual(creator.create_calls, [])
+            self.assertEqual(len(confirmation.read_sizes), 1)
+            self.assertGreater(confirmation.read_sizes[0], 0)
+            self.assertLessEqual(confirmation.read_sizes[0], 128)
+
+    # Break caught: falsy injected complete dependencies being silently discarded.
+    def test_falsy_injected_family_dependencies_are_used_when_not_none(self) -> None:
+        class FalsyProviderFactory:
+            def __init__(inner_self):
+                inner_self.provider = _FamilyProvider()
+
+            def __bool__(inner_self):
+                return False
+
+            def __call__(inner_self, _layout):
+                return inner_self.provider
+
+        class FalsyInventory(_FamilyInventory):
+            def __bool__(inner_self):
+                return False
+
+        class FalsyCreator(_FamilyCreator):
+            def __bool__(inner_self):
+                return False
+
+        with TemporaryDirectory() as temp:
+            root, environment = self._registered_state(temp)
+            layout = self._family_state(root)
+            self._pending(layout)
+            provider_factory = FalsyProviderFactory()
+            inventory = FalsyInventory(self.binding)
+            creator = FalsyCreator(
+                CreatedIssue(7, "https://github.com/family/roadmap/issues/7")
+            )
+            stdout = StringIO()
+            stderr = StringIO()
+
+            result = main(
+                ["family", "issue", "approve", "demo", self.request_id],
+                environment=environment,
+                stdin=self._tty(f"approve {self.request_id}\n"),
+                stdout=stdout,
+                stderr=stderr,
+                family_token_provider_factory=provider_factory,
+                family_inventory=inventory,
+                family_creator=creator,
+                family_clock=lambda: 200,
+            )
+
+            self.assertEqual((result, stderr.getvalue()), (0, ""))
+            self.assertEqual(len(creator.create_calls), 1)
+            self.assertEqual(len(inventory.verified), 1)
 
 
 if __name__ == "__main__":

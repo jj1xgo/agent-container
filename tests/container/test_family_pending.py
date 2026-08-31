@@ -98,7 +98,7 @@ class PendingStoreTest(unittest.TestCase):
         issue_number: int | None = None,
         issue_url: str | None = None,
     ):
-        with pending_lock(self.store, request_id) as locked:
+        with pending_lock(self.store, request_id, "demo") as locked:
             return transition_pending(
                 locked,
                 target,
@@ -149,7 +149,7 @@ class PendingStoreTest(unittest.TestCase):
             random_bytes=lambda size: b"\x44" * size,
         )
 
-        self.assertEqual(load_pending(self.store, request.request_id).issue, issue)
+        self.assertEqual(load_pending(self.store, request.request_id, "demo").issue, issue)
 
     # Break caught: a colliding ID overwriting an existing request.
     def test_retries_id_collision_without_mutating_the_first_record(self) -> None:
@@ -166,7 +166,7 @@ class PendingStoreTest(unittest.TestCase):
 
         self.assertEqual(first.request_id, "11" * 16)
         self.assertEqual(second.request_id, "22" * 16)
-        self.assertEqual(load_pending(self.store, first.request_id).created_at, NOW)
+        self.assertEqual(load_pending(self.store, first.request_id, "demo").created_at, NOW)
 
     # Break caught: unlimited unfinished requests exhausting host storage/review capacity.
     def test_limits_unfinished_inventory_to_ten_but_ignores_terminal_records(self) -> None:
@@ -178,7 +178,7 @@ class PendingStoreTest(unittest.TestCase):
         replacement = self._create(11)
 
         self.assertEqual(replacement.request_id, "0b" * 16)
-        self.assertEqual(len(list_pending(self.store)), 11)
+        self.assertEqual(len(list_pending(self.store, "demo")), 11)
 
     # Break caught: lifecycle operations mutating accepted title/body bytes.
     def test_nonterminal_transitions_preserve_immutable_canonical_content(self) -> None:
@@ -256,7 +256,7 @@ class PendingStoreTest(unittest.TestCase):
             barrier.wait()
             try:
                 if target is PendingState.EXPIRED:
-                    expire_pending(self.store, request.request_id, now=request.expires_at)
+                    expire_pending(self.store, request.request_id, "demo", now=request.expires_at)
                 else:
                     self._transition(request.request_id, target)
             except ValueError:
@@ -279,7 +279,7 @@ class PendingStoreTest(unittest.TestCase):
 
         self.assertFalse(any(thread.is_alive() for thread in threads))
         self.assertEqual(results.count("lost"), 2)
-        self.assertIn(load_pending(self.store, request.request_id).state.value, results)
+        self.assertIn(load_pending(self.store, request.request_id, "demo").state.value, results)
 
     # Break caught: two approvals both crossing pending -> sending.
     def test_double_approve_has_exactly_one_successful_transition(self) -> None:
@@ -314,7 +314,7 @@ class PendingStoreTest(unittest.TestCase):
         def reject() -> None:
             competitor_started.set()
             try:
-                with pending_lock(self.store, request.request_id) as locked:
+                with pending_lock(self.store, request.request_id, "demo") as locked:
                     competitor_acquired.set()
                     transition_pending(locked, PendingState.REJECTED)
             except ValueError:
@@ -322,7 +322,7 @@ class PendingStoreTest(unittest.TestCase):
             finally:
                 competitor_done.set()
 
-        with pending_lock(self.store, request.request_id) as locked:
+        with pending_lock(self.store, request.request_id, "demo") as locked:
             transition_pending(locked, PendingState.SENDING)
             thread = threading.Thread(target=reject)
             thread.start()
@@ -332,19 +332,19 @@ class PendingStoreTest(unittest.TestCase):
 
         self.assertTrue(competitor_done.wait(1))
         thread.join(timeout=1)
-        self.assertEqual(load_pending(self.store, request.request_id).state, PendingState.UNKNOWN)
+        self.assertEqual(load_pending(self.store, request.request_id, "demo").state, PendingState.UNKNOWN)
 
     # Break caught: restart treating an in-flight send as safely retryable.
     def test_recovery_moves_only_surviving_sending_to_unknown(self) -> None:
         request = self._create()
         self._transition(request.request_id, PendingState.SENDING)
 
-        recovered = recover_sending(self.store, request.request_id)
+        recovered = recover_sending(self.store, request.request_id, "demo")
 
         self.assertEqual(recovered.state, PendingState.UNKNOWN)
         self.assertEqual(recovered.issue, self.issue)
         with self.assertRaises(ValueError):
-            recover_sending(self.store, request.request_id)
+            recover_sending(self.store, request.request_id, "demo")
 
     # Break caught: restart inventory leaving an interrupted send retryable by omission.
     def test_store_initialization_recovers_every_sending_record_without_id(self) -> None:
@@ -352,24 +352,29 @@ class PendingStoreTest(unittest.TestCase):
         sending = self._create(2)
         self._transition(sending.request_id, PendingState.SENDING)
 
-        before = {request.request_id: request.state for request in list_pending(self.store)}
+        before = {request.request_id: request.state for request in list_pending(self.store, "demo")}
         self.assertEqual(before[pending.request_id], PendingState.PENDING)
         self.assertEqual(before[sending.request_id], PendingState.SENDING)
 
-        initialized = family_pending.initialize_pending_store(self.store)
+        initialized = family_pending.initialize_pending_store(self.store, "demo")
 
-        states = {request.request_id: request.state for request in initialized}
-        self.assertEqual(states[pending.request_id], PendingState.PENDING)
-        self.assertEqual(states[sending.request_id], PendingState.UNKNOWN)
-        self.assertEqual(load_pending(self.store, sending.request_id).state, PendingState.UNKNOWN)
+        self.assertEqual(
+            [(request.request_id, request.project_id) for request in initialized],
+            [(sending.request_id, "demo")],
+        )
+        self.assertEqual(
+            load_pending(self.store, pending.request_id, "demo").state,
+            PendingState.PENDING,
+        )
+        self.assertEqual(load_pending(self.store, sending.request_id, "demo").state, PendingState.UNKNOWN)
 
     # Break caught: expiry before its exact deadline or from an in-flight state.
     def test_expiry_requires_pending_state_at_or_after_deadline(self) -> None:
         request = self._create()
         with self.assertRaises(ValueError):
-            expire_pending(self.store, request.request_id, now=request.expires_at - 1)
+            expire_pending(self.store, request.request_id, "demo", now=request.expires_at - 1)
 
-        expired = expire_pending(self.store, request.request_id, now=request.expires_at)
+        expired = expire_pending(self.store, request.request_id, "demo", now=request.expires_at)
 
         self.assertEqual(expired.state, PendingState.EXPIRED)
 
@@ -378,7 +383,7 @@ class PendingStoreTest(unittest.TestCase):
         for byte, terminal in ((1, PendingState.REJECTED), (2, PendingState.EXPIRED)):
             request = self._create(byte)
             if terminal is PendingState.EXPIRED:
-                changed = expire_pending(self.store, request.request_id, now=request.expires_at)
+                changed = expire_pending(self.store, request.request_id, "demo", now=request.expires_at)
             else:
                 changed = self._transition(request.request_id, terminal)
             payload = json.loads(self._record_path(request.request_id).read_text("ascii"))
@@ -422,7 +427,7 @@ class PendingStoreTest(unittest.TestCase):
         unknown.chmod(0o600)
 
         with self.assertRaises(ValueError):
-            list_pending(self.store)
+            list_pending(self.store, "demo")
         with self.assertRaises(ValueError):
             self._create(2)
 
@@ -432,10 +437,10 @@ class PendingStoreTest(unittest.TestCase):
         before = {path.name for path in self.store.iterdir()}
 
         with self.assertRaises(ValueError):
-            load_pending(self.store, "ff" * 16)
+            load_pending(self.store, "ff" * 16, "demo")
 
         self.assertEqual({path.name for path in self.store.iterdir()}, before)
-        self.assertEqual(list_pending(self.store), (request,))
+        self.assertEqual(list_pending(self.store, "demo"), (request,))
 
     # Break caught: a valid-looking sibling with unsafe metadata being ignored by point loads.
     def test_point_load_fails_closed_on_an_unsafe_record_sibling(self) -> None:
@@ -445,7 +450,7 @@ class PendingStoreTest(unittest.TestCase):
         unsafe.chmod(0o644)
 
         with self.assertRaises(PermissionError):
-            load_pending(self.store, request.request_id)
+            load_pending(self.store, request.request_id, "demo")
 
     # Break caught: crashes before publication changing the durable state.
     def test_write_fsync_rename_and_prepublication_parent_fsync_failures_preserve_state(self) -> None:
@@ -475,7 +480,7 @@ class PendingStoreTest(unittest.TestCase):
                 with failure:
                     with self.assertRaises(OSError):
                         self._transition(request.request_id, PendingState.SENDING)
-                self.assertEqual(load_pending(self.store, request.request_id).state, PendingState.PENDING)
+                self.assertEqual(load_pending(self.store, request.request_id, "demo").state, PendingState.PENDING)
 
     # Break caught: lock failure allowing an unlocked state update.
     def test_lock_acquisition_failure_leaves_record_unchanged(self) -> None:
@@ -485,7 +490,7 @@ class PendingStoreTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 self._transition(request.request_id, PendingState.SENDING)
 
-        self.assertEqual(load_pending(self.store, request.request_id).state, PendingState.PENDING)
+        self.assertEqual(load_pending(self.store, request.request_id, "demo").state, PendingState.PENDING)
 
     # Break caught: an exception from the atomic state-update layer being ignored.
     def test_state_update_failure_never_reaches_a_success_audit(self) -> None:
@@ -495,7 +500,7 @@ class PendingStoreTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 self._transition(request.request_id, PendingState.REJECTED)
 
-        self.assertEqual(load_pending(self.store, request.request_id).state, PendingState.PENDING)
+        self.assertEqual(load_pending(self.store, request.request_id, "demo").state, PendingState.PENDING)
         self.assertFalse(self.audit.exists())
 
     # Break caught: a post-publication directory-sync failure being reported as no state change.
@@ -516,7 +521,7 @@ class PendingStoreTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 self._transition(request.request_id, PendingState.SENDING)
 
-        self.assertEqual(load_pending(self.store, request.request_id).state, PendingState.SENDING)
+        self.assertEqual(load_pending(self.store, request.request_id, "demo").state, PendingState.SENDING)
         self.assertFalse(self.audit.exists())
 
     # Break caught: cleanup failure being followed by a success audit event.
@@ -551,7 +556,7 @@ class PendingStoreTest(unittest.TestCase):
             "created",
         )
         with self.assertRaises(ValueError):
-            load_pending(self.store, request.request_id)
+            load_pending(self.store, request.request_id, "demo")
         self.assertTrue(any("Add export" in path.read_text("ascii") for path in self.store.glob(".*.json.*")))
 
     # Break caught: name-based cleanup silently succeeding after the displaced inode is moved.
@@ -568,7 +573,7 @@ class PendingStoreTest(unittest.TestCase):
 
         self.assertIn("Add export", (self.store / leaked_name).read_text("ascii"))
         with self.assertRaises(ValueError):
-            list_pending(self.store)
+            list_pending(self.store, "demo")
 
     # Break caught: new-record publication accepting an extra sensitive hard link.
     def test_new_record_rejects_moved_and_replaced_cleanup_name(self) -> None:
@@ -583,7 +588,7 @@ class PendingStoreTest(unittest.TestCase):
 
         self.assertIn("Add export", (self.store / leaked_name).read_text("ascii"))
         with self.assertRaises(ValueError):
-            list_pending(self.store)
+            list_pending(self.store, "demo")
 
     # Break caught: an extra content link appearing during the final parent sync.
     def test_new_record_revalidates_cleanup_after_parent_fsync(self) -> None:
@@ -613,6 +618,69 @@ class PendingStoreTest(unittest.TestCase):
         self.assertIn(
             "Add export",
             (self.store / "late-sensitive-link").read_text("ascii"),
+        )
+
+    # Break caught: a layout opening a request whose embedded project differs.
+    def test_pending_lock_requires_and_validates_expected_project_before_yield(self) -> None:
+        request = self._create()
+        yielded = False
+        try:
+            with pending_lock(
+                self.store,
+                request.request_id,
+                expected_project_id="other",
+            ):
+                yielded = True
+        except TypeError:
+            self.fail("pending_lock does not accept required expected_project_id")
+        except ValueError:
+            pass
+        self.assertFalse(yielded)
+
+    # Break caught: value equality accepting a replacement inode after preview.
+    def test_pending_snapshot_rejects_equal_bytes_on_a_new_inode(self) -> None:
+        snapshotter = getattr(family_pending, "snapshot_pending", None)
+        self.assertTrue(callable(snapshotter))
+        request = self._create()
+        snapshot = snapshotter(self.store, request.request_id, "demo")
+        record = self._record_path(request.request_id)
+        replacement = self.store / ".equal-replacement"
+        replacement.write_bytes(record.read_bytes())
+        replacement.chmod(0o600)
+        os.replace(replacement, record)
+
+        with self.assertRaises(ValueError):
+            with pending_lock(
+                self.store,
+                request.request_id,
+                "demo",
+                snapshot=snapshot,
+            ):
+                self.fail("replacement inode was exposed")
+
+    # Break caught: startup returning all sensitive requests instead of recovered IDs.
+    def test_initializer_returns_only_safe_metadata_for_recovered_sends(self) -> None:
+        pending = self._create(1)
+        sending = self._create(2)
+        self._transition(sending.request_id, PendingState.SENDING)
+        try:
+            recovered = family_pending.initialize_pending_store(
+                self.store, "demo"
+            )
+        except TypeError:
+            self.fail("initializer does not accept expected project")
+
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(recovered[0].request_id, sending.request_id)
+        self.assertEqual(recovered[0].project_id, "demo")
+        self.assertFalse(hasattr(recovered[0], "issue"))
+        self.assertEqual(
+            load_pending(self.store, pending.request_id, "demo").state,
+            PendingState.PENDING,
+        )
+        self.assertEqual(
+            load_pending(self.store, sending.request_id, "demo").state,
+            PendingState.UNKNOWN,
         )
 
 
@@ -802,6 +870,27 @@ class FamilyAuditTest(unittest.TestCase):
 
                 self.assertEqual(self.path.read_bytes(), b"")
                 self.assertIn(b'"status":"created"', displaced.read_bytes())
+
+    # Break caught: doctor relying on the append path and creating or trusting bad audit.
+    def test_read_only_audit_validator_is_bounded_exact_and_project_scoped(self) -> None:
+        validator = getattr(family_pending, "validate_family_audit", None)
+        self.assertTrue(callable(validator))
+        self.assertEqual(validator(self.path, "demo"), 0)
+        self.assertFalse(self.path.exists())
+
+        self._append()
+        self.assertEqual(validator(self.path, "demo"), 1)
+        with self.assertRaises(ValueError):
+            validator(self.path, "other")
+
+        self.path.write_bytes(b"{not-json}\n")
+        self.path.chmod(0o600)
+        with self.assertRaises(ValueError):
+            validator(self.path, "demo")
+
+        self.path.chmod(0o644)
+        with self.assertRaises((PermissionError, ValueError)):
+            validator(self.path, "demo")
 
 
 if __name__ == "__main__":

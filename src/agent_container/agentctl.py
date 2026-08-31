@@ -1343,7 +1343,7 @@ def _approve_family_issue(
     creator,
     stdin: TextIO,
     stdout: TextIO,
-    now: int,
+    clock: Callable[[], int],
 ) -> int:
     """Run one host-approved Issue creation with explicit operator streams."""
 
@@ -1357,7 +1357,7 @@ def _approve_family_issue(
         creator=creator,
         stdin=stdin,
         stdout=stdout,
-        now=now,
+        clock=clock,
     )
 
 
@@ -1442,6 +1442,11 @@ def main(
                 family_layout = FamilyStateLayout(
                     state_layout.root, state_layout.project_id
                 )
+                family_clock_source = (
+                    (lambda: int(time.time()))
+                    if family_clock is None
+                    else family_clock
+                )
                 return dispatch_family(
                     arguments,
                     family_layout,
@@ -1450,7 +1455,7 @@ def main(
                     provider_factory=family_token_provider_factory,
                     inventory=family_inventory,
                     creator=family_creator,
-                    now=(family_clock or (lambda: int(time.time())))(),
+                    clock=family_clock_source,
                     approval_handler=_approve_family_issue,
                 )
             except Exception:

@@ -106,7 +106,7 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
             )
 
         self.assertEqual(status, 0)
-        pending = list_pending(self.layout.family_pending_dir)
+        pending = list_pending(self.layout.family_pending_dir, "demo")
         self.assertEqual(stdout.getvalue(), f"pending {pending[0].request_id} {pending[0].expires_at}\n")
         self.assertEqual(stderr.getvalue(), "")
         self.assertEqual(len(pending), 1)
@@ -131,7 +131,7 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
             )
 
         self.assertEqual(response.status, "pending")
-        self.assertEqual(len(list_pending(self.layout.family_pending_dir)), 1)
+        self.assertEqual(len(list_pending(self.layout.family_pending_dir, "demo")), 1)
 
     # Break caught: any local process with the capability being treated as the runtime.
     def test_registered_runtime_root_execs_client_while_sibling_is_denied(self) -> None:
@@ -220,7 +220,7 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
         self.assertEqual(result["returncode"], 0)
         self.assertRegex(result["stdout"], r"^pending [0-9a-f]{32} [0-9]+\n$")
         self.assertEqual(result["stderr"], "")
-        self.assertEqual(len(list_pending(self.layout.family_pending_dir)), 1)
+        self.assertEqual(len(list_pending(self.layout.family_pending_dir, "demo")), 1)
 
     # Break caught: client disconnect boundaries either burning early or replaying late.
     def test_disconnect_before_and_after_persistence_have_defined_state(self) -> None:
@@ -275,7 +275,7 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
                 lambda: after.session.consumed,  # type: ignore[union-attr]
                 "complete disconnected request was not persisted",
             )
-        self.assertEqual(len(list_pending(self.layout.family_pending_dir)), 1)
+        self.assertEqual(len(list_pending(self.layout.family_pending_dir, "demo")), 1)
 
     # Break caught: concurrent uses of one capability both creating durable records.
     def test_concurrent_clients_have_exactly_one_successful_pending_request(self) -> None:
@@ -306,7 +306,7 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
 
         self.assertEqual(len(successes), 1)
         self.assertEqual(len(failures), 1)
-        self.assertEqual(len(list_pending(self.layout.family_pending_dir)), 1)
+        self.assertEqual(len(list_pending(self.layout.family_pending_dir, "demo")), 1)
 
     # Break caught: broker death silently routing through another network path.
     def test_broker_death_has_no_fallback_and_socket_is_gone(self) -> None:
@@ -320,7 +320,7 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
                 self.request(mount.capability), mount.socket_path
             )
         self.assertFalse(mount.socket_dir.exists())
-        self.assertEqual(list_pending(self.layout.family_pending_dir), ())
+        self.assertEqual(list_pending(self.layout.family_pending_dir, "demo"), ())
 
     # Break caught: runtime exit waiting for the full client timeout on a partial frame.
     def test_runtime_exit_interrupts_a_client_stalled_mid_frame(self) -> None:
@@ -342,7 +342,7 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
 
         self.assertLess(elapsed, 2)
         self.assertFalse(mount.socket_dir.exists())
-        self.assertEqual(list_pending(self.layout.family_pending_dir), ())
+        self.assertEqual(list_pending(self.layout.family_pending_dir, "demo"), ())
 
     # Break caught: a fatal handler exit leaving a live listener and queued clients.
     def test_unexpected_handler_failure_closes_service_and_reports_fixed_error(self) -> None:
@@ -447,7 +447,7 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
         exposed = str(client_error.exception) + str(checked.exception) + repr(runtime) + audit
         self.assertNotIn(marker, exposed)
         self.assertNotIn(mount.capability, exposed)
-        self.assertEqual(len(list_pending(self.layout.family_pending_dir)), 1)
+        self.assertEqual(len(list_pending(self.layout.family_pending_dir, "demo")), 1)
         with self.assertRaisesRegex(Exception, "^family intake runtime failed$"):
             runtime.close()
         self.assertFalse(mount.socket_dir.exists())

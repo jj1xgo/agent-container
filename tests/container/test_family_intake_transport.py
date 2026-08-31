@@ -147,10 +147,10 @@ class FamilyIntakeTransportTest(unittest.TestCase):
         )
 
         self.assertFalse(session.consumed)
-        self.assertEqual(list_pending(self.store), ())
+        self.assertEqual(list_pending(self.store, "demo"), ())
         valid = FakeStream(encode_request_frame(self.request()))
         handle_family_intake_connection(FakeConnection(valid), session, self.store)
-        self.assertEqual(len(list_pending(self.store)), 1)
+        self.assertEqual(len(list_pending(self.store, "demo")), 1)
 
     # Break caught: response disconnect rolling back or replaying a durable request.
     def test_disconnect_after_persistence_keeps_one_pending_and_consumes_run(self) -> None:
@@ -167,11 +167,11 @@ class FamilyIntakeTransportTest(unittest.TestCase):
         )
 
         self.assertTrue(session.consumed)
-        self.assertEqual(len(list_pending(self.store)), 1)
+        self.assertEqual(len(list_pending(self.store, "demo")), 1)
         replay = FakeStream(encode_request_frame(self.request()))
         handle_family_intake_connection(FakeConnection(replay), session, self.store)
         self.assertEqual(replay.outgoing.getvalue(), b"")
-        self.assertEqual(len(list_pending(self.store)), 1)
+        self.assertEqual(len(list_pending(self.store, "demo")), 1)
 
     # Break caught: an internal persistence error being downgraded to a disconnect.
     def test_internal_failure_is_silent_to_client_but_propagates_to_supervisor(self) -> None:

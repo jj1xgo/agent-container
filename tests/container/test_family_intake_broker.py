@@ -176,7 +176,7 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
             response,
             FamilyIntakeResponse(1, "pending", "11" * 16, 1_800_086_400),
         )
-        pending = list_pending(self.store)
+        pending = list_pending(self.store, "demo")
         self.assertEqual(len(pending), 1)
         self.assertEqual(
             pending[0].issue,
@@ -224,7 +224,7 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     session.handle(request)
                 self.assertFalse(session.consumed)
-        self.assertEqual(list_pending(self.store), ())
+        self.assertEqual(list_pending(self.store, "demo"), ())
 
     # Break caught: malformed content burning the one-time capability before validation.
     def test_complete_schema_is_validated_before_capability_consumption(self) -> None:
@@ -256,7 +256,7 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
             session.handle(self.request())
 
         self.assertEqual(first.request_id, "11" * 16)
-        self.assertEqual(len(list_pending(self.store)), 1)
+        self.assertEqual(len(list_pending(self.store, "demo")), 1)
 
     # Break caught: intake bypassing the ten-unfinished-request store limit.
     def test_pending_count_limit_consumes_capability_fail_closed(self) -> None:
@@ -277,7 +277,7 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
         self.assertTrue(session.consumed)
         with self.assertRaises(ValueError):
             session.handle(self.request())
-        self.assertEqual(len(list_pending(self.store)), 10)
+        self.assertEqual(len(list_pending(self.store, "demo")), 10)
 
     # Break caught: an ambiguous durable write failure allowing replay and a second record.
     def test_persistence_ambiguity_consumes_capability_and_cannot_create_twice(self) -> None:
@@ -299,10 +299,10 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
         self.assertNotIn("private-persistence-marker", str(raised.exception))
         self.assertTrue(session.failed)
         self.assertTrue(session.consumed)
-        self.assertEqual(len(list_pending(self.store)), 1)
+        self.assertEqual(len(list_pending(self.store, "demo")), 1)
         with self.assertRaises(FamilyIntakeDenied):
             session.handle(self.request())
-        self.assertEqual(len(list_pending(self.store)), 1)
+        self.assertEqual(len(list_pending(self.store, "demo")), 1)
 
     # Break caught: an audit fsync ambiguity returning a replayable capability.
     def test_audit_failure_after_pending_creation_is_fail_closed(self) -> None:
@@ -319,10 +319,10 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
         self.assertNotIn("private-audit-marker", str(raised.exception))
         self.assertTrue(session.failed)
         self.assertTrue(session.consumed)
-        self.assertEqual(len(list_pending(self.store)), 1)
+        self.assertEqual(len(list_pending(self.store, "demo")), 1)
         with self.assertRaises(FamilyIntakeDenied):
             session.handle(self.request())
-        self.assertEqual(len(list_pending(self.store)), 1)
+        self.assertEqual(len(list_pending(self.store, "demo")), 1)
 
     # Break caught: an ordinary request denial poisoning runtime supervision.
     def test_ordinary_denial_is_typed_without_marking_internal_failure(self) -> None:
@@ -335,10 +335,10 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
         self.assertFalse(session.consumed)
         response = session.handle(self.request())
         self.assertEqual(response.status, "pending")
-        self.assertEqual(len(list_pending(self.store)), 1)
+        self.assertEqual(len(list_pending(self.store, "demo")), 1)
         with self.assertRaises(FamilyIntakeDenied):
             session.handle(self.request())
-        self.assertEqual(len(list_pending(self.store)), 1)
+        self.assertEqual(len(list_pending(self.store, "demo")), 1)
 
     # Break caught: wrong runtime identity reaching request parsing or persistence.
     def test_peer_pid_and_uid_must_match_expected_runtime(self) -> None:
@@ -381,7 +381,7 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
             session.handle(self.request())
 
         self.assertFalse(session.consumed)
-        self.assertEqual(list_pending(self.store), ())
+        self.assertEqual(list_pending(self.store, "demo"), ())
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from typing import Callable, Mapping
 
 from agent_container.family_intake_broker import FamilyIntakeSession
 from agent_container.family_intake_transport import handle_family_intake_connection
+from agent_container.family_pending import append_family_audit
 from agent_container.family_pending import initialize_pending_store
 from agent_container.family_state import FamilyStateLayout
 from agent_container.family_state import load_family_binding
@@ -170,10 +171,22 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
         listener: socket.socket | None = None
         try:
             load_family_binding(self.layout.family_binding_file)
-            initialize_pending_store(self.layout.family_pending_dir)
+            recovered = initialize_pending_store(
+                self.layout.family_pending_dir, self.layout.project_id
+            )
             observed_now = self.clock()
             if type(observed_now) is not int or observed_now < 0:
                 raise ValueError("family intake clock is invalid")
+            for request in recovered:
+                append_family_audit(
+                    self.layout.family_audit_file,
+                    timestamp=observed_now,
+                    project_id=self.layout.project_id,
+                    request_id=request.request_id,
+                    operation="recover",
+                    status="unknown",
+                    stage="reconcile",
+                )
             run_dir = self._create_run_directory()
             capability = self._new_capability()
             session = FamilyIntakeSession(

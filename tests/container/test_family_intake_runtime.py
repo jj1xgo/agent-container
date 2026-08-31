@@ -88,16 +88,18 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
             now=NOW,
             random_bytes=lambda size: b"\x44" * size,
         )
-        with pending_lock(self.layout.family_pending_dir, pending.request_id) as locked:
+        with pending_lock(
+            self.layout.family_pending_dir, pending.request_id, "demo"
+        ) as locked:
             transition_pending(locked, PendingState.SENDING)
         runtime = self.runtime()
         order: list[str] = []
         real_initialize = __import__(
             "agent_container.family_intake_runtime", fromlist=["initialize_pending_store"]
         ).initialize_pending_store
-        def initialize(store: Path):
+        def initialize(store: Path, expected_project_id: str):
             order.append("initialize")
-            return real_initialize(store)
+            return real_initialize(store, expected_project_id)
 
         class RecordingSocket(socket.socket):
             def bind(self, address: str) -> None:
@@ -119,8 +121,24 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
 
         self.assertEqual(order[:2], ["initialize", "bind"])
         self.assertEqual(
-            load_pending(self.layout.family_pending_dir, pending.request_id).state,
+            load_pending(
+                self.layout.family_pending_dir, pending.request_id, "demo"
+            ).state,
             PendingState.UNKNOWN,
+        )
+        recovery = json.loads(
+            self.layout.family_audit_file.read_text("ascii").splitlines()[-1]
+        )
+        self.assertEqual(
+            recovery,
+            {
+                "operation": "recover",
+                "project_id": "demo",
+                "request_id": pending.request_id,
+                "stage": "reconcile",
+                "status": "unknown",
+                "timestamp": NOW,
+            },
         )
 
     # Break caught: capability material being persisted to the host run directory.

@@ -1,7 +1,9 @@
 """Host-only orchestration for explicit family Issue approval commands."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
+import os
 from typing import Callable, Protocol, TextIO
 
 from agent_container.family_github_app import FamilyInstallationTokenProvider
@@ -12,11 +14,16 @@ from agent_container.family_issue_create import FamilyIssueCreator
 from agent_container.family_issue_create import SendNotStarted
 from agent_container.family_issue_create import SendOutcomeUnknown
 from agent_container.family_pending import append_family_audit
+from agent_container.family_pending import initialize_pending_store
+from agent_container.family_pending import inspect_pending_store
 from agent_container.family_pending import list_pending
 from agent_container.family_pending import load_pending
 from agent_container.family_pending import pending_lock
+from agent_container.family_pending import PendingSnapshotMismatch
 from agent_container.family_pending import PendingState
+from agent_container.family_pending import snapshot_pending
 from agent_container.family_pending import transition_pending
+from agent_container.family_pending import validate_family_audit
 from agent_container.family_state import FamilyBinding
 from agent_container.family_state import FamilyStateLayout
 from agent_container.family_state import load_family_binding
@@ -25,12 +32,14 @@ from agent_container.github_app import GITHUB_API
 from agent_container.github_app import GITHUB_API_VERSION
 from agent_container.github_app import InstallationToken
 from agent_container.github_values import validate_repository_id
+from agent_container.github_values import validate_issue_number
 from agent_container.state import ensure_private_directory
 from agent_container.state import Repository
 
 
 _INVENTORY_URL = f"{GITHUB_API}/installation/repositories?per_page=100"
 _USER_AGENT = "agent-container-family-approval"
+_MAX_CONFIRMATION_CHARS = 80
 
 
 def _object_without_duplicates(pairs):
@@ -173,7 +182,7 @@ def bind_family_project(
 
 
 def _requests(layout: FamilyStateLayout):
-    return list_pending(layout.family_pending_dir)
+    return list_pending(layout.family_pending_dir, layout.project_id)
 
 
 def print_family_list(layout: FamilyStateLayout, stdout: TextIO) -> int:
@@ -211,30 +220,39 @@ def preview_family_issue(
     now: int,
 ) -> int:
     binding = load_family_binding(layout.family_binding_file)
-    request = load_pending(layout.family_pending_dir, request_id)
-    if request.issue is None or request.state not in {
-        PendingState.PENDING,
-        PendingState.UNKNOWN,
-    }:
-        raise ValueError("family pending request cannot be previewed")
-    _audit(
-        layout,
-        request_id,
-        now=now,
-        operation="preview",
-        status=request.state.value,
-        stage="validation",
+    snapshot = snapshot_pending(
+        layout.family_pending_dir, request_id, layout.project_id
     )
-    print(f"request-id: {request.request_id}", file=stdout)
-    print(f"project: {request.project_id}", file=stdout)
-    print(f"repository: {binding.repository.slug}", file=stdout)
-    print(f"created-at: {request.created_at}", file=stdout)
-    print(f"expires-at: {request.expires_at}", file=stdout)
-    print(f"state: {request.state.value}", file=stdout)
-    print("title:", file=stdout)
-    print(request.issue.title, file=stdout)
-    print("body:", file=stdout)
-    print(request.issue.body, file=stdout)
+    with pending_lock(
+        layout.family_pending_dir,
+        request_id,
+        layout.project_id,
+        snapshot=snapshot,
+    ) as locked:
+        request = locked.request
+        if request.issue is None or request.state not in {
+            PendingState.PENDING,
+            PendingState.UNKNOWN,
+        }:
+            raise ValueError("family pending request cannot be previewed")
+        _audit(
+            layout,
+            request_id,
+            now=now,
+            operation="preview",
+            status=request.state.value,
+            stage="validation",
+        )
+        print(f"request-id: {request.request_id}", file=stdout)
+        print(f"project: {request.project_id}", file=stdout)
+        print(f"repository: {binding.repository.slug}", file=stdout)
+        print(f"created-at: {request.created_at}", file=stdout)
+        print(f"expires-at: {request.expires_at}", file=stdout)
+        print(f"state: {request.state.value}", file=stdout)
+        print("title:", file=stdout)
+        print(request.issue.title, file=stdout)
+        print("body:", file=stdout)
+        print(request.issue.body, file=stdout)
     return 0
 
 
@@ -258,6 +276,51 @@ def _audit(
     )
 
 
+def _read_clock(clock: Callable[[], int]) -> int:
+    value = clock()
+    if type(value) is not int or value < 0:
+        raise ValueError("family clock is invalid")
+    return value
+
+
+def _terminal_fd(stdin: TextIO) -> int | None:
+    try:
+        descriptor = stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        return None
+    if type(descriptor) is not int or descriptor < 0:
+        return None
+    try:
+        return descriptor if os.isatty(descriptor) else None
+    except OSError:
+        return None
+
+
+def _read_exact_confirmation(stdin: TextIO, expected: str) -> bool:
+    return stdin.readline(_MAX_CONFIRMATION_CHARS) == expected
+
+
+def _validate_created_result(
+    value: object,
+    binding: FamilyBinding,
+    *,
+    expected_number: int | None = None,
+) -> CreatedIssue:
+    if type(value) is not CreatedIssue or type(value.number) is not int:
+        raise ValueError("family Issue result is invalid")
+    number = validate_issue_number(value.number)
+    if expected_number is not None and number != expected_number:
+        raise ValueError("family Issue result is invalid")
+    if type(value.url) is not str:
+        raise ValueError("family Issue result is invalid")
+    expected_url = (
+        f"https://github.com/{binding.repository.slug}/issues/{number}"
+    )
+    if value.url != expected_url:
+        raise ValueError("family Issue result is invalid")
+    return value
+
+
 def _expire_locked(layout: FamilyStateLayout, locked, *, now: int) -> None:
     transition_pending(locked, PendingState.EXPIRED)
     _audit(
@@ -276,29 +339,28 @@ def _approval_preview(
     *,
     stdin: TextIO,
     stdout: TextIO,
-    now: int,
+    clock: Callable[[], int],
 ):
-    if not stdin.isatty():
-        load_pending(layout.family_pending_dir, request_id)
+    if _terminal_fd(stdin) is None:
+        load_pending(
+            layout.family_pending_dir, request_id, layout.project_id
+        )
         _audit(
             layout,
             request_id,
-            now=now,
+            now=_read_clock(clock),
             operation="approve",
             status="denied",
             stage="validation",
         )
         print("approval refused: interactive TTY required", file=stdout)
         return None
-    request = load_pending(layout.family_pending_dir, request_id)
+    snapshot = snapshot_pending(
+        layout.family_pending_dir, request_id, layout.project_id
+    )
+    request = snapshot.request
     if request.state is not PendingState.PENDING or request.issue is None:
         raise ValueError("family pending request cannot be approved")
-    if now >= request.expires_at:
-        with pending_lock(layout.family_pending_dir, request_id) as locked:
-            if locked.request != request:
-                raise ValueError("family pending request changed")
-            _expire_locked(layout, locked, now=now)
-        raise ValueError("family pending request expired")
     binding = load_family_binding(layout.family_binding_file)
     print("External effect: create exactly one GitHub Issue", file=stdout)
     print(f"request-id: {request.request_id}", file=stdout)
@@ -309,19 +371,47 @@ def _approval_preview(
     print("body:", file=stdout)
     print(request.issue.body, file=stdout)
     print(f"Type exactly: approve {request.request_id}", file=stdout)
-    confirmation = stdin.readline()
-    if confirmation != f"approve {request.request_id}\n":
+    if not _read_exact_confirmation(
+        stdin, f"approve {request.request_id}\n"
+    ):
         _audit(
             layout,
             request.request_id,
-            now=now,
+            now=_read_clock(clock),
             operation="approve",
             status="denied",
             stage="validation",
         )
         print("approval cancelled", file=stdout)
         return None
-    return request, binding
+    return snapshot, binding
+
+
+@contextmanager
+def _approval_lock(
+    layout: FamilyStateLayout,
+    request_id: str,
+    snapshot,
+    clock: Callable[[], int],
+):
+    try:
+        with pending_lock(
+            layout.family_pending_dir,
+            request_id,
+            layout.project_id,
+            snapshot=snapshot,
+        ) as locked:
+            yield locked
+    except PendingSnapshotMismatch:
+        _audit(
+            layout,
+            request_id,
+            now=_read_clock(clock),
+            operation="approve",
+            status="denied",
+            stage="validation",
+        )
+        raise ValueError("family pending request changed") from None
 
 
 def approve_family_issue(
@@ -333,20 +423,24 @@ def approve_family_issue(
     creator,
     stdin: TextIO,
     stdout: TextIO,
-    now: int,
+    clock: Callable[[], int],
 ) -> int:
     preview = _approval_preview(
         layout,
         request_id,
         stdin=stdin,
         stdout=stdout,
-        now=now,
+        clock=clock,
     )
     if preview is None:
         return 1
-    previewed_request, previewed_binding = preview
-    creator = creator or FamilyIssueCreator()
-    with pending_lock(layout.family_pending_dir, request_id) as locked:
+    previewed_snapshot, previewed_binding = preview
+    previewed_request = previewed_snapshot.request
+    if creator is None:
+        creator = FamilyIssueCreator()
+    with _approval_lock(
+        layout, request_id, previewed_snapshot, clock
+    ) as locked:
         if (
             locked.request != previewed_request
             or locked.request.state is not PendingState.PENDING
@@ -355,21 +449,18 @@ def approve_family_issue(
             _audit(
                 layout,
                 request_id,
-                now=now,
+                now=_read_clock(clock),
                 operation="approve",
                 status="denied",
                 stage="validation",
             )
             raise ValueError("family pending request changed")
-        if now >= locked.request.expires_at:
-            _expire_locked(layout, locked, now=now)
-            raise ValueError("family pending request expired")
         current_binding = load_family_binding(layout.family_binding_file)
         if current_binding != previewed_binding:
             _audit(
                 layout,
                 request_id,
-                now=now,
+                now=_read_clock(clock),
                 operation="approve",
                 status="denied",
                 stage="binding",
@@ -381,7 +472,7 @@ def approve_family_issue(
             _audit(
                 layout,
                 request_id,
-                now=now,
+                now=_read_clock(clock),
                 operation="approve",
                 status="denied",
                 stage="token",
@@ -393,7 +484,7 @@ def approve_family_issue(
             _audit(
                 layout,
                 request_id,
-                now=now,
+                now=_read_clock(clock),
                 operation="approve",
                 status="denied",
                 stage="inventory",
@@ -403,18 +494,22 @@ def approve_family_issue(
             _audit(
                 layout,
                 request_id,
-                now=now,
+                now=_read_clock(clock),
                 operation="approve",
                 status="denied",
                 stage="binding",
             )
             raise ValueError("family binding changed")
+        observed_now = _read_clock(clock)
+        if observed_now >= locked.request.expires_at:
+            _expire_locked(layout, locked, now=observed_now)
+            raise ValueError("family pending request expired")
         transition_pending(locked, PendingState.SENDING)
         try:
             _audit(
                 layout,
                 request_id,
-                now=now,
+                now=observed_now,
                 operation="approve",
                 status="sending",
                 stage="send",
@@ -433,7 +528,7 @@ def approve_family_issue(
             _audit(
                 layout,
                 request_id,
-                now=now,
+                now=observed_now,
                 operation="approve",
                 status="error",
                 stage=error.stage,
@@ -444,7 +539,7 @@ def approve_family_issue(
             _audit(
                 layout,
                 request_id,
-                now=now,
+                now=observed_now,
                 operation="approve",
                 status="unknown",
                 stage=error.stage,
@@ -455,25 +550,20 @@ def approve_family_issue(
             _audit(
                 layout,
                 request_id,
-                now=now,
+                now=observed_now,
                 operation="approve",
                 status="unknown",
                 stage="send",
             )
             raise ValueError("family Issue send outcome is unknown") from None
-        if (
-            type(created) is not CreatedIssue
-            or created.url
-            != (
-                f"https://github.com/{current_binding.repository.slug}/issues/"
-                f"{created.number}"
-            )
-        ):
+        try:
+            created = _validate_created_result(created, current_binding)
+        except (TypeError, ValueError):
             transition_pending(locked, PendingState.UNKNOWN)
             _audit(
                 layout,
                 request_id,
-                now=now,
+                now=observed_now,
                 operation="approve",
                 status="unknown",
                 stage="response",
@@ -491,7 +581,7 @@ def approve_family_issue(
                 _audit(
                     layout,
                     request_id,
-                    now=now,
+                    now=observed_now,
                     operation="approve",
                     status="error",
                     stage="cleanup",
@@ -502,7 +592,7 @@ def approve_family_issue(
         _audit(
             layout,
             request_id,
-            now=now,
+            now=observed_now,
             operation="approve",
             status="created",
             stage="cleanup",
@@ -521,7 +611,9 @@ def reject_family_issue(
     stdout: TextIO,
     now: int,
 ) -> int:
-    with pending_lock(layout.family_pending_dir, request_id) as locked:
+    with pending_lock(
+        layout.family_pending_dir, request_id, layout.project_id
+    ) as locked:
         if locked.request.state is not PendingState.PENDING:
             raise ValueError("family pending request cannot be rejected")
         if now >= locked.request.expires_at:
@@ -566,8 +658,11 @@ def resolve_created_family_issue(
     stdout: TextIO,
     now: int,
 ) -> int:
-    creator = creator or FamilyIssueCreator()
-    with pending_lock(layout.family_pending_dir, request_id) as locked:
+    if creator is None:
+        creator = FamilyIssueCreator()
+    with pending_lock(
+        layout.family_pending_dir, request_id, layout.project_id
+    ) as locked:
         if (
             locked.request.state is not PendingState.UNKNOWN
             or locked.request.issue is None
@@ -606,14 +701,11 @@ def resolve_created_family_issue(
                 stage="reconcile",
             )
             raise ValueError("family Issue reconciliation failed") from None
-        expected_url = (
-            f"https://github.com/{binding.repository.slug}/issues/{issue_number}"
-        )
-        if (
-            type(created) is not CreatedIssue
-            or created.number != issue_number
-            or created.url != expected_url
-        ):
+        try:
+            created = _validate_created_result(
+                created, binding, expected_number=issue_number
+            )
+        except (TypeError, ValueError):
             _audit(
                 layout,
                 request_id,
@@ -666,10 +758,10 @@ def resolve_not_created_family_issue(
     stdout: TextIO,
     now: int,
 ) -> int:
-    request = load_pending(layout.family_pending_dir, request_id)
-    if request.state is not PendingState.UNKNOWN or request.issue is None:
-        raise ValueError("family pending request cannot be reconciled")
-    if not stdin.isatty():
+    if _terminal_fd(stdin) is None:
+        request = load_pending(
+            layout.family_pending_dir, request_id, layout.project_id
+        )
         _audit(
             layout,
             request_id,
@@ -680,13 +772,21 @@ def resolve_not_created_family_issue(
         )
         print("reconciliation refused: interactive TTY required", file=stdout)
         return 1
+    snapshot = snapshot_pending(
+        layout.family_pending_dir, request_id, layout.project_id
+    )
+    request = snapshot.request
+    if request.state is not PendingState.UNKNOWN or request.issue is None:
+        raise ValueError("family pending request cannot be reconciled")
     print(
         "WARNING: A later approve can create external state on GitHub.",
         file=stdout,
     )
     print(f"request-id: {request_id}", file=stdout)
     print(f"Type exactly: not-created {request_id}", file=stdout)
-    if stdin.readline() != f"not-created {request_id}\n":
+    if not _read_exact_confirmation(
+        stdin, f"not-created {request_id}\n"
+    ):
         _audit(
             layout,
             request_id,
@@ -697,7 +797,12 @@ def resolve_not_created_family_issue(
         )
         print("reconciliation cancelled", file=stdout)
         return 1
-    with pending_lock(layout.family_pending_dir, request_id) as locked:
+    with pending_lock(
+        layout.family_pending_dir,
+        request_id,
+        layout.project_id,
+        snapshot=snapshot,
+    ) as locked:
         if locked.request != request or locked.request.state is not PendingState.UNKNOWN:
             raise ValueError("family pending request changed")
         transition_pending(locked, PendingState.PENDING)
@@ -736,10 +841,20 @@ def doctor_family(
         checks.append(("FAIL", "binding", "invalid"))
         failures = True
     try:
-        _requests(layout)
+        requests = inspect_pending_store(
+            layout.family_pending_dir, layout.project_id
+        )
+        if any(request.state is PendingState.SENDING for request in requests):
+            raise ValueError("family pending recovery is required")
         checks.append(("PASS", "pending-invariants", "valid"))
     except Exception:
-        checks.append(("FAIL", "pending-invariants", "invalid"))
+        checks.append(("FAIL", "pending-invariants", "invalid or recovery required"))
+        failures = True
+    try:
+        validate_family_audit(layout.family_audit_file, layout.project_id)
+        checks.append(("PASS", "audit", "valid"))
+    except Exception:
+        checks.append(("FAIL", "audit", "invalid"))
         failures = True
     try:
         provider_factory(layout).get()
@@ -753,6 +868,23 @@ def doctor_family(
     return 1 if failures else 0
 
 
+def _recover_interrupted_sends(
+    layout: FamilyStateLayout, clock: Callable[[], int]
+) -> None:
+    recovered = initialize_pending_store(
+        layout.family_pending_dir, layout.project_id
+    )
+    for request in recovered:
+        _audit(
+            layout,
+            request.request_id,
+            now=_read_clock(clock),
+            operation="recover",
+            status="unknown",
+            stage="reconcile",
+        )
+
+
 def dispatch_family(
     arguments,
     layout: FamilyStateLayout,
@@ -762,11 +894,13 @@ def dispatch_family(
     provider_factory: Callable | None,
     inventory: FamilyInventory | None,
     creator,
-    now: int,
+    clock: Callable[[], int],
     approval_handler=approve_family_issue,
 ) -> int:
-    provider_factory = provider_factory or FamilyInstallationTokenProvider
-    inventory = inventory or LiveFamilyInventory()
+    if provider_factory is None:
+        provider_factory = FamilyInstallationTokenProvider
+    if inventory is None:
+        inventory = LiveFamilyInventory()
     if arguments.family_command == "bind":
         repository = Repository.parse(arguments.repository)
         if repository.slug != arguments.repository.lower():
@@ -778,14 +912,15 @@ def dispatch_family(
             inventory=inventory,
             stdout=stdout,
         )
-    if arguments.family_command == "list":
-        return print_family_list(layout, stdout)
     if arguments.family_command == "doctor":
         return doctor_family(
             layout,
             provider_factory=provider_factory,
             stdout=stdout,
         )
+    _recover_interrupted_sends(layout, clock)
+    if arguments.family_command == "list":
+        return print_family_list(layout, stdout)
     operation = arguments.family_issue_command
     if operation == "pending":
         return print_pending(layout, stdout)
@@ -794,7 +929,7 @@ def dispatch_family(
             layout,
             arguments.request_id,
             stdout,
-            now=now,
+            now=_read_clock(clock),
         )
     if operation == "approve":
         return approval_handler(
@@ -805,14 +940,14 @@ def dispatch_family(
             creator=creator,
             stdin=stdin,
             stdout=stdout,
-            now=now,
+            clock=clock,
         )
     if operation == "reject":
         return reject_family_issue(
             layout,
             arguments.request_id,
             stdout=stdout,
-            now=now,
+            now=_read_clock(clock),
         )
     if operation == "resolve-created":
         return resolve_created_family_issue(
@@ -823,7 +958,7 @@ def dispatch_family(
             inventory=inventory,
             creator=creator,
             stdout=stdout,
-            now=now,
+            now=_read_clock(clock),
         )
     if operation == "resolve-not-created":
         return resolve_not_created_family_issue(
@@ -831,6 +966,6 @@ def dispatch_family(
             arguments.request_id,
             stdin=stdin,
             stdout=stdout,
-            now=now,
+            now=_read_clock(clock),
         )
     raise ValueError("family Issue operation is not implemented")
