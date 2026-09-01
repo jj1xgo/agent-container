@@ -233,7 +233,7 @@ class RuffLintToolingTest(unittest.TestCase):
             '--build-arg "AGENT_CONTAINER_VERSION=$release_version"',
             '"agentctl $release_version"',
             "tests.integration.test_project_image_podman",
-            "AGENT_CONTAINER_INTEGRATION_BASE_IMAGE: ${{ env.RELEASE_CANDIDATE_IMAGE }}",
+            "AGENT_CONTAINER_INTEGRATION_BASE_IMAGE: localhost/agent-container:release-candidate",
         )
         for contract in required:
             with self.subTest(contract=contract):

@@ -136,7 +136,7 @@ jobs:
           PYTHONPATH: src
           AGENT_CONTAINER_RUN_PODMAN_INTEGRATION: "1"
           RELEASE_CANDIDATE_IMAGE: localhost/agent-container:release-candidate
-          AGENT_CONTAINER_INTEGRATION_BASE_IMAGE: ${{ env.RELEASE_CANDIDATE_IMAGE }}
+          AGENT_CONTAINER_INTEGRATION_BASE_IMAGE: localhost/agent-container:release-candidate
 
       - name: Record final storage
         if: always()
