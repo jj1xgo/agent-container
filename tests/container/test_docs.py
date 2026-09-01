@@ -882,8 +882,15 @@ class Phase4DocumentationTest(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("Current release: `v0.4.0`", readme)
-        self.assertIn("## [Unreleased]\n\n## [0.4.0] - 2026-08-29", changelog)
+        self.assertIn("Latest stable: `v0.4.1`", readme)
+        self.assertIn(
+            "## [Unreleased]\n\n## [0.4.1] - 2026-09-01"
+            "\n\n### Fixed\n\n"
+            "- `v0.4.0`は`v0.3.0`のresolver baseを保持していたため、"
+            "公開済みtagはimmutableのまま維持し、`v0.4.1`でexact-tag outputを修正しました。"
+            "\n\n## [0.4.0] - 2026-08-29",
+            changelog,
+        )
         self.assertIn(
             "[0.4.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.4.0",
             changelog,
@@ -1666,3 +1673,23 @@ class Phase4DocumentationTest(unittest.TestCase):
                 "bin/agentctl doctor agent-container --github-broker",
             ):
                 self.assertIn(command, body)
+
+
+class ReleaseVersionContractTest(unittest.TestCase):
+    def test_release_metadata_matches_public_docs(self) -> None:
+        from agent_container.release_metadata import (
+            DEVELOPMENT_VERSION,
+            RELEASE_TAG,
+            RELEASE_VERSION,
+        )
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn(f"Latest stable: `{RELEASE_TAG}`", readme)
+        self.assertIn(f"Development line: `{DEVELOPMENT_VERSION}`", readme)
+        self.assertIn(f"## [{RELEASE_VERSION}] - 2026-09-01", changelog)
+
+    def test_ci_records_resolved_version_in_job_summary(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("$GITHUB_STEP_SUMMARY", workflow)
+        self.assertIn("bin/agentctl --version", workflow)

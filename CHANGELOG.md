@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-01
+
+### Fixed
+
+- `v0.4.0`は`v0.3.0`のresolver baseを保持していたため、公開済みtagはimmutableのまま維持し、`v0.4.1`でexact-tag outputを修正しました。
+
 ## [0.4.0] - 2026-08-29
 
 ### Added
@@ -103,6 +109,7 @@
 
 通常のlocal image buildは既定で各agent CLIの`latest`を解決します。このbaselineは`v0.1.0`のCI再現用固定値であり、runtime dependencyを恒久固定するものではありません。
 
+[0.4.1]: https://github.com/jj1xgo/agent-container/releases/tag/v0.4.1
 [0.4.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.4.0
 [0.3.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.3.0
 [0.2.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.2.0
