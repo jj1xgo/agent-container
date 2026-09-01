@@ -151,6 +151,16 @@ class DevelopmentVersionTest(unittest.TestCase):
                 "0.2.0-dev.8+g123abcd",
             )
 
+    def test_empty_embedded_version_falls_back_to_maintenance_metadata(self) -> None:
+        with TemporaryDirectory() as temp:
+            self.assertEqual(
+                resolve_version(
+                    Path(temp),
+                    {"AGENT_CONTAINER_VERSION": ""},
+                ),
+                "0.4.1-dev.0",
+            )
+
     def test_rejects_embedded_versions_with_numeric_leading_zeroes(self) -> None:
         with TemporaryDirectory() as temp:
             for invalid in ("1.02.3", "1.2.3-01", "1.02.3-01+build"):
