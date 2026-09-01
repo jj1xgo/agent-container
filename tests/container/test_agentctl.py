@@ -4914,7 +4914,7 @@ class AgentCtlParserTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         self.assertRegex(
             stdout.getvalue(),
-            r"^agentctl (?:0\.3\.0|0\.4\.0-dev\.\d+"
+            r"^agentctl (?:0\.4\.1|0\.5\.0-dev\.\d+"
             r"(?:\+g[0-9a-f]{7}(?:\.dirty)?)?)\n$",
         )
 
