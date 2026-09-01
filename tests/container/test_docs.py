@@ -213,6 +213,35 @@ class RuffLintToolingTest(unittest.TestCase):
         for test_index in test_indexes:
             self.assertLess(lint_index, test_index)
 
+    # Break caught: a maintenance-release PR can build only the ordinary image,
+    # leaving its release metadata version unverified in the shipped image.
+    def test_ci_verifies_release_candidate_image_for_maintenance_pull_requests(
+        self,
+    ) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        step_name = "      - name: Verify release candidate image\n"
+        self.assertIn(step_name, workflow)
+        start = workflow.index(step_name)
+        end = workflow.index("\n      - name:", start + 1)
+        release_step = workflow[start:end]
+
+        required = (
+            "if: github.event_name == 'pull_request' && github.base_ref == 'release/0.4'",
+            "from agent_container.release_metadata import RELEASE_VERSION; print(RELEASE_VERSION)",
+            "RELEASE_CANDIDATE_IMAGE: localhost/agent-container:release-candidate",
+            '--tag "$RELEASE_CANDIDATE_IMAGE"',
+            '--build-arg "AGENT_CONTAINER_VERSION=$release_version"',
+            '"agentctl $release_version"',
+            "tests.integration.test_project_image_podman",
+            "AGENT_CONTAINER_INTEGRATION_BASE_IMAGE: localhost/agent-container:release-candidate",
+        )
+        for contract in required:
+            with self.subTest(contract=contract):
+                self.assertIn(contract, release_step)
+                self.assertEqual(release_step.count(contract), 1)
+
+        self.assertNotIn("0.4.1", release_step)
+
     def test_production_image_does_not_include_ruff_tooling(self) -> None:
         containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
         self.assertNotIn("requirements-lint.txt", containerfile)

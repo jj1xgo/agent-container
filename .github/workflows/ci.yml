@@ -117,6 +117,27 @@ jobs:
           AGENT_CONTAINER_RUN_PODMAN_INTEGRATION: "1"
           AGENT_CONTAINER_INTEGRATION_BASE_IMAGE: ${{ env.BASE_IMAGE }}
 
+      - name: Verify release candidate image
+        if: github.event_name == 'pull_request' && github.base_ref == 'release/0.4'
+        run: |
+          release_version="$(PYTHONPATH=src python3 -c 'from agent_container.release_metadata import RELEASE_VERSION; print(RELEASE_VERSION)')"
+          podman build \
+            --build-arg "NODE_VERSION=$NODE_VERSION" \
+            --build-arg "CODEX_VERSION=$CODEX_VERSION" \
+            --build-arg "CLAUDE_VERSION=$CLAUDE_VERSION" \
+            --build-arg "AGENT_CONTAINER_VERSION=$release_version" \
+            --build-arg AGENT_CLI_CACHEBUST=ci-v1 \
+            --tag "$RELEASE_CANDIDATE_IMAGE" \
+            --file Containerfile \
+            .
+          test "$(podman run --rm "$RELEASE_CANDIDATE_IMAGE" python3 -m agent_container.agentctl --version)" = "agentctl $release_version"
+          python3 -m unittest tests.integration.test_project_image_podman -v
+        env:
+          PYTHONPATH: src
+          AGENT_CONTAINER_RUN_PODMAN_INTEGRATION: "1"
+          RELEASE_CANDIDATE_IMAGE: localhost/agent-container:release-candidate
+          AGENT_CONTAINER_INTEGRATION_BASE_IMAGE: localhost/agent-container:release-candidate
+
       - name: Record final storage
         if: always()
         run: |
