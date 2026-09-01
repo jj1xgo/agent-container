@@ -856,7 +856,7 @@ class FamilyIssueBrokerDocumentationTest(unittest.TestCase):
     def test_readme_and_changelog_advertise_shipped_scope_without_stale_claim(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        unreleased = changelog.split("## [0.4.0]", 1)[0]
+        unreleased = changelog.split("## [0.4.1]", 1)[0]
         self.assertIn("family Issue作成broker", readme)
         self.assertIn("docs/family-issue-create-broker.md", readme)
         self.assertIn("family専用GitHub App", unreleased)
@@ -1122,7 +1122,7 @@ class Phase4DocumentationTest(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("Current release: `v0.4.0`", readme)
+        self.assertIn("Latest stable: `v0.4.1`", readme)
         self.assertIn("## [Unreleased]", changelog)
         self.assertIn("## [0.4.0] - 2026-08-29", changelog)
         self.assertIn(
@@ -1907,3 +1907,30 @@ class Phase4DocumentationTest(unittest.TestCase):
                 "bin/agentctl doctor agent-container --github-broker",
             ):
                 self.assertIn(command, body)
+
+
+class ReleaseVersionContractTest(unittest.TestCase):
+    def test_release_metadata_matches_public_docs(self) -> None:
+        from agent_container.release_metadata import (
+            DEVELOPMENT_VERSION,
+            RELEASE_TAG,
+            RELEASE_VERSION,
+        )
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+        self.assertIn(f"Latest stable: `{RELEASE_TAG}`", readme)
+        self.assertIn(
+            f"Development branch: `main` (`{DEVELOPMENT_VERSION}`)", readme
+        )
+        self.assertIn(f"git clone --branch {RELEASE_TAG} --depth 1", readme)
+        self.assertIn("git clone https://github.com/jj1xgo/agent-container.git", readme)
+        self.assertIn(f"## [{RELEASE_VERSION}] - 2026-09-01", changelog)
+
+    def test_ci_records_resolved_version_in_job_summary(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("Record agent-container version", workflow)
+        self.assertIn("$GITHUB_STEP_SUMMARY", workflow)
+        self.assertIn("bin/agentctl --version", workflow)

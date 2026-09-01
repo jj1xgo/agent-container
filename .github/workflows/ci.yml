@@ -26,6 +26,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Record agent-container version
+        run: |
+          printf '### agent-container version\n\n```text\n' >> "$GITHUB_STEP_SUMMARY"
+          bin/agentctl --version >> "$GITHUB_STEP_SUMMARY"
+          printf '```\n' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Install lint dependency
         run: |
           python3 -m pip install --disable-pip-version-check --no-deps \
