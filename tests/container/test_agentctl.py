@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import threading
@@ -56,6 +57,12 @@ from agent_container.project_image import project_image_name
 from agent_container.profile import seed_codex_home
 from agent_container.state import ProjectRecord
 from agent_container.state import Repository
+
+
+VERSION_OUTPUT_PATTERN = re.compile(
+    r"^agentctl (?:0\.4\.1|0\.5\.0-dev\.\d+"
+    r"\+g[0-9a-f]{7}(?:\.dirty)?)\n$"
+)
 
 
 def successful_podman_result(spec):
@@ -4912,10 +4919,20 @@ class AgentCtlParserTest(unittest.TestCase):
             parser().parse_args(["--version"])
 
         self.assertEqual(raised.exception.code, 0)
-        self.assertRegex(
-            stdout.getvalue(),
-            r"^agentctl (?:0\.4\.1|0\.5\.0-dev\.\d+"
-            r"(?:\+g[0-9a-f]{7}(?:\.dirty)?)?)\n$",
+        self.assertRegex(stdout.getvalue(), VERSION_OUTPUT_PATTERN)
+        repository_root = Path(agentctl.__file__).resolve().parents[2]
+        commit = subprocess.run(
+            ("git", "-C", str(repository_root), "rev-parse", "--short=7", "HEAD"),
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        self.assertIn(f"+g{commit}", stdout.getvalue())
+
+    def test_main_development_version_pattern_requires_commit_identity(self) -> None:
+        self.assertNotRegex(
+            "agentctl 0.5.0-dev.0\n",
+            VERSION_OUTPUT_PATTERN,
         )
 
     def test_new_command_contract(self) -> None:
