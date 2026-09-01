@@ -4,11 +4,14 @@ from pathlib import Path
 import re
 import subprocess
 
+from .release_metadata import (
+    DEVELOPMENT_BASE_TAG,
+    DEVELOPMENT_VERSION,
+    FALLBACK_VERSION,
+    RELEASE_TAG,
+    RELEASE_VERSION,
+)
 
-_FALLBACK_VERSION = "0.4.0-dev.0"
-_RELEASE_TAG = "v0.3.0"
-_RELEASE_VERSION = _RELEASE_TAG.removeprefix("v")
-_DEVELOPMENT_VERSION = "0.4.0-dev"
 _NUMERIC_IDENTIFIER = r"(?:0|[1-9][0-9]*)"
 _PRERELEASE_IDENTIFIER = (
     rf"(?:{_NUMERIC_IDENTIFIER}|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -54,7 +57,7 @@ def resolve_version(
     except (OSError, subprocess.SubprocessError, ValueError):
         if configured is not None and _SEMVER.fullmatch(configured) is not None:
             return configured
-        return _FALLBACK_VERSION
+        return FALLBACK_VERSION
 
     try:
         exact_tag = _git(
@@ -63,24 +66,30 @@ def resolve_version(
             "--tags",
             "--exact-match",
             "--match",
-            _RELEASE_TAG,
+            RELEASE_TAG,
         )
     except (OSError, subprocess.SubprocessError):
         exact_tag = ""
-    if not dirty and exact_tag == _RELEASE_TAG:
-        return _RELEASE_VERSION
+    if not dirty and exact_tag == RELEASE_TAG:
+        return RELEASE_VERSION
 
     try:
-        _git(repository_root, "merge-base", "--is-ancestor", _RELEASE_TAG, "HEAD")
+        _git(
+            repository_root,
+            "merge-base",
+            "--is-ancestor",
+            DEVELOPMENT_BASE_TAG,
+            "HEAD",
+        )
         distance = _git(
             repository_root,
             "rev-list",
             "--count",
             "--first-parent",
-            f"{_RELEASE_TAG}..HEAD",
+            f"{DEVELOPMENT_BASE_TAG}..HEAD",
         )
     except (OSError, subprocess.SubprocessError):
         distance = "0"
 
     suffix = ".dirty" if dirty else ""
-    return f"{_DEVELOPMENT_VERSION}.{distance}+g{commit}{suffix}"
+    return f"{DEVELOPMENT_VERSION}.{distance}+g{commit}{suffix}"
