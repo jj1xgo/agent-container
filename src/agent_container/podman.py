@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import signal
 import subprocess
+from tempfile import TemporaryDirectory
 import time
 
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
@@ -247,7 +248,7 @@ def _family_runtime_args(
         "AGENT_FAMILY_CAPABILITY": family.capability,
     }
     preserved_fds = family.pass_fds
-    if len(preserved_fds) != 1 or preserved_fds[0] < 3:
+    if preserved_fds:
         raise ValueError("family runtime mount is invalid")
     if (
         not socket_dir.is_absolute()
@@ -259,7 +260,6 @@ def _family_runtime_args(
         raise ValueError("family runtime mount is invalid")
     family.revalidate()
     arguments = [
-        f"--preserve-fd={preserved_fds[0]}",
         "--mount",
         _mount(family.mount_source, _FAMILY_SOCKET_TARGET),
         "--env",
@@ -277,9 +277,59 @@ def _runtime_launcher_args(
 ) -> list[str]:
     arguments = [_RUNTIME_LAUNCHER]
     if family is not None:
+        arguments.append("--registration-gate")
+    if family is not None and family.pass_fds:
         arguments.append(f"--close-fd={family.pass_fds[0]}")
     arguments.append("--")
     return arguments
+
+
+def _family_gate_argv(
+    argv: tuple[str, ...], gate_fd: int, pidfile: Path
+) -> tuple[str, ...]:
+    placeholder = "--registration-gate"
+    if (
+        argv[:2] != ("podman", "run")
+        or gate_fd < 3
+        or argv.count(placeholder) != 1
+    ):
+        raise RuntimeError("family runtime launch handoff failed")
+    placeholder_index = argv.index(placeholder)
+    if (
+        placeholder_index == 0
+        or argv[placeholder_index - 1] != _RUNTIME_LAUNCHER
+    ):
+        raise RuntimeError("family runtime launch handoff failed")
+    launched = list(argv)
+    launched[placeholder_index] = f"--registration-gate-fd={gate_fd}"
+    launched[2:2] = [f"--pidfile={pidfile}", f"--preserve-fd={gate_fd}"]
+    return tuple(launched)
+
+
+def _wait_for_container_pid(
+    pidfile: Path,
+    process: subprocess.Popen[str],
+) -> int:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("podman exited before family registration")
+        try:
+            rendered_pid = pidfile.read_text("ascii").strip()
+        except (OSError, UnicodeError):
+            rendered_pid = ""
+        if rendered_pid.isdigit() and int(rendered_pid) > 0:
+            pid = int(rendered_pid)
+            try:
+                process_stat = Path(f"/proc/{pid}/stat").read_text("ascii")
+            except (OSError, UnicodeError):
+                pass
+            else:
+                closing = process_stat.rfind(")")
+                if closing >= 0 and len(process_stat) >= closing + 3:
+                    return pid
+        time.sleep(0.05)
+    raise RuntimeError("family runtime pid unavailable")
 
 
 def build_image_spec(
@@ -779,40 +829,53 @@ def run_command_supervised(
     for signum in watched_signals:
         signal.signal(signum, handle_signal)
     process = None
+    registration_temp: TemporaryDirectory[str] | None = None
+    gate_read_fd: int | None = None
+    gate_write_fd: int | None = None
     gateway_failed = False
     failure: BaseException | None = None
     try:
-        launch_argv = spec.argv
         if family_runtime is not None:
             if family_mount is None:
                 raise FamilyRuntimeError("family runtime mount is unavailable")
             family_runtime.validate_mount()
-            launch_argv = (
-                "/bin/sh",
-                "-c",
-                'kill -STOP $$; exec "$@"',
-                "agent-runtime",
-                *spec.argv,
-            )
+            registration_temp = TemporaryDirectory(prefix="agent-family-registration-")
+            registration_root = Path(registration_temp.name)
+            registration_root.chmod(0o700)
+            pidfile = registration_root / "container.pid"
+            gate_read_fd, gate_write_fd = os.pipe2(os.O_CLOEXEC)
+            launch_argv = _family_gate_argv(spec.argv, gate_read_fd, pidfile)
+            launch_fds = (*spec.pass_fds, gate_read_fd)
+        else:
+            launch_argv = spec.argv
+            launch_fds = spec.pass_fds
         process = subprocess.Popen(
             launch_argv,
             env=environment,
             text=True,
-            pass_fds=spec.pass_fds,
+            pass_fds=launch_fds,
         )
         if family_runtime is not None:
+            os.close(gate_read_fd)
+            gate_read_fd = None
             try:
-                stopped_pid, stopped_status = os.waitpid(process.pid, os.WUNTRACED)
-                if (
-                    stopped_pid != process.pid
-                    or not os.WIFSTOPPED(stopped_status)
-                    or os.WSTOPSIG(stopped_status) != signal.SIGSTOP
-                ):
-                    raise RuntimeError("family runtime launch handoff failed")
-                family_runtime.register_runtime(process.pid)
+                container_name = (
+                    egress.container_name
+                    if egress is not None
+                    else family_mount.container_name
+                )
+                container_pid = _wait_for_container_pid(pidfile, process)
+                family_runtime.register_runtime(container_pid)
+                if os.write(gate_write_fd, b"1") != 1:
+                    raise RuntimeError("family runtime gate release failed")
+                os.close(gate_write_fd)
+                gate_write_fd = None
             except BaseException:
+                if gate_write_fd is not None:
+                    os.close(gate_write_fd)
+                    gate_write_fd = None
                 try:
-                    os.kill(process.pid, signal.SIGKILL)
+                    _stop_named_container(container_name)
                 finally:
                     try:
                         process.wait(timeout=5)
@@ -820,7 +883,6 @@ def run_command_supervised(
                         pass
                 process = None
                 raise
-            os.kill(process.pid, signal.SIGCONT)
         while process.poll() is None and not interrupted:
             if gateway is not None and gateway.wait_failed(0.1):
                 gateway_failed = True
@@ -834,6 +896,12 @@ def run_command_supervised(
     finally:
         for signum in watched_signals:
             signal.signal(signum, previous_handlers[signum])
+        if gate_read_fd is not None:
+            os.close(gate_read_fd)
+        if gate_write_fd is not None:
+            os.close(gate_write_fd)
+        if registration_temp is not None:
+            registration_temp.cleanup()
 
     if process is None:
         assert failure is not None

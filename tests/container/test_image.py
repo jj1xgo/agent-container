@@ -7,6 +7,7 @@ import subprocess
 import shutil
 import sys
 from tempfile import TemporaryDirectory
+import time
 import unittest
 
 
@@ -24,6 +25,69 @@ def containerignore_includes(path: str, patterns: list[str]) -> bool:
 
 
 class ContainerImageContractTest(unittest.TestCase):
+    def test_runtime_launcher_waits_for_registration_gate_before_exec(self) -> None:
+        with TemporaryDirectory() as temp:
+            marker = Path(temp) / "executed"
+            read_fd, write_fd = os.pipe()
+            process = subprocess.Popen(
+                (
+                    str(ROOT / "container/bin/agent-runtime-launcher"),
+                    f"--registration-gate-fd={read_fd}",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "import sys; from pathlib import Path; Path(sys.argv[1]).touch()",
+                    str(marker),
+                ),
+                pass_fds=(read_fd,),
+            )
+            os.close(read_fd)
+            try:
+                time.sleep(0.1)
+                self.assertIsNone(process.poll())
+                self.assertFalse(marker.exists())
+                self.assertEqual(os.write(write_fd, b"1"), 1)
+            finally:
+                os.close(write_fd)
+            self.assertEqual(process.wait(timeout=5), 0)
+            self.assertTrue(marker.exists())
+
+    def test_runtime_launcher_rejects_invalid_registration_gate(self) -> None:
+        malformed = subprocess.run(
+            (
+                str(ROOT / "container/bin/agent-runtime-launcher"),
+                "--registration-gate-fd=2",
+                "--",
+                "/bin/true",
+            ),
+            check=False,
+        )
+        self.assertEqual(malformed.returncode, 64)
+
+        for release in (b"", b"0"):
+            with self.subTest(release=release):
+                read_fd, write_fd = os.pipe()
+                try:
+                    if release:
+                        self.assertEqual(os.write(write_fd, release), 1)
+                    os.close(write_fd)
+                    write_fd = -1
+                    launched = subprocess.run(
+                        (
+                            str(ROOT / "container/bin/agent-runtime-launcher"),
+                            f"--registration-gate-fd={read_fd}",
+                            "--",
+                            "/bin/true",
+                        ),
+                        pass_fds=(read_fd,),
+                        check=False,
+                    )
+                finally:
+                    os.close(read_fd)
+                    if write_fd >= 0:
+                        os.close(write_fd)
+                self.assertEqual(launched.returncode, 70)
+
     def test_runtime_launcher_closes_exact_fd_before_agent_exec(self) -> None:
         with TemporaryDirectory() as temp:
             descriptor = os.open(temp, os.O_RDONLY | os.O_DIRECTORY)

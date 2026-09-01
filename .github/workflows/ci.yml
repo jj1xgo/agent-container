@@ -121,14 +121,28 @@ jobs:
 
       - name: Run real Podman integration tests
         run: |
-          python3 -m unittest \
-            tests.integration.test_project_image_podman \
-            tests.integration.test_egress_podman \
-            -v
+          podman_log=$(mktemp)
+          trap 'rm -f "$podman_log"' EXIT
+          if python3 -m unittest \
+              tests.integration.test_project_image_podman \
+              tests.integration.test_egress_podman \
+              tests.integration.test_family_intake_podman \
+              -v 2>"$podman_log"; then
+            podman_status=0
+          else
+            podman_status=$?
+          fi
+          cat "$podman_log" >&2
+          test "$podman_status" -eq 0
+          grep -F "Ran 14 tests" "$podman_log"
+          if grep -F "skipped" "$podman_log"; then
+            exit 1
+          fi
         env:
           PYTHONPATH: src
           AGENT_CONTAINER_RUN_PODMAN_INTEGRATION: "1"
           AGENT_CONTAINER_INTEGRATION_BASE_IMAGE: ${{ env.BASE_IMAGE }}
+          AGENT_FAMILY_TEST_IMAGE: ${{ env.BASE_IMAGE }}
 
       - name: Record final storage
         if: always()

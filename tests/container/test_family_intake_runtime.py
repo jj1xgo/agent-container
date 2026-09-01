@@ -1,5 +1,4 @@
 import ast
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -77,6 +76,25 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
         }
         values.update(changes)
         return FamilyIntakeRuntime.create(**values)  # type: ignore[arg-type]
+
+    # Break caught: first runtime startup requiring callers to pre-create
+    # internal pending and audit directories.
+    def test_start_initializes_fresh_project_storage(self) -> None:
+        self.layout.family_audit_file.parent.rmdir()
+        self.layout.family_pending_dir.rmdir()
+
+        runtime = self.runtime()
+        with patch(
+            "agent_container.family_intake_runtime.initialize_pending_store",
+            side_effect=RuntimeError("controlled recovery stop"),
+        ), self.assertRaises(FamilyIntakeRuntimeError):
+            runtime.start()
+        for directory in (
+            self.layout.family_pending_dir,
+            self.layout.family_audit_file.parent,
+        ):
+            self.assertTrue(directory.is_dir())
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
 
     # Break caught: future Podman wiring needing to reconstruct or leak host runtime values.
     def test_mount_contains_only_socket_directory_capability_and_exact_environment(self) -> None:
@@ -177,31 +195,8 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
                 "AGENT_FAMILY_CAPABILITY",
             })
             self.assertFalse(runtime.session.consumed)
-            self.assertEqual(len(mount.pass_fds), 1)
-            self.assertGreaterEqual(mount.pass_fds[0], 3)
-            self.assertTrue(
-                fcntl.fcntl(mount.pass_fds[0], fcntl.F_GETFD)
-                & fcntl.FD_CLOEXEC
-            )
-            self.assertTrue(stat.S_ISSOCK(os.fstat(mount.pass_fds[0]).st_mode))
-            with self.assertRaises(OSError):
-                os.open(
-                    "../..",
-                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                    dir_fd=mount.pass_fds[0],
-                )
-            try:
-                pinned_socket = socket.fromfd(
-                    mount.pass_fds[0], socket.AF_UNIX, socket.SOCK_STREAM
-                )
-            except OSError:
-                pass
-            else:
-                try:
-                    with self.assertRaises(OSError):
-                        pinned_socket.accept()
-                finally:
-                    pinned_socket.close()
+            self.assertEqual(mount.pass_fds, ())
+            self.assertEqual(mount.mount_source, mount.socket_path)
 
         self.assertFalse(run_dir.exists())
         runtime.close()

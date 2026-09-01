@@ -277,6 +277,32 @@ class EgressDocumentationTest(unittest.TestCase):
         self.assertIn("AGENT_CONTAINER_INTEGRATION_BASE_IMAGE:", workflow)
         self.assertNotIn("continue-on-error", workflow)
 
+    # Break caught: CI reporting a green Podman job while omitting the Family
+    # runtime gate, accepting skipped tests, or running an incomplete suite.
+    def test_ci_requires_complete_family_podman_gate_without_skips(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        start = workflow.index("      - name: Run real Podman integration tests\n")
+        end = workflow.index("\n      - name:", start + 1)
+        podman_step = workflow[start:end]
+        required = (
+            "tests.integration.test_project_image_podman",
+            "tests.integration.test_egress_podman",
+            "tests.integration.test_family_intake_podman",
+            'test "$podman_status" -eq 0',
+            'grep -F "Ran 14 tests" "$podman_log"',
+            'if grep -F "skipped" "$podman_log"',
+            "AGENT_FAMILY_TEST_IMAGE: ${{ env.BASE_IMAGE }}",
+        )
+
+        def assert_complete(step: str) -> None:
+            for contract in required:
+                self.assertEqual(step.count(contract), 1, contract)
+
+        assert_complete(podman_step)
+        for contract in required:
+            with self.subTest(missing=contract), self.assertRaises(AssertionError):
+                assert_complete(podman_step.replace(contract, "", 1))
+
     def test_operator_and_smoke_guides_define_fail_closed_evidence_contract(
         self,
     ) -> None:

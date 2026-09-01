@@ -35,6 +35,7 @@ from agent_container.egress_broker_runtime import EgressRuntimeMount
 
 _IMAGE = os.environ.get("AGENT_FAMILY_TEST_IMAGE", "")
 _ANCESTOR_DEPTH = 8
+_INSPECTION_READY_TIMEOUT = 15
 
 
 def _ancestor_sentinel_reachable(
@@ -172,6 +173,25 @@ def _release_marker(path: Path) -> None:
         _validate_released_marker(path)
         return
     os.close(descriptor)
+
+
+def _inspection_runtime_surface(inspected: dict) -> str:
+    """Render only host-controlled fields that can expose family secrets."""
+
+    config = inspected.get("Config")
+    host_config = inspected.get("HostConfig")
+    return json.dumps(
+        {
+            "Env": config.get("Env", ()) if type(config) is dict else (),
+            "Binds": (
+                host_config.get("Binds", ())
+                if type(host_config) is dict
+                else ()
+            ),
+            "Mounts": inspected.get("Mounts", ()),
+        },
+        sort_keys=True,
+    )
 
 
 def _podman_prerequisite() -> str | None:
@@ -358,6 +378,19 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
         self.assertIn("os.fstat", _PROBE_SCRIPT)
         self.assertIn("intake.sock", _PROBE_SCRIPT)
         self.assertIn("SystemExit(94)", _PROBE_SCRIPT)
+        inspected = {
+            "Config": {
+                "Cmd": ["grep", "family/roadmap"],
+                "Env": ["SAFE=value", "SECRET=repository_id"],
+            },
+            "HostConfig": {"Binds": ["/private-key.pem:/run/key:ro"]},
+            "Mounts": [{"Source": "/family/pending", "Destination": "/data"}],
+        }
+        surface = _inspection_runtime_surface(inspected)
+        self.assertNotIn("family/roadmap", surface)
+        self.assertIn("repository_id", surface)
+        self.assertIn("private-key.pem", surface)
+        self.assertIn("family/pending", surface)
 
     def test_both_real_specs_have_pinned_fd_shape_without_podman(self) -> None:
         state = StateLayout(Path("/state"), "demo")
@@ -405,21 +438,28 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
                 ),
             )
         for spec in specs:
-            self.assertEqual(spec.pass_fds, (78,))
-            self.assertEqual(spec.argv.count("--preserve-fd=78"), 1)
+            self.assertEqual(spec.pass_fds, ())
+            self.assertNotIn("--preserve-fd=77", spec.argv)
             self.assertEqual(
                 spec.argv.count(
-                    "type=bind,src=/proc/self/fd/78,"
+                    f"type=bind,src={mount.socket_path},"
                     "dst=/run/agent-family/intake.sock"
                 ),
                 1,
             )
-            self.assertLess(spec.argv.index("--preserve-fd=78"), spec.argv.index("image"))
-            self.assertNotIn(77, spec.pass_fds)
             image_index = spec.argv.index("image")
             self.assertEqual(
                 spec.argv[image_index + 1 : image_index + 4],
-                ("agent-runtime-launcher", "--close-fd=78", "--"),
+                ("agent-runtime-launcher", "--registration-gate", "--"),
+            )
+            self.assertFalse(
+                any(
+                    argument.startswith("--registration-gate-fd=")
+                    for argument in spec.argv
+                )
+            )
+            self.assertFalse(
+                any(argument.startswith("--preserve-fd=") for argument in spec.argv)
             )
             if "agent-egress-runtime" in spec.argv:
                 self.assertGreater(
@@ -530,10 +570,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                         state.workspace, marker_id
                     )
                     marker_paths = (ready_marker, done_marker)
-                    payload = (
-                        f"test ! -e /proc/self/fd/{mount.pass_fds[0]}; "
-                        + _probe_script(marker_id, sentinel_name)
-                    )
+                    payload = _probe_script(marker_id, sentinel_name)
                     egress = None
                     if with_egress:
                         egress_dir = root / "egress-fixture" / agent
@@ -565,7 +602,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     )
 
                     def inspect_running_container():
-                        deadline = time.monotonic() + 5
+                        deadline = time.monotonic() + _INSPECTION_READY_TIMEOUT
                         try:
                             while time.monotonic() < deadline:
                                 if _marker_exists(ready_marker):
@@ -597,6 +634,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     inspected = json.loads(inspection[0].stdout)
                     self.assertIs(type(inspected), list)
                     self.assertEqual(len(inspected), 1)
+                    runtime_surface = _inspection_runtime_surface(inspected[0])
                     family_mounts = [
                         item
                         for item in inspected[0].get("Mounts", ())
@@ -614,11 +652,11 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                         "family/roadmap", "repository_id", "private-key.pem",
                         str(layout.family_pending_dir), "family issue approve",
                     ):
-                        self.assertNotIn(forbidden, inspection[0].stdout)
+                        self.assertNotIn(forbidden, runtime_surface)
                     self.assertEqual(completed.returncode, 0)
                     pending = list_pending(layout.family_pending_dir, "demo")
                     self.assertEqual(len(pending), 1)
-                    rendered = " ".join(argv)
+                    rendered = " ".join(base.argv)
                     for forbidden in (
                         str(layout.family_app_file),
                         str(layout.family_private_key_file),
@@ -682,14 +720,19 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                 failed_argv = failed_base.argv[: failed_launcher_end + 1] + (
                     "/bin/sh", "-c", "sleep 30",
                 )
+                failed_container_name = (
+                    egress.container_name
+                    if egress is not None
+                    else failed_mount.container_name
+                )
 
                 def fail_live_broker():
-                    deadline = time.monotonic() + 5
+                    deadline = time.monotonic() + _INSPECTION_READY_TIMEOUT
                     while time.monotonic() < deadline:
                         exists = subprocess.run(
                             (
                                 "podman", "container", "exists",
-                                failed_mount.container_name,
+                                failed_container_name,
                             ),
                             check=False,
                             timeout=5,
