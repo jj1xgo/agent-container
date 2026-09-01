@@ -271,15 +271,18 @@ class DevelopmentRoadmapDocumentationTest(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("[開発ロードマップ](docs/development-roadmap.md)", readme)
 
-    def test_roadmap_normalizes_future_phases_and_records_governance(self) -> None:
+    def test_roadmap_has_one_ordered_phase_sequence_and_governance(self) -> None:
         roadmap = (ROOT / "docs/development-roadmap.md").read_text(
             encoding="utf-8"
         )
-        for phase in range(5, 19):
+        for phase in range(1, 14):
             self.assertIn(f"| Phase {phase} |", roadmap)
         self.assertNotIn("| Phase 0 |", roadmap)
+        self.assertNotIn("| Phase 14 |", roadmap)
+        self.assertIn("現在地は**Phase 5**", roadmap)
+        self.assertIn("旧Phase番号は現在の進捗管理に使用しない", roadmap)
         self.assertIn("## 当初順序から変更した理由", roadmap)
-        self.assertIn("## 現在の推奨実装順", roadmap)
+        self.assertIn("## 現在の実施順", roadmap)
         self.assertIn("## 更新規則", roadmap)
         self.assertIn("roadmapの唯一の原本にはしない", roadmap)
 
