@@ -266,6 +266,24 @@ class RuffLintToolingTest(unittest.TestCase):
             self.assertEqual(mutated, RUFF_CONFIG)
 
 
+class DevelopmentRoadmapDocumentationTest(unittest.TestCase):
+    def test_readme_links_the_tracked_development_roadmap(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("[開発ロードマップ](docs/development-roadmap.md)", readme)
+
+    def test_roadmap_normalizes_future_phases_and_records_governance(self) -> None:
+        roadmap = (ROOT / "docs/development-roadmap.md").read_text(
+            encoding="utf-8"
+        )
+        for phase in range(5, 19):
+            self.assertIn(f"| Phase {phase} |", roadmap)
+        self.assertNotIn("| Phase 0 |", roadmap)
+        self.assertIn("## 当初順序から変更した理由", roadmap)
+        self.assertIn("## 現在の推奨実装順", roadmap)
+        self.assertIn("## 更新規則", roadmap)
+        self.assertIn("roadmapの唯一の原本にはしない", roadmap)
+
+
 class EgressDocumentationTest(unittest.TestCase):
     def test_ci_runs_egress_socket_and_podman_gates_without_soft_failure(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
