@@ -20,6 +20,8 @@ from agent_container.family_state import load_family_binding
 from agent_container.family_runtime_mount import FamilyRuntimeMount
 from agent_container.family_runtime_mount import FamilyRuntimeError
 from agent_container.state import ensure_private_directory
+from agent_container.state import validate_agent
+from agent_container.state import validate_project_id
 
 
 _CAPABILITY = re.compile(r"^[A-Za-z0-9_-]{43}$")
@@ -57,6 +59,8 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
     layout: FamilyStateLayout
     clock: Callable[[], int] = field(default=lambda: int(time.time()), repr=False)
     random_bytes: Callable[[int], bytes] = field(default=os.urandom, repr=False)
+    agent: str = field(kw_only=True)
+    repository: str = field(kw_only=True)
     session: FamilyIntakeSession | None = field(default=None, init=False)
     _listener: socket.socket | None = field(default=None, init=False, repr=False)
     _client: socket.socket | None = field(default=None, init=False, repr=False)
@@ -84,12 +88,25 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
         *,
         clock: Callable[[], int] = lambda: int(time.time()),
         random_bytes: Callable[[int], bytes] = os.urandom,
+        agent: str,
+        repository: str,
     ) -> "FamilyIntakeRuntime":
         if type(layout) is not FamilyStateLayout:
             raise ValueError("family intake runtime is invalid")
         if not callable(clock) or not callable(random_bytes):
             raise ValueError("family intake runtime is invalid")
-        return cls(layout, clock, random_bytes)
+        try:
+            agent = validate_agent(agent)
+            repository = validate_project_id(repository)
+        except (TypeError, ValueError):
+            raise ValueError("family intake runtime is invalid") from None
+        return cls(
+            layout=layout,
+            clock=clock,
+            random_bytes=random_bytes,
+            agent=agent,
+            repository=repository,
+        )
 
     def _create_run_directory(self) -> Path:
         ensure_private_directory(self.layout.root)
@@ -170,6 +187,8 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
                 store=self.layout.family_pending_dir,
                 binding_path=self.layout.family_binding_file,
                 audit_path=self.layout.family_audit_file,
+                agent=self.agent,
+                repository=self.repository,
                 owner_uid=os.getuid(),
                 clock=self.clock,
                 random_bytes=self.random_bytes,

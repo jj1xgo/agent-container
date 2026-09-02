@@ -8,6 +8,7 @@
 
 - 開発用Appとは権限・installation・stateを共有しないfamily専用GitHub Appと、hostのrequest単位承認後だけ登録済みrepositoryへIssueを1件作成するfamily Issue brokerを追加しました。
 - Codex／Claudeのcredential-free intake、24時間／10件limit、canonical preview、unknown reconciliation、content-free audit、doctor、実Podman／実host smoke手順を追加しました。
+- Family Issue本文へ、hostが選択したCodex／Claudeと登録済み提出元repository名から生成する改変不能な署名を追加しました。
 
 ### Security boundaries
 

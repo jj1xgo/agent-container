@@ -3,6 +3,9 @@
 from dataclasses import dataclass
 import re
 
+from agent_container.state import validate_agent
+from agent_container.state import validate_project_id
+
 
 TITLE_BYTES = 256
 SUMMARY_BYTES = 2 * 1024
@@ -175,8 +178,27 @@ def render_family_issue_body(draft: FamilyIssueDraft) -> str:
     )
 
 
-def canonicalize_family_issue(draft: FamilyIssueDraft) -> CanonicalFamilyIssue:
+def canonicalize_family_issue(
+    draft: FamilyIssueDraft,
+    *,
+    agent: str | None = None,
+    repository: str | None = None,
+) -> CanonicalFamilyIssue:
     """Return the immutable title/body representation used by preview and POST."""
 
     draft = _validate_draft(draft)
-    return CanonicalFamilyIssue(draft.title, render_family_issue_body(draft))
+    body = render_family_issue_body(draft)
+    if agent is None and repository is None:
+        return CanonicalFamilyIssue(draft.title, body)
+    if agent is None or repository is None:
+        raise _invalid()
+    try:
+        validated_agent = validate_agent(agent)
+        validated_repository = validate_project_id(repository)
+    except (TypeError, ValueError):
+        raise _invalid() from None
+    label = {"claude": "Claude", "codex": "Codex"}[validated_agent]
+    return CanonicalFamilyIssue(
+        draft.title,
+        f"{body}\n---\n\n— {label} ({validated_repository})\n",
+    )
