@@ -132,6 +132,27 @@ class PodmanCommandTest(unittest.TestCase):
         ):
             _wait_for_container_pid(Path("/secret/container.pid"), process)
 
+    # Break caught: a cold Podman start taking longer than ten seconds.
+    def test_family_pid_wait_accepts_cold_start_after_eleven_seconds(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        with mock.patch.object(
+            Path,
+            "read_text",
+            side_effect=[
+                FileNotFoundError(),
+                "123",
+                "123 (agent-runtime) S 1 2 3",
+            ],
+        ), mock.patch(
+            "agent_container.podman.time.monotonic", side_effect=[0, 0, 11]
+        ), mock.patch("agent_container.podman.time.sleep"):
+            pid = _wait_for_container_pid(
+                Path("/private/container.pid"), process
+            )
+
+        self.assertEqual(pid, 123)
+
     def test_family_pid_wait_reports_safe_unavailable_stage(self) -> None:
         class Process:
             def poll(self):
@@ -145,7 +166,7 @@ class PodmanCommandTest(unittest.TestCase):
             with self.subTest(pidfile_result=pidfile_result), mock.patch.object(
                 Path, "read_text", side_effect=[pidfile_result]
             ), mock.patch(
-                "agent_container.podman.time.monotonic", side_effect=[0, 0, 11]
+                "agent_container.podman.time.monotonic", side_effect=[0, 0, 31]
             ), mock.patch("agent_container.podman.time.sleep"):
                 with self.assertRaisesRegex(
                     RuntimeError, "family runtime pid unavailable"
@@ -164,7 +185,7 @@ class PodmanCommandTest(unittest.TestCase):
             "read_text",
             side_effect=["123", FileNotFoundError()],
         ), mock.patch(
-            "agent_container.podman.time.monotonic", side_effect=[0, 0, 11]
+            "agent_container.podman.time.monotonic", side_effect=[0, 0, 31]
         ), mock.patch("agent_container.podman.time.sleep"), self.assertRaisesRegex(
             RuntimeError, "family runtime pid unavailable"
         ) as raised:
