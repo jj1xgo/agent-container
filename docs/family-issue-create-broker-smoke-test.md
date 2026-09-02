@@ -24,7 +24,7 @@ PYTHONPATH=src python3 -m unittest tests.integration.test_family_forced_unknown 
 git diff --check
 ```
 
-固定期待値はCodex suiteは`Ran 21 tests ... OK`、container suiteは`Ran 950 tests ... OK`、socket suiteは`Ran 17 tests ... OK`、forced-unknown fixtureは`Ran 4 tests ... OK`です。すべてのcommandでunexpected skipは0件を要求し、件数不一致または1件でも想定外skipがあればPASSにしません。host生成署名、duplicate denial、content-free audit、credential non-exposure、terminal cleanup、forced unknownとcreated / not-created reconciliationがunit／socket testで通ったことをtest名と件数で記録します。秘密値やcanonical本文を記録しません。
+固定期待値はCodex suiteは`Ran 21 tests ... OK`、container suiteは`Ran 953 tests ... OK`、socket suiteは`Ran 17 tests ... OK`、forced-unknown fixtureは`Ran 4 tests ... OK`です。すべてのcommandでunexpected skipは0件を要求し、件数不一致または1件でも想定外skipがあればPASSにしません。host生成署名、duplicate denial、content-free audit、credential non-exposure、terminal cleanup、forced unknownとcreated / not-created reconciliationがunit／socket testで通ったことをtest名と件数で記録します。秘密値やcanonical本文を記録しません。
 
 ## 2. Real Podman gate
 
@@ -123,11 +123,11 @@ rollbackで作成済みIssueを変更しないでください。自動close、ed
 
 | Gate | Result | Evidence |
 |---|---|---|
-| Local automated | not run | — |
+| Local automated | PASS | 2026-09-02、commit `4277d9e`。lint、Codex 21、container 953、socket 17、forced-unknown 4、unexpected skip 0、`git diff --check` PASS。 |
 | Real Podman Codex path | not run | — |
 | Real Podman Claude path | not run | — |
 | Dedicated App / binding | not run | — |
 | Intake / duplicate / non-exposure | not run | — |
 | Approved real Issue | not run | — |
-| Forced unknown / reconciliation | not run | — |
+| Forced unknown / reconciliation | PASS | 2026-09-02、host-only fake fixture 4 tests PASS。network、Podman、GitHub mutationなし。 |
 | Cleanup / rollback | not run | — |
