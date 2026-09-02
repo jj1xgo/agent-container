@@ -120,7 +120,9 @@ class LiveFamilyInventory:
             )
             repositories = payload["repositories"]
             if (
-                set(payload) != {"repositories", "total_count"}
+                set(payload)
+                != {"repositories", "repository_selection", "total_count"}
+                or payload["repository_selection"] != "selected"
                 or type(payload["total_count"]) is not int
                 or payload["total_count"] != 1
                 or type(repositories) is not list

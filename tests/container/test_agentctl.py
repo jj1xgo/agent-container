@@ -5484,6 +5484,7 @@ class AgentCtlFamilyTest(unittest.TestCase):
             json.dumps(
                 {
                     "total_count": 1,
+                    "repository_selection": "selected",
                     "repositories": [
                         {
                             "id": 42,
@@ -5509,6 +5510,64 @@ class AgentCtlFamilyTest(unittest.TestCase):
         self.assertEqual(calls[0][0], "GET")
         self.assertEqual(calls[0][3], None)
 
+    # Break caught: GitHub's selected inventory response being rejected as unknown.
+    def test_live_inventory_accepts_selected_repository_inventory_shape(self) -> None:
+        from agent_container.family_cli import LiveFamilyInventory
+
+        response = HttpResponse(
+            200,
+            {"Content-Type": "application/json; charset=utf-8"},
+            json.dumps(
+                {
+                    "total_count": 1,
+                    "repository_selection": "selected",
+                    "repositories": [
+                        {
+                            "id": 42,
+                            "full_name": "family/roadmap",
+                            "name": "roadmap",
+                            "private": True,
+                            "owner": {"login": "family"},
+                        }
+                    ],
+                }
+            ).encode("utf-8"),
+        )
+        provider = _FamilyProvider()
+        provider.get = lambda: InstallationToken("t" * 16, 99_999)
+
+        inventory = LiveFamilyInventory(transport=lambda *_: response)
+
+        self.assertEqual(
+            inventory.resolve(self.binding.repository, provider),
+            self.binding,
+        )
+
+    # Break caught: an all-repositories installation bypassing exact selection.
+    def test_live_inventory_rejects_non_selected_repository_inventory(self) -> None:
+        from agent_container.family_cli import LiveFamilyInventory
+
+        response = HttpResponse(
+            200,
+            {"Content-Type": "application/json"},
+            json.dumps(
+                {
+                    "total_count": 1,
+                    "repository_selection": "all",
+                    "repositories": [
+                        {"id": 42, "full_name": "family/roadmap"}
+                    ],
+                }
+            ).encode("utf-8"),
+        )
+        provider = _FamilyProvider()
+        provider.get = lambda: InstallationToken("t" * 16, 99_999)
+
+        inventory = LiveFamilyInventory(transport=lambda *_: response)
+
+        with self.assertRaisesRegex(ValueError, "repository inventory"):
+            inventory.resolve(self.binding.repository, provider)
+
     # Break caught: ambiguous duplicate inventory fields selecting an arbitrary ID.
     def test_live_inventory_rejects_duplicate_inventory_fields(self) -> None:
         from agent_container.family_cli import LiveFamilyInventory
@@ -5516,9 +5575,14 @@ class AgentCtlFamilyTest(unittest.TestCase):
         provider = _FamilyProvider()
         provider.get = lambda: InstallationToken("t" * 16, 99_999)
         bodies = (
-            b'{"total_count":1,"total_count":1,"repositories":[]}',
             (
-                b'{"total_count":1,"repositories":[{"id":42,"id":43,'
+                b'{"total_count":1,"total_count":1,'
+                b'"repository_selection":"selected","repositories":['
+                b'{"id":42,"full_name":"family/roadmap"}]}'
+            ),
+            (
+                b'{"total_count":1,"repository_selection":"selected",'
+                b'"repositories":[{"id":42,"id":43,'
                 b'"full_name":"family/roadmap"}]}'
             ),
         )
