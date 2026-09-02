@@ -103,6 +103,8 @@ class FamilyIntakeTransportTest(unittest.TestCase):
             store=self.store,
             binding_path=self.binding,
             audit_path=self.audit,
+            agent="codex",
+            repository="demo",
             owner_uid=os.getuid(),
             clock=lambda: NOW,
             random_bytes=lambda size: b"\x22" * size,

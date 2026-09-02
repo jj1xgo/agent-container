@@ -54,7 +54,7 @@ class FamilyIntakeSocketIntegrationTest(unittest.TestCase):
         )
 
     def runtime(self) -> FamilyIntakeRuntime:
-        return FamilyIntakeRuntime.create(self.layout)
+        return FamilyIntakeRuntime.create(self.layout, agent="codex", repository="demo")
 
     def request(self, capability: str) -> FamilyIntakeRequest:
         return FamilyIntakeRequest(

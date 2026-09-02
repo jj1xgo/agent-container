@@ -17,6 +17,7 @@ from agent_container.family_issue import parse_family_issue_draft
 from agent_container.family_pending import create_pending
 from agent_container.family_pending import PendingCapacityError
 from agent_container.family_state import load_family_binding
+from agent_container.state import validate_agent
 from agent_container.state import validate_project_id
 
 
@@ -109,6 +110,8 @@ class FamilyIntakeSession:
     store: Path = field(kw_only=True, repr=False)
     binding_path: Path = field(kw_only=True, repr=False)
     audit_path: Path = field(kw_only=True, repr=False)
+    agent: str = field(kw_only=True)
+    repository: str = field(kw_only=True)
     owner_uid: int = field(default_factory=os.getuid, kw_only=True)
     clock: Callable[[], int] = field(
         default=lambda: int(time.time()), kw_only=True, repr=False
@@ -137,6 +140,11 @@ class FamilyIntakeSession:
             or _CAPABILITY.fullmatch(self.capability) is None
         ):
             raise ValueError("family intake session is invalid")
+        try:
+            self.agent = validate_agent(self.agent)
+            self.repository = validate_project_id(self.repository)
+        except (TypeError, ValueError):
+            raise ValueError("family intake session is invalid") from None
         self.expires_at = _exact_nonnegative_integer(self.expires_at)
         self.owner_uid = _exact_nonnegative_integer(self.owner_uid)
         if type(self.consumed) is not bool:
@@ -243,7 +251,11 @@ class FamilyIntakeSession:
         try:
             encode_request_frame(request)
             draft = parse_family_issue_draft(request.payload)
-            issue = canonicalize_family_issue(draft)
+            issue = canonicalize_family_issue(
+                draft,
+                agent=self.agent,
+                repository=self.repository,
+            )
         except (TypeError, ValueError):
             raise FamilyIntakeDenied() from None
         observed_now = self.clock()

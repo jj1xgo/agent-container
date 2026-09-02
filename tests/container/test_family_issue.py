@@ -45,6 +45,32 @@ class FamilyIssueTest(unittest.TestCase):
             ),
         )
 
+    # Break caught: an approved Issue losing its host-owned source attribution.
+    def test_canonical_issue_appends_agent_and_repository_attribution(self) -> None:
+        draft = FamilyIssueDraft(
+            "Report a runtime failure",
+            "The isolated runtime stopped.",
+            "The failure was observed while developing findsummits.",
+            ("The runtime completes successfully",),
+        )
+
+        actual = canonicalize_family_issue(
+            draft,
+            agent="claude",
+            repository="findsummits",
+        )
+
+        self.assertEqual(
+            actual,
+            CanonicalFamilyIssue(
+                "Report a runtime failure",
+                "## Summary\n\nThe isolated runtime stopped.\n\n"
+                "## Context\n\nThe failure was observed while developing findsummits.\n\n"
+                "## Acceptance criteria\n\n- The runtime completes successfully\n\n"
+                "---\n\n— Claude (findsummits)\n",
+            ),
+        )
+
     # Break caught: accepted Unicode being normalized, replaced, or re-encoded.
     def test_preserves_accepted_unicode_bytes_exactly(self) -> None:
         payload = valid_payload()

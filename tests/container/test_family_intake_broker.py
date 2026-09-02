@@ -66,6 +66,8 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
             "project_id": "demo",
             "capability": CAPABILITY,
             "expires_at": NOW + 60,
+            "agent": "codex",
+            "repository": "demo",
             "store": self.store,
             "binding_path": self.binding,
             "audit_path": self.audit,
@@ -98,6 +100,8 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
             store=self.store,
             binding_path=self.binding,
             audit_path=self.audit,
+            agent="codex",
+            repository="demo",
             owner_uid=os.getuid(),
             clock=lambda: NOW,
             random_bytes=lambda size: b"\x11" * size,
@@ -185,7 +189,8 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
                 "Add export",
                 "## Summary\n\nPortable copy.\n\n"
                 "## Context\n\nNo export exists.\n\n"
-                "## Acceptance criteria\n\n- JSON downloads\n",
+                "## Acceptance criteria\n\n- JSON downloads\n\n"
+                "---\n\n— Codex (demo)\n",
             ),
         )
         self.assertTrue(session.consumed)
@@ -211,6 +216,23 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
             str(self.store),
         ):
             self.assertNotIn(forbidden, receipt_and_audit)
+
+    # Break caught: intake persisting a draft without trusted runtime attribution.
+    def test_persists_host_owned_agent_and_source_repository_attribution(self) -> None:
+        session = self.session(agent="claude", repository="findsummits")
+        session.handle(self.request())
+
+        pending = list_pending(self.store, "demo")
+        self.assertEqual(
+            pending[0].issue,
+            CanonicalFamilyIssue(
+                "Add export",
+                "## Summary\n\nPortable copy.\n\n"
+                "## Context\n\nNo export exists.\n\n"
+                "## Acceptance criteria\n\n- JSON downloads\n\n"
+                "---\n\n— Claude (findsummits)\n",
+            ),
+        )
 
     # Break caught: direct callers bypassing version, operation, capability, or expiry.
     def test_rejects_wrong_authorization_values_without_consuming_capability(self) -> None:
@@ -367,6 +389,7 @@ class FamilyIntakeBrokerTest(unittest.TestCase):
         cases = (
             {"project_id": "../other"},
             {"capability": "short"},
+            {"agent": None, "repository": None},
             {"expires_at": True},
             {"owner_uid": -1},
             {"process_reader": None},

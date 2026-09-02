@@ -24,7 +24,7 @@ PYTHONPATH=src python3 -m unittest tests.integration.test_family_forced_unknown 
 git diff --check
 ```
 
-固定期待値はCodex suiteは`Ran 21 tests ... OK`、container suiteは`Ran 929 tests ... OK`、socket suiteは`Ran 17 tests ... OK`、forced-unknown fixtureは`Ran 4 tests ... OK`です。すべてのcommandでunexpected skipは0件を要求し、件数不一致または1件でも想定外skipがあればPASSにしません。duplicate denial、content-free audit、credential non-exposure、terminal cleanup、forced unknownとcreated / not-created reconciliationがunit／socket testで通ったことをtest名と件数で記録します。秘密値やcanonical本文を記録しません。
+固定期待値はCodex suiteは`Ran 21 tests ... OK`、container suiteは`Ran 950 tests ... OK`、socket suiteは`Ran 17 tests ... OK`、forced-unknown fixtureは`Ran 4 tests ... OK`です。すべてのcommandでunexpected skipは0件を要求し、件数不一致または1件でも想定外skipがあればPASSにしません。host生成署名、duplicate denial、content-free audit、credential non-exposure、terminal cleanup、forced unknownとcreated / not-created reconciliationがunit／socket testで通ったことをtest名と件数で記録します。秘密値やcanonical本文を記録しません。
 
 ## 2. Real Podman gate
 
@@ -65,9 +65,9 @@ doctorはlocal stateとlive inventoryのどちらを証明したか区別し、`
 
 ## 4. Credential-free intake
 
-CodexとClaudeを別runで起動し、それぞれ固定fixture案を1件提出します。2件目はduplicate denialであること、container outputが固定status／request ID／expiryだけであることを確認します。containerのenvironment、mount、argv、filesystem、`/proc`にApp metadata、private key、token、repository、pending host path、approval commandがないことを確認します。
+CodexとClaudeを別runで起動し、それぞれ固定fixture案を1件提出します。2件目はduplicate denialであること、container outputが固定status／request ID／expiryだけであることを確認します。containerのenvironment、mount、argv、filesystem、`/proc`にApp metadata、private key、token、repository、pending host path、approval commandがないこと、request schemaからagent名やrepository名を指定できないことを確認します。
 
-hostではpending一覧からrequest IDだけを選び、previewでcanonical titleとcanonical bodyが固定rendererどおりであることを確認します。本文はevidenceへ転記しません。
+hostではpending一覧からrequest IDだけを選び、previewでcanonical titleとcanonical bodyが固定rendererどおりであり、Codex／Claudeと登録済み提出元repository名からなる署名が末尾に1回だけあることを確認します。本文はevidenceへ転記しません。
 
 ## 5. STOP: 実Issue作成の直前承認
 

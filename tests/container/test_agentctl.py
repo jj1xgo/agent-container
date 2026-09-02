@@ -2150,7 +2150,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                     git_remote_reader=lambda _path: (
                         "https://github.com/jj1xgo/agent-container.git"
                     ),
-                    family_runtime_factory=lambda layout: (
+                    family_runtime_factory=lambda layout, **_kwargs: (
                         events.append(("factory", layout)) or Runtime()
                     ),
                     runtime_supervisor=supervisor,
@@ -4347,7 +4347,7 @@ class AgentCtlFamilyRuntimeTest(unittest.TestCase):
                     environment=environment,
                     runner=runner,
                     git_remote_reader=lambda _path: "https://github.com/jj1xgo/agent-container.git",
-                    family_runtime_factory=lambda _layout: self.fail("family runtime started"),
+                    family_runtime_factory=lambda _layout, **_kwargs: self.fail("family runtime started"),
                     stdout=StringIO(),
                     stderr=StringIO(),
                 )
@@ -4412,7 +4412,7 @@ class AgentCtlFamilyRuntimeTest(unittest.TestCase):
                 git_remote_reader=lambda _path: (
                     "https://github.com/jj1xgo/agent-container.git"
                 ),
-                family_runtime_factory=lambda _layout: self.fail(
+                family_runtime_factory=lambda _layout, **_kwargs: self.fail(
                     "family runtime started"
                 ),
                 stdout=StringIO(),
@@ -4487,7 +4487,7 @@ class AgentCtlFamilyRuntimeTest(unittest.TestCase):
                 result, _calls, stderr = self._run(
                     root,
                     agent=agent,
-                    factory=lambda _layout: self.fail("family runtime started"),
+                    factory=lambda _layout, **_kwargs: self.fail("family runtime started"),
                     builders={agent: builder},
                 )
 
@@ -4526,6 +4526,12 @@ class AgentCtlFamilyRuntimeTest(unittest.TestCase):
                         events.append("health")
 
                 runtime = Runtime()
+                attributions = []
+
+                def factory(observed_layout, *, agent=None, repository=None):
+                    attributions.append((observed_layout.project_id, agent, repository))
+                    return runtime
+
 
                 def builder(*args, **kwargs):
                     self.assertIs(kwargs["family_mount"], mount)
@@ -4545,7 +4551,7 @@ class AgentCtlFamilyRuntimeTest(unittest.TestCase):
                 result, calls, stderr = self._run(
                     root,
                     agent=agent,
-                    factory=lambda _layout: runtime,
+                    factory=factory,
                     supervisor=supervisor,
                     builders={agent: builder},
                 )
@@ -4559,6 +4565,7 @@ class AgentCtlFamilyRuntimeTest(unittest.TestCase):
                         ("register", 4321), "health", "cleanup",
                     ],
                 )
+                self.assertEqual(attributions, [("agent-container", agent, "agent-container")])
                 self.assertFalse(any(call.argv == ("podman", "run", agent) for call in calls))
 
     def test_startup_and_spec_failure_cleanup_without_fallback(self) -> None:
@@ -4586,7 +4593,7 @@ class AgentCtlFamilyRuntimeTest(unittest.TestCase):
                     result, calls, stderr = self._run(
                         root,
                         agent=agent,
-                        factory=lambda _layout: Runtime(),
+                        factory=lambda _layout, **_kwargs: Runtime(),
                         supervisor=lambda *_args: self.fail("supervisor called"),
                         builders={agent: builder},
                     )
@@ -4642,7 +4649,7 @@ class AgentCtlFamilyRuntimeTest(unittest.TestCase):
                     result, calls, stderr = self._run(
                         root,
                         agent=agent,
-                        factory=lambda _layout: runtime,
+                        factory=lambda _layout, **_kwargs: runtime,
                         supervisor=supervisor,
                         builders={
                             agent: lambda *_args, **_kwargs: CommandSpec(

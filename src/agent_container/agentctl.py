@@ -1827,7 +1827,11 @@ def main(
                         if family_runtime_factory is None
                         else family_runtime_factory
                     )
-                    family_runtime = factory(family_layout)
+                    family_runtime = factory(
+                        family_layout,
+                        agent=arguments.agent,
+                        repository=record.repository.name,
+                    )
                     family_mount = stack.enter_context(family_runtime)
                 egress_runtime = (
                     EgressBrokerRuntime.create(

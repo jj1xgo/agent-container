@@ -48,6 +48,7 @@ _RUNTIME_LAUNCHER = "agent-runtime-launcher"
 _FAMILY_RUN_ID = re.compile(r"^[0-9a-f]{16}$")
 _CONTAINER_ID = re.compile(r"^[0-9a-f]{12,64}$")
 _RESOURCE_AGENTS = frozenset({"codex", "claude"})
+_FAMILY_PID_WAIT_SECONDS = 30
 _RESOURCE_STATS_FORMAT = (
     "{{.ID}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}\t{{.UpTime}}"
 )
@@ -310,7 +311,7 @@ def _wait_for_container_pid(
     pidfile: Path,
     process: subprocess.Popen[str],
 ) -> int:
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + _FAMILY_PID_WAIT_SECONDS
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError("podman exited before family registration")

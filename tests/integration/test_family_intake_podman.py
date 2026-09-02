@@ -549,7 +549,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     0o600,
                 )
                 os.close(sentinel_descriptor)
-                runtime = FamilyIntakeRuntime.create(layout)
+                runtime = FamilyIntakeRuntime.create(layout, agent=agent, repository="demo")
                 mount = runtime.start()
                 inspector = None
                 marker_paths = ()
@@ -685,7 +685,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     0,
                 )
 
-                stale_runtime = FamilyIntakeRuntime.create(layout)
+                stale_runtime = FamilyIntakeRuntime.create(layout, agent=agent, repository="demo")
                 stale_mount = stale_runtime.start()
                 exited = subprocess.Popen(("/bin/true",))
                 stale_pid = exited.pid
@@ -699,7 +699,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     stale_runtime.close()
                 self.assertFalse(stale_mount.socket_dir.exists())
 
-                failed_runtime = FamilyIntakeRuntime.create(layout)
+                failed_runtime = FamilyIntakeRuntime.create(layout, agent=agent, repository="demo")
                 failed_mount = failed_runtime.start()
                 failed_base = (
                     run_codex_spec(

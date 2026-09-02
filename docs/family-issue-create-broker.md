@@ -5,7 +5,7 @@
 ## 最初に知っておく境界
 
 - containerへ渡るのはrunごとのsocketとone-time capabilityだけです。App private key、JWT、installation token、repository名／ID、pending host path、approval commandは渡りません。
-- requestはhost canonical rendererが`title`と、`## Summary`、`## Context`、`## Acceptance criteria`からなるbodyへ固定します。previewとGitHub POSTは同じ内容を使います。
+- requestはhost canonical rendererが`title`と、`## Summary`、`## Context`、`## Acceptance criteria`、末尾の`— Claude (findsummits)`または`— Codex (findsummits)`形式の署名からなるbodyへ固定します。署名のagent種別と提出元repository名は、hostが選択したruntimeと登録済みproject metadataから生成し、containerのrequestでは指定できません。previewとGitHub POSTは同じ内容を使います。
 - requestは24時間で失効し、projectごとの未完了requestは最大10件、1 runにつき作成案は1件です。startupと次のintakeでは期限切れpendingを先にbounded sweepし、そのauditを完了してから10件のcapacityを判定します。
 - approveは対話TTYから正確に`approve <request-id>`と1行入力したときだけ進みます。`--yes`やnon-interactive bypassはありません。
 - bindingがないunbound projectは従来どおり起動し、family socket／capabilityを追加しません。family intakeが失敗しても開発App、`gh`、通常networkへfallbackしません。
@@ -62,7 +62,7 @@ doctorの表示は次のように解釈します。
 
 ## 通常のoperator workflow
 
-runtime内のagentは`agent-family issue create`でtitle、summary、context、acceptance criterionを送ります。host operatorは本文を一覧へ自動表示せず、次を順番に実行します。
+runtime内のagentは`agent-family issue create`でtitle、summary、context、acceptance criterionを送ります。agent名やrepository名をrequestへ追加して署名を偽装することはできません。host operatorは本文を一覧へ自動表示せず、次を順番に実行します。
 
 ```bash
 bin/agentctl family issue pending PROJECT
@@ -70,7 +70,7 @@ bin/agentctl family issue preview PROJECT REQUEST_ID
 bin/agentctl family issue approve PROJECT REQUEST_ID
 ```
 
-previewでexact repository、canonical title、canonical body、期限、request IDを確認します。approveは同じ内容とexternal effectを再表示します。正しければprivateな対話terminalへ次の1行だけを入力します。
+previewでexact repository、canonical title、canonical body、host生成署名、期限、request IDを確認します。approveは同じ内容とexternal effectを再表示します。正しければprivateな対話terminalへ次の1行だけを入力します。
 
 ```text
 approve <request-id>

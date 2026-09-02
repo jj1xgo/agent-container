@@ -71,11 +71,21 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
     def runtime(self, **changes: object) -> FamilyIntakeRuntime:
         values = {
             "layout": self.layout,
+            "agent": "codex",
+            "repository": "demo",
             "clock": lambda: NOW,
             "random_bytes": lambda size: b"\x33" * size,
         }
         values.update(changes)
         return FamilyIntakeRuntime.create(**values)  # type: ignore[arg-type]
+
+    # Break caught: runtime startup dropping host-owned attribution before intake.
+    def test_start_passes_agent_and_repository_to_the_intake_session(self) -> None:
+        runtime = self.runtime(agent="claude", repository="findsummits")
+        with runtime:
+            assert runtime.session is not None
+            self.assertEqual(runtime.session.agent, "claude")
+            self.assertEqual(runtime.session.repository, "findsummits")
 
     # Break caught: first runtime startup requiring callers to pre-create
     # internal pending and audit directories.
