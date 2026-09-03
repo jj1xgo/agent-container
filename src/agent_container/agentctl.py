@@ -1,14 +1,15 @@
 import argparse
 from contextlib import ExitStack
 from dataclasses import dataclass
-import getpass
 import json
 import os
 from pathlib import Path
 import re
+import select
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
 from typing import Callable
@@ -328,9 +329,129 @@ def _snapshot_legacy_claude_sources(layout: StateLayout) -> tuple[Path, ...]:
         raise _ClaudeTokenFilesystemError from None
 
 
-def _require_private_token_terminal(stdin: TextIO, stderr: TextIO) -> None:
+def _open_controlling_terminal() -> int:
+    return os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+
+
+def _require_private_token_terminal(
+    stdin: TextIO,
+    stderr: TextIO,
+    open_terminal: Callable[[], int] = _open_controlling_terminal,
+) -> None:
     if not stdin.isatty() or not stderr.isatty():
         raise ValueError("Claude setup-token requires a private terminal")
+    # The hidden prompt reads /dev/tty directly; fail here, before
+    # `claude setup-token` displays the token, if there is no controlling terminal.
+    try:
+        descriptor = open_terminal()
+    except OSError:
+        raise ValueError(
+            "Claude setup-token requires a controlling terminal (/dev/tty)"
+        ) from None
+    os.close(descriptor)
+
+
+def read_hidden_token(
+    prompt: str,
+    *,
+    open_terminal: Callable[[], int] = _open_controlling_terminal,
+    settle_seconds: float = 1.0,
+    limit: int = 8192,
+    complete: Callable[[str], bool] | None = None,
+) -> str:
+    """Read a pasted token from the terminal without echo, including wrapped lines.
+
+    getpass keeps only the first line, flushes the rest of the paste, and
+    echoes anything it does not consume. A token that wrapped across two
+    terminal lines is pasted with a line break, so this reader owns the
+    terminal for the whole paste: echo and canonical mode are off, and after
+    the first newline it keeps reading until the input has been quiet for
+    ``settle_seconds`` unless ``complete`` already accepts what was read.
+    The terminal's erase, kill, word-erase, and EOF characters keep working.
+    Whatever is still queued when the reader returns is flushed so the shell
+    never receives it. Everything read is returned as is; the caller joins
+    the lines.
+    """
+
+    descriptor = open_terminal()
+    try:
+        try:
+            saved = termios.tcgetattr(descriptor)
+        except termios.error as error:
+            raise OSError(str(error)) from None
+        control = saved[6]
+        erase = {0x7F, 0x08, control[termios.VERASE][0]}
+        kill = control[termios.VKILL][0]
+        word_erase = control[termios.VWERASE][0]
+        end_of_file = control[termios.VEOF][0]
+        attributes = list(saved)
+        attributes[3] &= ~(termios.ECHO | termios.ICANON)
+        attributes[6] = list(control)
+        attributes[6][termios.VMIN] = 1
+        attributes[6][termios.VTIME] = 0
+        pending = bytearray()
+        try:
+            try:
+                termios.tcsetattr(descriptor, termios.TCSAFLUSH, attributes)
+            except termios.error as error:
+                raise OSError(str(error)) from None
+            os.write(descriptor, prompt.encode("utf-8"))
+            newline_seen = False
+            finished = False
+            while not finished and len(pending) < limit:
+                timeout = settle_seconds if newline_seen else None
+                ready, _, _ = select.select([descriptor], [], [], timeout)
+                if not ready:
+                    break
+                chunk = os.read(descriptor, 4096)
+                if not chunk:
+                    finished = True
+                    break
+                for byte in chunk:
+                    if byte == end_of_file or len(pending) >= limit:
+                        finished = True
+                        break
+                    if byte in erase:
+                        if pending:
+                            del pending[-1]
+                        continue
+                    if byte == kill:
+                        pending.clear()
+                        continue
+                    if byte == word_erase:
+                        while pending and pending[-1] in b" \t":
+                            del pending[-1]
+                        while pending and pending[-1] not in b" \t\n\r":
+                            del pending[-1]
+                        continue
+                    pending.append(byte)
+                    if byte in (0x0A, 0x0D):
+                        newline_seen = True
+                        if complete is not None and complete(
+                            pending.decode("utf-8", errors="replace")
+                        ):
+                            finished = True
+                            break
+            if finished and not pending.strip():
+                raise EOFError("hidden token input ended")
+        finally:
+            # TCSAFLUSH discards anything still queued (an over-long paste or a
+            # tail that arrived after the settle window) instead of handing it
+            # to the shell. Restore first so the terminal is sane even if the
+            # newline write below fails.
+            try:
+                termios.tcsetattr(descriptor, termios.TCSAFLUSH, saved)
+            except termios.error as error:
+                raise OSError(str(error)) from None
+            os.write(descriptor, b"\n")
+    finally:
+        os.close(descriptor)
+    return pending.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _normalize_pasted_token(raw: str) -> tuple[str, int]:
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    return "".join(lines), len(lines)
 
 
 def _resolve_handover_root(handover_root: Path, project_id: str) -> Path:
@@ -1612,21 +1733,53 @@ def main(
             _prepare_claude_auth(layout)
             setup_spec = claude_setup_token_spec(arguments.image)
             _require_success(runner(setup_spec), setup_spec)
-            reader = getpass.getpass if token_reader is None else token_reader
+            if token_reader is None:
+
+                def _valid(text: str) -> bool:
+                    try:
+                        validate_claude_oauth_token(_normalize_pasted_token(text)[0])
+                    except ValueError:
+                        return False
+                    return True
+
+                def reader(prompt: str) -> str:
+                    return read_hidden_token(prompt, complete=_valid)
+            else:
+                reader = token_reader
             token = ""
+            raw = ""
             try:
                 try:
-                    token = reader("Paste the sk-ant-oat01- token printed by claude setup-token (input hidden): ")
+                    raw = reader("Paste the sk-ant-oat01- token printed by claude setup-token (input hidden): ")
                 except (EOFError, KeyboardInterrupt):
                     print("error: Claude token input cancelled", file=stderr)
                     return 1
-                validate_claude_oauth_token(token)
+                except OSError:
+                    print("error: Claude token terminal input failed", file=stderr)
+                    return 1
+                token, line_count = _normalize_pasted_token(raw)
+                if line_count > 1:
+                    print(
+                        f"note: joined {line_count} input lines from the hidden prompt",
+                        file=stderr,
+                    )
+                try:
+                    validate_claude_oauth_token(token)
+                except ValueError as error:
+                    if line_count > 1:
+                        raise ValueError(
+                            f"{error}; the input contained a line break, so the "
+                            "token probably wrapped in the terminal: paste it "
+                            "again in a wider terminal"
+                        ) from None
+                    raise
                 try:
                     staged = stage_claude_token(layout.claude_auth_dir, token)
                 except (ValueError, OSError):
                     raise _ClaudeTokenFilesystemError from None
             finally:
                 token = ""
+                raw = ""
             try:
                 status_spec = claude_token_status_spec(staged, arguments.image)
                 _require_success(_suppressed_run(runner, status_spec), status_spec)
