@@ -105,9 +105,10 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                 "agent_container.egress_broker_runtime.connect_target",
                 side_effect=connect_fixture,
             ), runtime as mount:
-                audit_file = runtime.session.audit_file
-                for index, (request, expected_code) in enumerate(
-                    (
+                audited = self._AuditedRequests(
+                    mount.socket_path, runtime.session.audit_file
+                )
+                for request, expected_code in (
                     (
                         EgressRequest(
                             1,
@@ -144,14 +145,11 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                         ),
                         "policy",
                     ),
-                    ),
-                    start=1,
                 ):
                     self.assertEqual(
-                        self._request(mount.socket_path, encode_request_frame(request)),
+                        audited.request(encode_request_frame(request)),
                         ("denied", expected_code),
                     )
-                    self._wait_for_audit_records(audit_file, index)
 
                 port_frame = self._raw_request_frame(
                     capability=capability,
@@ -161,10 +159,9 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                     port=80,
                 )
                 self.assertEqual(
-                    self._request(mount.socket_path, port_frame),
+                    audited.request(port_frame),
                     ("denied", "authentication"),
                 )
-                self._wait_for_audit_records(audit_file, 4)
 
                 adapter = AdapterConfig(
                     mount.socket_path,
@@ -209,7 +206,7 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                 self.assertFalse(worker.is_alive())
                 # The broker writes the tunnel's "ok" record after the relay
                 # finishes, so wait for it before the replay adds its own record.
-                self._wait_for_audit_records(audit_file, 5)
+                audited.wait_for_next_record()
 
                 replay = EgressRequest(
                     1,
@@ -220,11 +217,12 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                     "allowed.example",
                     443,
                 )
+                # No wait after the replay: EgressBrokerRuntime.__exit__ joins
+                # every worker before the audit log is read below.
                 self.assertEqual(
                     self._request(mount.socket_path, encode_request_frame(replay)),
                     ("denied", "authentication"),
                 )
-                self._wait_for_audit_records(audit_file, 6)
 
             listener.close()
             fixture.join(timeout=2)
@@ -282,17 +280,38 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
         with mock.patch.object(EgressBrokerSession, "audit", delayed_audit):
             self.test_real_adapter_gateway_socket_enforces_policy_and_cleans_runtime()
 
-    @staticmethod
-    def _wait_for_audit_records(audit_file: Path, count: int) -> None:
-        # The broker answers before it appends the audit record, so wait for
-        # the expected number of complete (newline-terminated) records before
-        # the next request can append its own.
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
-            if audit_file.read_bytes().count(b"\n") >= count:
-                return
-            time.sleep(0.01)
-        raise AssertionError(f"audit log did not reach {count} records")
+    class _AuditedRequests:
+        """Send broker requests and wait for each one's audit record.
+
+        The broker answers a request before it appends the audit record, so a
+        caller that reads the audit log or sends the next request immediately
+        can observe records out of request order. Every request here waits
+        until the expected number of complete (newline-terminated) records is
+        present.
+        """
+
+        def __init__(self, socket_path: Path, audit_file: Path) -> None:
+            self.socket_path = socket_path
+            self.audit_file = audit_file
+            self.expected_records = 0
+
+        def request(self, frame: bytes) -> tuple[str, str]:
+            response = EgressBrokerSocketIntegrationTest._request(self.socket_path, frame)
+            self.wait_for_next_record()
+            return response
+
+        def wait_for_next_record(self) -> None:
+            self.expected_records += 1
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                content = self.audit_file.read_bytes()
+                if content.count(b"\n") >= self.expected_records:
+                    return
+                time.sleep(0.01)
+            raise AssertionError(
+                f"audit log did not reach {self.expected_records} records; "
+                f"current contents: {content.decode('utf-8', errors='replace')!r}"
+            )
 
     @staticmethod
     def _request(socket_path: Path, frame: bytes) -> tuple[str, str]:
