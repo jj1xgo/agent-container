@@ -105,7 +105,9 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                 "agent_container.egress_broker_runtime.connect_target",
                 side_effect=connect_fixture,
             ), runtime as mount:
-                for request, expected_code in (
+                audit_file = runtime.session.audit_file
+                for index, (request, expected_code) in enumerate(
+                    (
                     (
                         EgressRequest(
                             1,
@@ -142,11 +144,14 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                         ),
                         "policy",
                     ),
+                    ),
+                    start=1,
                 ):
                     self.assertEqual(
                         self._request(mount.socket_path, encode_request_frame(request)),
                         ("denied", expected_code),
                     )
+                    self._wait_for_audit_records(audit_file, index)
 
                 port_frame = self._raw_request_frame(
                     capability=capability,
@@ -159,6 +164,7 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                     self._request(mount.socket_path, port_frame),
                     ("denied", "authentication"),
                 )
+                self._wait_for_audit_records(audit_file, 4)
 
                 adapter = AdapterConfig(
                     mount.socket_path,
@@ -203,7 +209,7 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                 self.assertFalse(worker.is_alive())
                 # The broker writes the tunnel's "ok" record after the relay
                 # finishes, so wait for it before the replay adds its own record.
-                self._wait_for_audit_status(runtime.session.audit_file, "ok")
+                self._wait_for_audit_records(audit_file, 5)
 
                 replay = EgressRequest(
                     1,
@@ -218,6 +224,7 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                     self._request(mount.socket_path, encode_request_frame(replay)),
                     ("denied", "authentication"),
                 )
+                self._wait_for_audit_records(audit_file, 6)
 
             listener.close()
             fixture.join(timeout=2)
@@ -257,17 +264,18 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
             ):
                 self.assertNotIn(secret, audit)
 
-    # Break caught: the replay denial landing in the audit log before the
-    # tunnel's own "ok" record, which the broker writes only after the relay
-    # finishes. The delay makes the race deterministic instead of CI-timing
-    # dependent.
-    def test_audit_order_is_stable_when_ok_record_is_written_late(self) -> None:
+    # Break caught: a later request's audit record landing before an earlier
+    # one. The broker answers each request before it writes the audit record,
+    # and writes the tunnel's "ok" record only after the relay finishes, so
+    # any adjacent pair can reorder on a slow runner. Delaying the "policy"
+    # denial and the "ok" record makes both reorderings deterministic.
+    def test_audit_order_is_stable_when_records_are_written_late(self) -> None:
         from agent_container.egress_broker import EgressBrokerSession
 
         original = EgressBrokerSession.audit
 
         def delayed_audit(session, status, *args, **kwargs):
-            if status == "ok":
+            if status == "ok" or kwargs.get("stage") == "policy":
                 time.sleep(0.3)
             return original(session, status, *args, **kwargs)
 
@@ -275,14 +283,16 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
             self.test_real_adapter_gateway_socket_enforces_policy_and_cleans_runtime()
 
     @staticmethod
-    def _wait_for_audit_status(audit_file: Path, status: str) -> None:
+    def _wait_for_audit_records(audit_file: Path, count: int) -> None:
+        # The broker answers before it appends the audit record, so wait for
+        # the expected number of complete (newline-terminated) records before
+        # the next request can append its own.
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
-            for line in audit_file.read_text(encoding="utf-8").splitlines():
-                if json.loads(line).get("status") == status:
-                    return
+            if audit_file.read_bytes().count(b"\n") >= count:
+                return
             time.sleep(0.01)
-        raise AssertionError(f"audit record with status {status!r} did not appear")
+        raise AssertionError(f"audit log did not reach {count} records")
 
     @staticmethod
     def _request(socket_path: Path, frame: bytes) -> tuple[str, str]:
