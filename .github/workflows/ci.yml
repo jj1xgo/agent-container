@@ -85,6 +85,8 @@ jobs:
       NODE_VERSION: 26.7.0
       CODEX_VERSION: 0.149.1
       CLAUDE_VERSION: 2.1.243
+      PODMAN_STATIC_TAG: v5.8.4
+      PODMAN_STATIC_SHA256_AMD64: a58765fe8be6ab3fb79f892f1a027b4ce4a7e8eb589df1ef960c167cbde08d69
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -92,10 +94,62 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The hosted ubuntu-24.04 image went back to apt Podman 4.9.3 on
+      # 2026-09-01 (actions/runner-images#14642). Family intake requires
+      # Podman 5.8 with crun, so install the pinned static bundle that the
+      # runner image itself shipped until then, following its install recipe.
+      - name: Install Podman 5.8 bundle
+        run: |
+          set -x
+          current=$(podman --version | sed -E 's/^podman version ([0-9]+\.[0-9]+).*/\1/')
+          if [ "$(printf '%s\n5.8\n' "$current" | sort -V | head -n1)" = "5.8" ]; then
+            echo "podman $current already satisfies >= 5.8"
+            exit 0
+          fi
+          test "$(dpkg --print-architecture)" = amd64
+          archive=podman-linux-amd64.tar.gz
+          curl -fsSLO "https://github.com/mgoltzsche/podman-static/releases/download/${PODMAN_STATIC_TAG}/${archive}"
+          echo "${PODMAN_STATIC_SHA256_AMD64}  ${archive}" | sha256sum --check --strict -
+          # The bundle stores every entry as uid/gid 1001 and includes the
+          # /usr and /etc directory entries themselves; keep system ownership.
+          sudo tar -xzf "$archive" -C / --strip-components=1 --no-same-owner --no-overwrite-dir \
+            podman-linux-amd64/usr podman-linux-amd64/etc
+          rm -f "$archive"
+          sudo mkdir -p /etc/containers/containers.conf.d
+          # Prefer the bundled crun over the older apt crun that buildah pulls in.
+          printf '[engine.runtimes]\ncrun = ["/usr/local/bin/crun"]\n' \
+            | sudo tee /etc/containers/containers.conf.d/00-fix-runtime.conf
+          # Do not shadow the distro setuid fusermount3 with the bundle's copy.
+          sudo rm -f /usr/local/bin/fusermount3
+          # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor;
+          # grant the static binary the same userns permission as the apt package.
+          if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; then
+            sudo tee /etc/apparmor.d/podman <<'EOF'
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile podman /usr/{bin,local/bin}/podman flags=(unconfined) {
+            userns,
+
+            include if exists <local/podman>
+          }
+          EOF
+            sudo apparmor_parser -r -W /etc/apparmor.d/podman
+          fi
+          # netavark may default to nftables on Ubuntu and then break name resolution.
+          printf '[network]\nfirewall_driver = "iptables"\n' \
+            | sudo tee /etc/containers/containers.conf.d/99-fix-firewall.conf
+          hash -r
+          podman --version
+
       - name: Verify rootless Podman
         run: |
           podman --version
+          current=$(podman --version | sed -E 's/^podman version ([0-9]+\.[0-9]+).*/\1/')
+          # >= 5.8 is required for the family intake gate.
+          test "$(printf '%s\n5.8\n' "$current" | sort -V | head -n1)" = "5.8"
           test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+          test "$(podman info --format '{{.Host.OCIRuntime.Name}}')" = crun
 
       - name: Record available storage
         run: df -h "$GITHUB_WORKSPACE"

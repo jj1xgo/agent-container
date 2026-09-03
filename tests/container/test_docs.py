@@ -324,6 +324,44 @@ class EgressDocumentationTest(unittest.TestCase):
             with self.subTest(missing=contract), self.assertRaises(AssertionError):
                 assert_complete(podman_step.replace(contract, "", 1))
 
+    # Break caught: the hosted ubuntu-24.04 runner shipping apt Podman 4.9.3
+    # again (actions/runner-images#14642) and CI silently losing the 5.8 gate.
+    def test_ci_installs_pinned_podman_bundle_and_asserts_version(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        job = workflow.split("\n  podman-integration:\n", 1)[1]
+        install_start = job.index("      - name: Install Podman 5.8 bundle\n")
+        verify_start = job.index("      - name: Verify rootless Podman\n")
+        build_start = job.index("      - name: Build base image\n")
+        self.assertLess(install_start, verify_start)
+        self.assertLess(verify_start, build_start)
+        install_step = job[install_start:verify_start]
+        verify_step = job[verify_start:build_start]
+
+        self.assertIn("PODMAN_STATIC_TAG: v5.8.4", job)
+        self.assertIn(
+            "PODMAN_STATIC_SHA256_AMD64: "
+            "a58765fe8be6ab3fb79f892f1a027b4ce4a7e8eb589df1ef960c167cbde08d69",
+            job,
+        )
+        for contract in (
+            "https://github.com/mgoltzsche/podman-static/releases/download/",
+            "sha256sum --check --strict",
+            "--no-same-owner --no-overwrite-dir",
+            'crun = ["/usr/local/bin/crun"]',
+            "rm -f /usr/local/bin/fusermount3",
+            "apparmor_restrict_unprivileged_userns",
+            'firewall_driver = "iptables"',
+        ):
+            self.assertEqual(install_step.count(contract), 1, contract)
+        for contract in (
+            "podman --version",
+            "test \"$(podman info --format '{{.Host.Security.Rootless}}')\" = true",
+            "test \"$(podman info --format '{{.Host.OCIRuntime.Name}}')\" = crun",
+            ">= 5.8",
+        ):
+            self.assertIn(contract, verify_step, contract)
+        self.assertNotIn("continue-on-error", workflow)
+
     def test_operator_and_smoke_guides_define_fail_closed_evidence_contract(
         self,
     ) -> None:
