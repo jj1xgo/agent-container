@@ -113,6 +113,22 @@ class AtomicHandoverWriterTest(unittest.TestCase):
         )
         self.assertEqual(list(self.project.glob(".handover-*.tmp")), [])
 
+    def test_records_a_trusted_host_session_id(self) -> None:
+        created = create_atomic_handover(
+            self.project,
+            "project",
+            "title",
+            valid_body(),
+            self.now,
+            lambda size: "a" * (size * 2),
+            session_id="session-123",
+        )
+
+        self.assertIn(
+            "- Session: session-123\n",
+            created.read_text(encoding="utf-8"),
+        )
+
     def test_forces_mode_0600_despite_a_restrictive_umask(self) -> None:
         original_umask = os.umask(0o777)
         try:
