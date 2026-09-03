@@ -16,7 +16,7 @@
 
 ### Validation
 
-- 2026-09-02の実host smokeでlocal automated gate、Codex／Claude両pathの実Podman gate、専用Appの最小権限とexact 1 repository inventory、Codex intake／duplicate拒否、fresh approval付き[Issue #75](https://github.com/jj1xgo/agent-container/issues/75)、content-free audit、terminal cleanupを確認しました。Claude実CLI intakeはorganization側のsubscription access無効によりfixture実行前に停止しており、Phase 5の残作業として保持します。
+- 2026-09-02の実host smokeでlocal automated gate、Codex／Claude両pathの実Podman gate、専用Appの最小権限とexact 1 repository inventory、Codex intake／duplicate拒否、fresh approval付き[Issue #75](https://github.com/jj1xgo/agent-container/issues/75)、content-free audit、terminal cleanupを確認しました。Claude実CLI intakeはlong-lived OAuth tokenの生成・private保存後もClaude Codeとraw Anthropic APIがHTTP 401を返し、fixture提出前に停止しており、Phase 5の残作業として保持します。
 
 ## [0.4.1] - 2026-09-01
 

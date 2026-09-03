@@ -837,8 +837,8 @@ class FamilyIssueBrokerDocumentationTest(unittest.TestCase):
             self.smoke,
         )
         for expected in (
-            "Codex suiteは`Ran 21 tests ... OK`",
-            "container suiteは`Ran 953 tests ... OK`",
+            "Codex suiteは`Ran 30 tests ... OK`",
+            "container suiteは`Ran 954 tests ... OK`",
             "socket suiteは`Ran 17 tests ... OK`",
             "forced-unknown fixtureは`Ran 4 tests ... OK`",
             "Podman suiteは`Ran 14 tests ... OK`",
@@ -851,6 +851,8 @@ class FamilyIssueBrokerDocumentationTest(unittest.TestCase):
         )
         self.assertIn("Ran 4 tests", self.smoke)
         self.assertIn("missing prerequisiteごとにnot run", self.smoke)
+        self.assertIn("HTTP 401", self.smoke)
+        self.assertNotIn("subscription access無効", self.smoke)
         self.assertNotIn("UNOBSERVED", self.operator + self.smoke)
 
     def test_readme_and_changelog_advertise_shipped_scope_without_stale_claim(self) -> None:

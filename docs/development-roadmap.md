@@ -4,7 +4,7 @@
 
 ## 現在地
 
-Phase 1〜4は完了した。現在地は**Phase 5**であり、Family Issue brokerのcodeとCIは完成している。2026-09-02の実host smokeでは、専用App／binding、実PodmanのCodex／Claude両path、Codex intake、承認付き実Issue、non-exposure、duplicate、audit／cleanupがPASSした。Claude実CLIのintakeだけはorganization側のsubscription access無効によりfixture実行前に停止しており、これを再実行してPhase 5を閉じた後にPhase 6へ進む。
+Phase 1〜4は完了した。現在地は**Phase 5**であり、Family Issue brokerのcodeとCIは完成している。2026-09-02の実host smokeでは、専用App／binding、実PodmanのCodex／Claude両path、Codex intake、承認付き実Issue、non-exposure、duplicate、audit／cleanupがPASSした。Claude実CLIのintakeだけはlong-lived OAuth tokenの生成・private保存後もClaude Codeとraw Anthropic APIがHTTP 401を返し、fixture提出前に停止しており、これを再実行してPhase 5を閉じた後にPhase 6へ進む。
 
 状態は次の4種類とする。
 
@@ -37,7 +37,7 @@ Phase 7〜10が「Obsidianを第2の脳として使う」ための中心範囲�
 
 実施順はPhase番号と一致する。
 
-1. Claude subscription accessを利用可能にした環境でPhase 5の実Claude intakeを再実行し、Family実host smokeを完了する。
+1. Claude OAuth tokenが実際に受理される正式認証経路を確認した環境でPhase 5の実Claude intakeを再実行し、Family実host smokeを完了する。
 2. Phase 6で、後続機能が共有するcontrol-plane contractを固定する。
 3. Phase 7で、安全なVault原本と実行用copyの同期を作る。
 4. Phase 8で、複数agentの編集をworktreeとleaseで隔離する。
