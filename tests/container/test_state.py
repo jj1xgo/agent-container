@@ -91,19 +91,38 @@ class StateValidationTest(unittest.TestCase):
             Path("/state/egress-broker/audit/events.jsonl"),
         )
 
-    def test_claude_oauth_token_accepts_only_safe_single_line_ascii(self) -> None:
-        self.assertEqual(validate_claude_oauth_token("x" * 32), "x" * 32)
-        self.assertEqual(validate_claude_oauth_token("Z" * 4096), "Z" * 4096)
+    def test_claude_oauth_token_accepts_only_setup_token_shaped_values(self) -> None:
+        token = "sk-ant-oat01-" + "x" * 95
+        self.assertEqual(validate_claude_oauth_token(token), token)
+        longest = "sk-ant-oat01-" + "Z" * (4096 - len("sk-ant-oat01-"))
+        self.assertEqual(validate_claude_oauth_token(longest), longest)
+        self.assertEqual(
+            validate_claude_oauth_token("sk-ant-oat02-" + "A-_9" * 8),
+            "sk-ant-oat02-" + "A-_9" * 8,
+        )
         for value in (
-            "x" * 31,
-            "x" * 4097,
-            "x y" + "x" * 29,
-            "x\n" + "x" * 31,
-            "é" * 32,
-            "\x7f" + "x" * 31,
+            "x" * 32,
+            "sk-ant-oat01-" + "x" * 18,
+            "sk-ant-oat01-" + "x" * 4084,
+            "sk-ant-api03-" + "x" * 95,
+            "sk-ant-oat1-" + "x" * 95,
+            "sk-ant-oat01-" + "x y" + "x" * 93,
+            "sk-ant-oat01-" + "x\n" + "x" * 94,
+            "sk-ant-oat01-" + "é" * 95,
+            "sk-ant-oat01-" + "\x7f" + "x" * 94,
+            "sk-ant-oat01-" + "x" * 95 + ".",
         ):
-            with self.subTest(length=len(value)), self.assertRaises(ValueError):
+            with self.subTest(value=value[:16]), self.assertRaises(ValueError):
                 validate_claude_oauth_token(value)
+
+    def test_claude_oauth_token_names_browser_login_code_paste_mistake(self) -> None:
+        login_code = "a" * 77 + "#" + "b" * 14
+        with self.assertRaisesRegex(ValueError, "browser login code"):
+            validate_claude_oauth_token(login_code)
+        with self.assertRaisesRegex(ValueError, "browser login code"):
+            validate_claude_oauth_token("sk-ant-oat01-" + "x" * 40 + "#" + "y" * 10)
+        with self.assertRaisesRegex(ValueError, "^Claude OAuth token has invalid format$"):
+            validate_claude_oauth_token("x" * 32)
 
     def test_agent_version_and_plugin_validation(self) -> None:
         self.assertEqual(validate_agent("claude"), "claude")

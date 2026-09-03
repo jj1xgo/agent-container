@@ -16,7 +16,7 @@ class ExecObserved(Exception):
 
 
 class ClaudeLauncherTest(unittest.TestCase):
-    def write_token(self, directory: Path, value: str = "t" * 32) -> Path:
+    def write_token(self, directory: Path, value: str = "sk-ant-oat01-" + "t" * 95) -> Path:
         path = directory / "oauth-token"
         path.write_text(value, encoding="ascii")
         path.chmod(0o600)
@@ -33,9 +33,9 @@ class ClaudeLauncherTest(unittest.TestCase):
 
     def test_load_token_reads_a_private_regular_ascii_token(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            token_file = self.write_token(Path(temporary), "a" * 32)
+            token_file = self.write_token(Path(temporary), "sk-ant-oat01-" + "a" * 95)
 
-            self.assertEqual(load_token(token_file), "a" * 32)
+            self.assertEqual(load_token(token_file), "sk-ant-oat01-" + "a" * 95)
 
     def test_load_token_requests_no_follow_when_opening_the_token_path(self) -> None:
         with patch(
@@ -53,7 +53,7 @@ class ClaudeLauncherTest(unittest.TestCase):
     def test_load_token_rejects_a_symlink_without_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            target = self.write_token(directory, "a" * 32)
+            target = self.write_token(directory, "sk-ant-oat01-" + "a" * 95)
             link = directory / "link"
             link.symlink_to(target)
 
@@ -91,7 +91,7 @@ class ClaudeLauncherTest(unittest.TestCase):
 
             with patch(
                 "agent_container.claude_launcher.os.read",
-                side_effect=(b"a" * 32, b"b" * 4065),
+                side_effect=(b"sk-ant-oat01-" + b"a" * 95, b"b" * 4065),
             ) as read_mock:
                 with self.assertRaises(ValueError):
                     load_token(token_file)

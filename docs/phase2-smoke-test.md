@@ -71,7 +71,7 @@ Codexはここから通常build完了までを実行してよい。認証やlive
 bin/agentctl auth claude
 ```
 
-`claude setup-token`はprivate terminalに1年間有効なinference専用tokenを一度表示する。このcredentialではRemote Controlを利用できない。利用者は表示tokenを後続の`Paste Claude setup token (input hidden):` promptへだけ貼り付ける。token値をこのchecklist、chat、handover、shell history、screenshot、logへ転記しない。commandのexit statusだけを記録する。
+`claude setup-token`はprivate terminalに1年間有効なinference専用tokenを一度表示する。このcredentialではRemote Controlを利用できない。利用者は表示tokenを後続の`Paste the sk-ant-oat01- token printed by claude setup-token (input hidden):` promptへだけ貼り付ける。token値をこのchecklist、chat、handover、shell history、screenshot、logへ転記しない。commandのexit statusだけを記録する。
 
 setup command、hidden prompt、token format、staged `claude auth status`、activationのどれかが失敗または取消なら即座に停止する。以前の`oauth-token`がactiveのままであり、shared legacy entryとproject legacy entryが移動していないことをmetadataだけで確認する。手作業で上書き、copy、quarantine、rollbackを行わない。
 

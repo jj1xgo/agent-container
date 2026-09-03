@@ -1589,7 +1589,7 @@ class PodmanCommandTest(unittest.TestCase):
             ),
         )
         self.assertNotIn(".credentials.json", joined)
-        self.assertNotIn("s" * 32, joined)
+        self.assertNotIn("sk-ant-oat01-" + "s" * 95, joined)
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN=", joined)
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", spec.environment)
         self.assertNotIn("dangerously-skip-permissions", joined)

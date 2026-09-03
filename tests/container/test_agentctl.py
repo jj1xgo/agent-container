@@ -109,8 +109,8 @@ class _TrackingBrokerContext:
 
 
 class AgentCtlBuildAuthTest(unittest.TestCase):
-    OLD_TOKEN = "o" * 32
-    NEW_TOKEN = "n" * 32
+    OLD_TOKEN = "sk-ant-oat01-" + "o" * 95
+    NEW_TOKEN = "sk-ant-oat01-" + "n" * 95
 
     def test_stats_reports_only_fixed_resource_fields_for_matching_agents(self) -> None:
         stdout = StringIO()
@@ -526,7 +526,7 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
                 if spec.argv[-3:] == ("claude", "auth", "status"):
                     status_observations.append(
                         (
-                            hmac.compare_digest(active.read_bytes(), b"o" * 32),
+                            hmac.compare_digest(active.read_bytes(), b"sk-ant-oat01-" + b"o" * 95),
                             (auth_dir / ".credentials.json").exists(),
                             (auth_dir / ".claude.json").exists(),
                             (auth_dir / "backups").exists(),
@@ -568,7 +568,7 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
             self.assertNotEqual(staged_source, active)
             self.assertFalse(staged_source.exists())
             self.assertEqual(status_observations, [(True, True, True, True)])
-            self._assert_token_matches(active, b"n" * 32)
+            self._assert_token_matches(active, b"sk-ant-oat01-" + b"n" * 95)
             quarantine_runs = list((root / "quarantine/claude").iterdir())
             self.assertEqual(len(quarantine_runs), 1)
             self.assertEqual(
@@ -667,6 +667,33 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
             self.assertEqual(list(active.parent.glob(".oauth-token-stage-*")), [])
             self._assert_private_values_absent(
                 stderr.getvalue(), "z" * 31, self.OLD_TOKEN
+            )
+
+    def test_claude_auth_refuses_browser_login_code_with_hint(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+            old_bytes = active.read_bytes()
+            login_code = "a" * 77 + "#" + "b" * 14
+            calls = []
+            stderr = StringIO()
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=lambda spec: calls.append(spec) or self._successful_probe(spec),
+                token_reader=lambda prompt: login_code,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertIn("browser login code", stderr.getvalue())
+            self.assertIn("claude setup-token", stderr.getvalue())
+            self.assertTrue(all(call.argv[-3:] != ("claude", "auth", "status") for call in calls))
+            self._assert_token_matches(active, old_bytes)
+            self.assertEqual(list(active.parent.glob(".oauth-token-stage-*")), [])
+            self._assert_private_values_absent(
+                stderr.getvalue(), login_code, self.OLD_TOKEN
             )
 
     def test_claude_auth_status_failure_discards_stage_and_preserves_existing(self) -> None:
@@ -771,7 +798,7 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
             )
 
             self.assertEqual(result, 0)
-            self._assert_token_matches(active, b"n" * 32)
+            self._assert_token_matches(active, b"sk-ant-oat01-" + b"n" * 95)
 
     def test_claude_auth_requires_private_tty_for_default_reader(self) -> None:
         with TemporaryDirectory() as temp:
@@ -849,7 +876,7 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
                 if spec.argv[-3:] == ("claude", "auth", "status"):
                     order.append("status-with-legacy-and-old-active")
                     self.assertTrue((auth_dir / ".credentials.json").exists())
-                    self._assert_token_matches(active, b"o" * 32)
+                    self._assert_token_matches(active, b"sk-ant-oat01-" + b"o" * 95)
                 return self._successful_probe(spec)
 
             result = main(
@@ -1775,7 +1802,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         auth_file.write_text("DO-NOT-PRINT-CREDENTIAL-BODY", encoding="utf-8")
         auth_file.chmod(0o600)
         claude_token_file = root / "shared-auth/claude/oauth-token"
-        claude_token_file.write_text("x" * 32, encoding="ascii")
+        claude_token_file.write_text("sk-ant-oat01-" + "x" * 95, encoding="ascii")
         claude_token_file.chmod(0o600)
         hosts_file = root / "gh/hosts.yml"
         hosts_file.write_text("github.com:\n", encoding="utf-8")
@@ -3109,7 +3136,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                     token.chmod(0o644)
                 else:
                     target = Path(temp) / marker
-                    target.write_text("x" * 32, encoding="ascii")
+                    target.write_text("sk-ant-oat01-" + "x" * 95, encoding="ascii")
                     target.chmod(0o600)
                     token.unlink()
                     token.symlink_to(target)
@@ -3155,7 +3182,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                     token.chmod(0o644)
                 elif failure == "token-symlink":
                     target = Path(temp) / "token-target"
-                    target.write_text("x" * 32, encoding="ascii")
+                    target.write_text("sk-ant-oat01-" + "x" * 95, encoding="ascii")
                     target.chmod(0o600)
                     token.unlink()
                     token.symlink_to(target)
