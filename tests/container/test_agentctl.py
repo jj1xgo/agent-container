@@ -7123,6 +7123,25 @@ class HiddenTokenInputTest(unittest.TestCase):
     consume, and leaves an unterminated tail for the shell.
     """
 
+    @staticmethod
+    def _await_prompt(master: int, prompt: bytes) -> bytearray:
+        """Return once the reader has printed its prompt.
+
+        The reader flushes pending input when it takes the terminal, so a
+        write that lands earlier would be discarded and the reader would
+        block forever.
+        """
+        import os
+        import time
+
+        screen = bytearray()
+        deadline = time.monotonic() + 2
+        while prompt not in screen and time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 0.1)
+            if ready:
+                screen.extend(os.read(master, 4096))
+        return screen
+
     def _read(self, writes, settle_seconds: float = 0.2):
         import os
         import pty
@@ -7150,11 +7169,7 @@ class HiddenTokenInputTest(unittest.TestCase):
         thread.start()
         screen = bytearray()
         try:
-            deadline = time.monotonic() + 2
-            while b"PROMPT: " not in screen and time.monotonic() < deadline:
-                ready, _, _ = select.select([master], [], [], 0.1)
-                if ready:
-                    screen.extend(os.read(master, 4096))
+            screen.extend(self._await_prompt(master, b"PROMPT: "))
             for delay, data in writes:
                 time.sleep(delay)
                 os.write(master, data)
@@ -7334,6 +7349,7 @@ class HiddenTokenInputTest(unittest.TestCase):
         )
         thread.start()
         try:
+            self._await_prompt(master, b"P: ")
             os.write(master, b"foo bar\x17tokn\x01en\n")
             thread.join(timeout=3)
         finally:
@@ -7427,6 +7443,7 @@ class HiddenTokenInputTest(unittest.TestCase):
         thread = threading.Thread(target=reader, daemon=True)
         thread.start()
         try:
+            self._await_prompt(master, b"P: ")
             os.write(master, b"only\n")
             thread.join(timeout=3)
             after = termios.tcgetattr(slave)
@@ -7462,7 +7479,7 @@ class HiddenTokenInputTest(unittest.TestCase):
         thread = threading.Thread(target=reader, daemon=True)
         thread.start()
         try:
-            time.sleep(0.05)
+            self._await_prompt(master, b"P: ")
             os.write(master, b"only\n")
             thread.join(timeout=3)
         finally:
