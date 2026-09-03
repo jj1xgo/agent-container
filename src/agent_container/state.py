@@ -57,10 +57,22 @@ def egress_broker_project_label(project_id: str) -> str:
     return hashlib.sha256(validated.encode("ascii")).hexdigest()[:12]
 
 
+_CLAUDE_OAUTH_TOKEN = re.compile(r"sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]+")
+
+
 def validate_claude_oauth_token(value: str) -> str:
-    if not 32 <= len(value) <= 4096 or any(
-        ord(character) < 33 or ord(character) > 126 for character in value
-    ):
+    """Accept only the long-lived token that `claude setup-token` prints.
+
+    The browser login flow shows a one-time `code#state` value that must be
+    pasted into `claude setup-token` itself, not stored as the token.
+    """
+
+    if "#" in value:
+        raise ValueError(
+            "Claude OAuth token looks like a browser login code; "
+            "paste the token printed by claude setup-token"
+        )
+    if not 32 <= len(value) <= 4096 or _CLAUDE_OAUTH_TOKEN.fullmatch(value) is None:
         raise ValueError("Claude OAuth token has invalid format")
     return value
 

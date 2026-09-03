@@ -1616,7 +1616,7 @@ def main(
             token = ""
             try:
                 try:
-                    token = reader("Paste Claude setup token (input hidden): ")
+                    token = reader("Paste the sk-ant-oat01- token printed by claude setup-token (input hidden): ")
                 except (EOFError, KeyboardInterrupt):
                     print("error: Claude token input cancelled", file=stderr)
                     return 1

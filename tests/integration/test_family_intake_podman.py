@@ -564,7 +564,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                         directory.mkdir(parents=True, exist_ok=True)
                     for file_path in (state.codex_auth_file, state.claude_token_file):
                         file_path.parent.mkdir(parents=True, exist_ok=True)
-                        file_path.write_text("x" * 32, encoding="ascii")
+                        file_path.write_text("sk-ant-oat01-" + "x" * 95, encoding="ascii")
                     marker_id = secrets.token_hex(8)
                     ready_marker, done_marker = _marker_paths(
                         state.workspace, marker_id

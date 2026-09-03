@@ -20,7 +20,7 @@ class ClaudeAuthTest(unittest.TestCase):
         auth_dir.chmod(0o700)
         return StateLayout(root, "agent-container")
 
-    def make_private_file(self, path: Path, contents: str = "x" * 32) -> None:
+    def make_private_file(self, path: Path, contents: str = "sk-ant-oat01-" + "x" * 95) -> None:
         path.write_text(contents, encoding="ascii")
         path.chmod(0o600)
 
@@ -30,14 +30,14 @@ class ClaudeAuthTest(unittest.TestCase):
             auth_dir.mkdir(parents=True, mode=0o700)
             auth_dir.chmod(0o700)
             old = auth_dir / "oauth-token"
-            self.make_private_file(old, "o" * 32)
+            self.make_private_file(old, "sk-ant-oat01-" + "o" * 95)
 
-            staged = stage_claude_token(auth_dir, "n" * 32)
+            staged = stage_claude_token(auth_dir, "sk-ant-oat01-" + "n" * 95)
 
             self.assertEqual(stat.S_IMODE(staged.stat().st_mode), 0o600)
             install_claude_token(staged, old)
             self.assertTrue(
-                hmac.compare_digest(old.read_text(encoding="ascii"), "n" * 32)
+                hmac.compare_digest(old.read_text(encoding="ascii"), "sk-ant-oat01-" + "n" * 95)
             )
             self.assertFalse(staged.exists())
 
@@ -49,7 +49,7 @@ class ClaudeAuthTest(unittest.TestCase):
 
             with patch.object(Path, "read_text", side_effect=OSError("read failure")):
                 with self.assertRaises(OSError):
-                    stage_claude_token(auth_dir, "x" * 32)
+                    stage_claude_token(auth_dir, "sk-ant-oat01-" + "x" * 95)
 
             self.assertFalse(any(auth_dir.iterdir()))
 
@@ -69,8 +69,8 @@ class ClaudeAuthTest(unittest.TestCase):
             auth_dir = Path(temp) / "shared-auth/claude"
             auth_dir.mkdir(parents=True, mode=0o700)
             auth_dir.chmod(0o700)
-            staged = stage_claude_token(auth_dir, "x" * 32)
-            other = stage_claude_token(auth_dir, "y" * 32)
+            staged = stage_claude_token(auth_dir, "sk-ant-oat01-" + "x" * 95)
+            other = stage_claude_token(auth_dir, "sk-ant-oat01-" + "y" * 95)
 
             discard_staged_token(staged)
 
@@ -83,9 +83,9 @@ class ClaudeAuthTest(unittest.TestCase):
             auth_dir = root / "shared-auth/claude"
             auth_dir.mkdir(parents=True, mode=0o700)
             auth_dir.chmod(0o700)
-            staged = stage_claude_token(auth_dir, "n" * 32)
+            staged = stage_claude_token(auth_dir, "sk-ant-oat01-" + "n" * 95)
             target = root / "target"
-            self.make_private_file(target, "o" * 32)
+            self.make_private_file(target, "sk-ant-oat01-" + "o" * 95)
             destination = auth_dir / "oauth-token"
             destination.symlink_to(target)
 
@@ -94,7 +94,7 @@ class ClaudeAuthTest(unittest.TestCase):
 
             self.assertTrue(staged.exists())
             self.assertTrue(
-                hmac.compare_digest(target.read_text(encoding="ascii"), "o" * 32)
+                hmac.compare_digest(target.read_text(encoding="ascii"), "sk-ant-oat01-" + "o" * 95)
             )
 
             destination.unlink()
@@ -174,7 +174,7 @@ class ClaudeAuthTest(unittest.TestCase):
         with TemporaryDirectory() as temp:
             root = Path(temp)
             layout = self.make_layout(root)
-            self.make_private_file(layout.claude_token_file, "t" * 32)
+            self.make_private_file(layout.claude_token_file, "sk-ant-oat01-" + "t" * 95)
             self.make_private_file(layout.claude_legacy_credentials_file, "c" * 32)
             layout.claude_legacy_backups.mkdir(mode=0o700)
             nested = layout.claude_legacy_backups / "old"
@@ -200,7 +200,7 @@ class ClaudeAuthTest(unittest.TestCase):
             self.assertEqual(stat.S_IMODE((quarantine / "backups/old").stat().st_mode), 0o600)
             self.assertTrue(
                 hmac.compare_digest(
-                    layout.claude_token_file.read_text(encoding="ascii"), "t" * 32
+                    layout.claude_token_file.read_text(encoding="ascii"), "sk-ant-oat01-" + "t" * 95
                 )
             )
 

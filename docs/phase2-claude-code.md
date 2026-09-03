@@ -72,7 +72,7 @@ bin/agentctl doctor agent-container --agent claude
 bin/agentctl run agent-container --agent claude
 ```
 
-`bin/agentctl auth claude`は必ず利用者本人がscreen recordingやcaptured automationのないprivate terminalで実行します。内部で起動する`claude setup-token`は、Claude subscriptionで使う1年間有効なinference専用tokenをそのterminalに一度表示します。その後のhost promptは入力を表示しません。表示されたtokenはそのhidden promptにだけ貼り付け、chat、この会話、handover、shell history、screenshot、log、command line、環境変数へ貼り付けたり記録したりしません。このcredentialではClaude Remote Controlを利用できません。
+`bin/agentctl auth claude`は必ず利用者本人がscreen recordingやcaptured automationのないprivate terminalで実行します。内部で起動する`claude setup-token`は、Claude subscriptionで使う1年間有効なinference専用tokenをそのterminalに一度表示します。その後のhost promptは入力を表示しません。containerではbrowserがlocal callbackへ戻れないため、browserに表示される`code#state`形式のlogin codeは`claude setup-token`自身の`Paste code here if prompted`へ貼り、その承認後にterminalへ出力される`sk-ant-oat01-`で始まるtokenだけをhost promptへ貼ります。hostのvalidatorは`sk-ant-oatNN-`prefixと英数・`-`・`_`以外を拒否し、`#`を含む値はlogin codeの貼り間違いとして明示的に拒否します。表示されたtokenはそのhidden promptにだけ貼り付け、chat、この会話、handover、shell history、screenshot、log、command line、環境変数へ貼り付けたり記録したりしません。このcredentialではClaude Remote Controlを利用できません。
 
 ```bash
 bin/agentctl auth claude
