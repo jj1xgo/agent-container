@@ -6,6 +6,7 @@ import stat
 import subprocess
 import tempfile
 
+from agent_container.handover import latest_handover
 from agent_container.handover_writer import create_atomic_handover
 from agent_container.handover_broker_protocol import MAX_DOCUMENT_BYTES
 from agent_container.state import ensure_private_file
@@ -153,6 +154,30 @@ def _registered_target(
     return matches[0]
 
 
+def _registered_project(
+    cwd: Path, projects_root: Path, remote_getter: RemoteGetter
+) -> tuple[str, Path]:
+    workspace = cwd.resolve(strict=True)
+    if not workspace.is_dir() or workspace.is_symlink():
+        raise ValueError("workspace is invalid")
+    repository = _normalize_github_remote(remote_getter(workspace))
+    return _registered_target(
+        workspace,
+        projects_root.resolve(strict=True),
+        repository,
+    )
+
+
+def discover_host_handover(
+    *,
+    cwd: Path,
+    projects_root: Path,
+    remote_getter: RemoteGetter = _git_remote,
+) -> Path | None:
+    project_id, project_dir = _registered_project(cwd, projects_root, remote_getter)
+    return latest_handover(project_dir.parent, project_id)
+
+
 def publish_host_handover(
     *,
     cwd: Path,
@@ -162,15 +187,7 @@ def publish_host_handover(
     session_id: str = "",
     remote_getter: RemoteGetter = _git_remote,
 ) -> Path:
-    workspace = cwd.resolve(strict=True)
-    if not workspace.is_dir() or workspace.is_symlink():
-        raise ValueError("workspace is invalid")
-    repository = _normalize_github_remote(remote_getter(workspace))
-    project_id, project_dir = _registered_target(
-        workspace,
-        projects_root.resolve(strict=True),
-        repository,
-    )
+    project_id, project_dir = _registered_project(cwd, projects_root, remote_getter)
     body = _read_private_body(body_file)
     return create_atomic_handover(
         project_dir,
