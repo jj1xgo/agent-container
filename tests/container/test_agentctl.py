@@ -696,6 +696,51 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
                 stderr.getvalue(), login_code, self.OLD_TOKEN
             )
 
+    def test_claude_auth_joins_a_token_pasted_across_wrapped_lines(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+            first, second = self.NEW_TOKEN[:60], self.NEW_TOKEN[60:]
+            stderr = StringIO()
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=self._successful_probe,
+                token_reader=lambda prompt: first + "\n" + second + "\n",
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 0)
+            self._assert_token_matches(active, self.NEW_TOKEN.encode("ascii"))
+            self.assertIn("joined 2 input lines", stderr.getvalue())
+            self._assert_private_values_absent(stderr.getvalue(), first, second)
+
+    def test_claude_auth_hints_wrapped_paste_when_joined_value_is_invalid(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+            old_bytes = active.read_bytes()
+            first, second = "sk-ant-oat01-" + "x" * 40, "not-the-rest#of-it"
+            calls = []
+            stderr = StringIO()
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=lambda spec: calls.append(spec) or self._successful_probe(spec),
+                token_reader=lambda prompt: first + "\n" + second,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertIn("line break", stderr.getvalue())
+            self.assertIn("wider terminal", stderr.getvalue())
+            self.assertTrue(all(call.argv[-3:] != ("claude", "auth", "status") for call in calls))
+            self._assert_token_matches(active, old_bytes)
+            self.assertEqual(list(active.parent.glob(".oauth-token-stage-*")), [])
+            self._assert_private_values_absent(stderr.getvalue(), first, second)
+
     def test_claude_auth_status_failure_discards_stage_and_preserves_existing(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp)
@@ -7043,6 +7088,58 @@ class AgentCtlFamilyTest(unittest.TestCase):
             self.assertEqual((result, stderr.getvalue()), (0, ""))
             self.assertEqual(len(creator.create_calls), 1)
             self.assertEqual(len(inventory.verified), 1)
+
+
+class HiddenTokenInputTest(unittest.TestCase):
+    def test_reader_appends_lines_left_in_the_terminal_after_getpass(self) -> None:
+        from agent_container.agentctl import read_hidden_token
+
+        value = read_hidden_token(
+            "prompt: ",
+            hidden_reader=lambda prompt: "first-line",
+            drain=lambda: "second-line\nthird\n",
+        )
+
+        self.assertEqual(value, "first-line\nsecond-line\nthird\n")
+
+    def test_reader_returns_the_single_line_when_nothing_is_pending(self) -> None:
+        from agent_container.agentctl import read_hidden_token
+
+        self.assertEqual(
+            read_hidden_token("p: ", hidden_reader=lambda prompt: "only", drain=lambda: ""),
+            "only",
+        )
+
+    def test_drain_reads_pending_terminal_lines_without_blocking(self) -> None:
+        import os
+        import pty
+
+        from agent_container.agentctl import drain_pending_terminal_input
+
+        master, slave = pty.openpty()
+        try:
+            os.write(master, b"rest-of-token\n")
+            pending = drain_pending_terminal_input(
+                open_terminal=lambda: os.dup(slave), settle_seconds=0.2
+            )
+            self.assertEqual(pending, "rest-of-token\n")
+            self.assertEqual(
+                drain_pending_terminal_input(
+                    open_terminal=lambda: os.dup(slave), settle_seconds=0.05
+                ),
+                "",
+            )
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    def test_drain_returns_empty_when_no_terminal_is_available(self) -> None:
+        from agent_container.agentctl import drain_pending_terminal_input
+
+        def no_tty() -> int:
+            raise OSError("no tty")
+
+        self.assertEqual(drain_pending_terminal_input(open_terminal=no_tty), "")
 
 
 if __name__ == "__main__":

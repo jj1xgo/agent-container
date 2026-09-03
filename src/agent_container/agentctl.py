@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import subprocess
 import sys
 import tempfile
@@ -331,6 +332,65 @@ def _snapshot_legacy_claude_sources(layout: StateLayout) -> tuple[Path, ...]:
 def _require_private_token_terminal(stdin: TextIO, stderr: TextIO) -> None:
     if not stdin.isatty() or not stderr.isatty():
         raise ValueError("Claude setup-token requires a private terminal")
+
+
+def _open_controlling_terminal() -> int:
+    return os.open("/dev/tty", os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+
+
+def drain_pending_terminal_input(
+    *,
+    open_terminal: Callable[[], int] = _open_controlling_terminal,
+    settle_seconds: float = 0.3,
+) -> str:
+    """Read the lines a wrapped paste left in the terminal after getpass returned.
+
+    getpass reads one line. A token that wrapped across two terminal lines
+    leaves its second half in the terminal buffer, where the shell would
+    execute it after this process exits. Take those lines here instead.
+    """
+
+    try:
+        descriptor = open_terminal()
+    except OSError:
+        return ""
+    try:
+        os.set_blocking(descriptor, False)
+        pending = bytearray()
+        deadline = time.monotonic() + settle_seconds
+        while len(pending) < 8192:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([descriptor], [], [], remaining)
+            if not ready:
+                break
+            try:
+                chunk = os.read(descriptor, 4096)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                break
+            pending.extend(chunk)
+        return pending.decode("utf-8", errors="replace")
+    finally:
+        os.close(descriptor)
+
+
+def read_hidden_token(
+    prompt: str,
+    *,
+    hidden_reader: Callable[[str], str] = getpass.getpass,
+    drain: Callable[[], str] = drain_pending_terminal_input,
+) -> str:
+    first = hidden_reader(prompt)
+    rest = drain()
+    return first + "\n" + rest if rest else first
+
+
+def _normalize_pasted_token(raw: str) -> tuple[str, int]:
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    return "".join(lines), len(lines)
 
 
 def _resolve_handover_root(handover_root: Path, project_id: str) -> Path:
@@ -1612,21 +1672,38 @@ def main(
             _prepare_claude_auth(layout)
             setup_spec = claude_setup_token_spec(arguments.image)
             _require_success(runner(setup_spec), setup_spec)
-            reader = getpass.getpass if token_reader is None else token_reader
+            reader = read_hidden_token if token_reader is None else token_reader
             token = ""
+            raw = ""
             try:
                 try:
-                    token = reader("Paste the sk-ant-oat01- token printed by claude setup-token (input hidden): ")
+                    raw = reader("Paste the sk-ant-oat01- token printed by claude setup-token (input hidden): ")
                 except (EOFError, KeyboardInterrupt):
                     print("error: Claude token input cancelled", file=stderr)
                     return 1
-                validate_claude_oauth_token(token)
+                token, line_count = _normalize_pasted_token(raw)
+                if line_count > 1:
+                    print(
+                        f"note: joined {line_count} input lines from the hidden prompt",
+                        file=stderr,
+                    )
+                try:
+                    validate_claude_oauth_token(token)
+                except ValueError as error:
+                    if line_count > 1:
+                        raise ValueError(
+                            f"{error}; the input contained a line break, so the "
+                            "token probably wrapped in the terminal: paste it "
+                            "again in a wider terminal"
+                        ) from None
+                    raise
                 try:
                     staged = stage_claude_token(layout.claude_auth_dir, token)
                 except (ValueError, OSError):
                     raise _ClaudeTokenFilesystemError from None
             finally:
                 token = ""
+                raw = ""
             try:
                 status_spec = claude_token_status_spec(staged, arguments.image)
                 _require_success(_suppressed_run(runner, status_spec), status_spec)
