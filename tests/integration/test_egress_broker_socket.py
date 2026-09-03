@@ -7,6 +7,7 @@ import struct
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -200,6 +201,9 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                         )
                 worker.join(timeout=2)
                 self.assertFalse(worker.is_alive())
+                # The broker writes the tunnel's "ok" record after the relay
+                # finishes, so wait for it before the replay adds its own record.
+                self._wait_for_audit_status(runtime.session.audit_file, "ok")
 
                 replay = EgressRequest(
                     1,
@@ -252,6 +256,33 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                 payload.decode("latin1"),
             ):
                 self.assertNotIn(secret, audit)
+
+    # Break caught: the replay denial landing in the audit log before the
+    # tunnel's own "ok" record, which the broker writes only after the relay
+    # finishes. The delay makes the race deterministic instead of CI-timing
+    # dependent.
+    def test_audit_order_is_stable_when_ok_record_is_written_late(self) -> None:
+        from agent_container.egress_broker import EgressBrokerSession
+
+        original = EgressBrokerSession.audit
+
+        def delayed_audit(session, status, *args, **kwargs):
+            if status == "ok":
+                time.sleep(0.3)
+            return original(session, status, *args, **kwargs)
+
+        with mock.patch.object(EgressBrokerSession, "audit", delayed_audit):
+            self.test_real_adapter_gateway_socket_enforces_policy_and_cleans_runtime()
+
+    @staticmethod
+    def _wait_for_audit_status(audit_file: Path, status: str) -> None:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            for line in audit_file.read_text(encoding="utf-8").splitlines():
+                if json.loads(line).get("status") == status:
+                    return
+            time.sleep(0.01)
+        raise AssertionError(f"audit record with status {status!r} did not appear")
 
     @staticmethod
     def _request(socket_path: Path, frame: bytes) -> tuple[str, str]:
