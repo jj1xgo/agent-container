@@ -57,9 +57,22 @@ def validate_handover_content(title: str, body: str) -> tuple[str, str]:
     return title, body
 
 
-def render_handover(project_id: str, title: str, body: str, now: datetime) -> bytes:
+def render_handover(
+    project_id: str,
+    title: str,
+    body: str,
+    now: datetime,
+    session_id: str = "",
+) -> bytes:
     project_id = validate_project_id(project_id)
     title, body = validate_handover_content(title, body)
+    if not isinstance(session_id, str):
+        raise ValueError("handover session ID must be a string")
+    session = session_id.strip()
+    if "\n" in session or "\r" in session or "\x00" in session:
+        raise ValueError("handover session ID must be one line")
+    if not session:
+        session = "（未記録）"
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("handover timestamp must include a timezone")
     created = now.astimezone(timezone.utc).isoformat(timespec="seconds")
@@ -67,7 +80,7 @@ def render_handover(project_id: str, title: str, body: str, now: datetime) -> by
         f"# Handover: {title}\n\n"
         f"- Project: {project_id}\n"
         f"- Created: {created}\n"
-        "- Session: （未記録）\n\n"
+        f"- Session: {session}\n\n"
         f"{body}"
     ).encode("utf-8")
     if len(document) > MAX_DOCUMENT_BYTES:
@@ -199,9 +212,16 @@ def create_atomic_handover(
     now: datetime | None = None,
     token_hex: Callable[[int], str] = secrets.token_hex,
     publication_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    session_id: str = "",
 ) -> Path:
     timestamp = now or datetime.now(timezone.utc)
-    document = render_handover(project_id, title, body, timestamp)
+    document = render_handover(
+        project_id,
+        title,
+        body,
+        timestamp,
+        session_id=session_id,
+    )
     timestamp = timestamp.astimezone(timezone.utc)
     project, directory_fd = _open_project_directory(project_dir, project_id)
 

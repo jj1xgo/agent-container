@@ -136,6 +136,18 @@ handover作成には保存先を環境から固定する専用`agent-handover cr
 bin/agentctl project update-profile PROJECT
 ```
 
+ホストCodexからもhandoverごとの承認を省く場合は、変更可能なcheckout内のscriptではなく、standalone実行fileをcheckout外へ一度だけinstallします。
+
+```bash
+build_dir=$(mktemp -d /tmp/agent-handover-host-build.XXXXXX)
+bin/build-agent-handover-host "$build_dir/agent-handover-host"
+install -d -m 755 "$HOME/.local/libexec/agent-container"
+install -m 755 "$build_dir/agent-handover-host" \
+  "$HOME/.local/libexec/agent-container/agent-handover-host"
+```
+
+`profiles/host-codex/skills/handover/SKILL.md`をhostのhandover skillへ配置し、installed executableの`publish` prefixだけを恒久許可します。commandは現在のGit originとprivateなproject登録を照合して保存先を内部決定し、projectや保存先を引数・環境変数から上書きできません。
+
 診断がPASSしたらCodexを起動できます。
 
 ```bash
