@@ -148,6 +148,27 @@ install -m 755 "$build_dir/agent-handover-host" \
 
 `profiles/host-codex/skills/handover/SKILL.md`をhostのhandover skillへ配置し、installed executableの`publish` prefixだけを恒久許可します。commandは現在のGit originとprivateなproject登録を照合して保存先を内部決定し、projectや保存先を引数・環境変数から上書きできません。
 
+ホストのClaude Codeでも同じinstalled executableを使います。`profiles/host-claude/hooks/handover-discover`を`~/.claude/hooks/`へ、`profiles/host-claude/skills/handover/SKILL.md`を`~/.claude/skills/handover/`へ配置し、`~/.claude/settings.json`へ次のSessionStart hookを追加します。hookはstartup、resume、compact時に`agent-handover-host discover`で登録projectの最新handover pathだけを通知し、本文は注入しません。Claudeのsession IDは`CLAUDE_SESSION_ID`として同じsession内のBash commandへ引き継がれ、publisherはこれをhandoverのSession欄へ記録します。
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/handover-discover",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 診断がPASSしたらCodexを起動できます。
 
 ```bash

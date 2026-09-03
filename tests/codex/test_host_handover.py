@@ -5,6 +5,7 @@ import stat
 from tempfile import mkstemp, TemporaryDirectory
 import unittest
 
+from agent_container.host_handover import discover_host_handover
 from agent_container.host_handover import publish_host_handover
 
 
@@ -164,6 +165,83 @@ class HostHandoverPublisherTest(unittest.TestCase):
                     projects_root=projects,
                     title="Unsafe",
                     body_file=nested_body,
+                    remote_getter=lambda _: "git@github.com:owner/repository.git",
+                )
+
+
+class HostHandoverDiscoveryTest(unittest.TestCase):
+    def _register(self, root: Path, project_id: str, repository: str) -> Path:
+        projects = root / "projects"
+        handovers = root / "handovers"
+        project_state = projects / project_id
+        project_state.mkdir(parents=True)
+        metadata = project_state / "project.json"
+        metadata.write_text(
+            json.dumps({"repository": repository, "handover_root": str(handovers)})
+            + "\n",
+            encoding="utf-8",
+        )
+        metadata.chmod(0o600)
+        project_dir = handovers / project_id
+        project_dir.mkdir(parents=True)
+        return project_dir
+
+    def test_returns_latest_handover_of_the_registered_project(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "linked-worktree"
+            workspace.mkdir()
+            project_dir = self._register(root, "agent-container", "owner/repository")
+            other_dir = self._register(root, "unrelated", "another/repository")
+            older = project_dir / "2026-09-01_000000_aaaaaaaa.md"
+            newer = project_dir / "2026-09-02_000000_bbbbbbbb.md"
+            for path, created in (
+                (older, "2026-09-01T00:00:00+00:00"),
+                (newer, "2026-09-02T00:00:00+00:00"),
+            ):
+                path.write_text(
+                    f"# Handover: x\n\n- Project: agent-container\n- Created: {created}\n",
+                    encoding="utf-8",
+                )
+            (other_dir / "2026-09-03_000000_cccccccc.md").write_text(
+                "# Handover: other\n\n- Created: 2026-09-03T00:00:00+00:00\n",
+                encoding="utf-8",
+            )
+
+            found = discover_host_handover(
+                cwd=workspace,
+                projects_root=root / "projects",
+                remote_getter=lambda _: "git@github.com:owner/repository.git",
+            )
+
+            self.assertEqual(found, newer)
+
+    def test_returns_none_when_the_project_has_no_handover(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "agent-container"
+            workspace.mkdir()
+            self._register(root, "agent-container", "owner/repository")
+
+            found = discover_host_handover(
+                cwd=workspace,
+                projects_root=root / "projects",
+                remote_getter=lambda _: "https://github.com/owner/repository",
+            )
+
+            self.assertIsNone(found)
+
+    def test_refuses_unregistered_workspace(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "somewhere"
+            workspace.mkdir()
+            (root / "projects").mkdir()
+
+            with self.assertRaisesRegex(ValueError, "unique registered project"):
+                discover_host_handover(
+                    cwd=workspace,
+                    projects_root=root / "projects",
                     remote_getter=lambda _: "git@github.com:owner/repository.git",
                 )
 

@@ -26,7 +26,7 @@ class HostHandoverBundleTest(unittest.TestCase):
             )
 
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o755)
-            self.assertIn("{publish}", completed.stdout)
+            self.assertIn("{publish,discover}", completed.stdout)
 
 
 if __name__ == "__main__":
