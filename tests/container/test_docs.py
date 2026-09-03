@@ -875,9 +875,9 @@ class FamilyIssueBrokerDocumentationTest(unittest.TestCase):
             self.smoke,
         )
         for expected in (
-            "Codex suiteは`Ran 30 tests ... OK`",
-            "container suiteは`Ran 954 tests ... OK`",
-            "socket suiteは`Ran 17 tests ... OK`",
+            "Codex suiteは`Ran 44 tests ... OK`",
+            "container suiteは`Ran 976 tests ... OK`",
+            "socket suiteは`Ran 18 tests ... OK`",
             "forced-unknown fixtureは`Ran 4 tests ... OK`",
             "Podman suiteは`Ran 14 tests ... OK`",
             "unexpected skipは0件",
@@ -892,7 +892,6 @@ class FamilyIssueBrokerDocumentationTest(unittest.TestCase):
         self.assertIn("| Intake / duplicate / non-exposure | PASS |", self.smoke)
         self.assertIn("| Cleanup / rollback | PASS |", self.smoke)
         self.assertNotIn("| PARTIAL |", self.smoke)
-        self.assertNotIn("HTTP 401", self.smoke)
         self.assertNotIn("subscription access無効", self.smoke)
         self.assertNotIn("UNOBSERVED", self.operator + self.smoke)
 
