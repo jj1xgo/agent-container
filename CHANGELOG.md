@@ -14,6 +14,10 @@
 
 - containerへはrun限定socketとone-time capabilityだけを渡し、family App key／token、repository、pending host path、approval commandを渡しません。作成済みIssueのedit、close、deleteやfailure時fallbackは提供しません。
 
+### Validation
+
+- 2026-09-02の実host smokeでlocal automated gate、Codex／Claude両pathの実Podman gate、専用Appの最小権限とexact 1 repository inventory、Codex intake／duplicate拒否、fresh approval付き[Issue #75](https://github.com/jj1xgo/agent-container/issues/75)、content-free audit、terminal cleanupを確認しました。Claude実CLI intakeはlong-lived OAuth tokenの生成・private保存後もClaude Codeとraw Anthropic APIがHTTP 401を返し、fixture提出前に停止しており、Phase 5の残作業として保持します。
+
 ## [0.4.1] - 2026-09-01
 
 ### Fixed

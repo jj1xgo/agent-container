@@ -24,7 +24,7 @@ PYTHONPATH=src python3 -m unittest tests.integration.test_family_forced_unknown 
 git diff --check
 ```
 
-固定期待値はCodex suiteは`Ran 21 tests ... OK`、container suiteは`Ran 950 tests ... OK`、socket suiteは`Ran 17 tests ... OK`、forced-unknown fixtureは`Ran 4 tests ... OK`です。すべてのcommandでunexpected skipは0件を要求し、件数不一致または1件でも想定外skipがあればPASSにしません。host生成署名、duplicate denial、content-free audit、credential non-exposure、terminal cleanup、forced unknownとcreated / not-created reconciliationがunit／socket testで通ったことをtest名と件数で記録します。秘密値やcanonical本文を記録しません。
+固定期待値はCodex suiteは`Ran 30 tests ... OK`、container suiteは`Ran 954 tests ... OK`、socket suiteは`Ran 17 tests ... OK`、forced-unknown fixtureは`Ran 4 tests ... OK`です。すべてのcommandでunexpected skipは0件を要求し、件数不一致または1件でも想定外skipがあればPASSにしません。host生成署名、duplicate denial、content-free audit、credential non-exposure、terminal cleanup、forced unknownとcreated / not-created reconciliationがunit／socket testで通ったことをtest名と件数で記録します。秘密値やcanonical本文を記録しません。
 
 ## 2. Real Podman gate
 
@@ -123,11 +123,11 @@ rollbackで作成済みIssueを変更しないでください。自動close、ed
 
 | Gate | Result | Evidence |
 |---|---|---|
-| Local automated | not run | — |
-| Real Podman Codex path | not run | — |
-| Real Podman Claude path | not run | — |
-| Dedicated App / binding | not run | — |
-| Intake / duplicate / non-exposure | not run | — |
-| Approved real Issue | not run | — |
-| Forced unknown / reconciliation | not run | — |
-| Cleanup / rollback | not run | — |
+| Local automated | PASS | 2026-09-02、commit `699420f`。lint、Codex 21、container 953、socket 17、forced-unknown 4、unexpected skip 0、`git diff --check` PASS。hostのumaskでcheckout時に664となったmanaged `CLAUDE.md`は期待metadataの644へ戻して実行した。 |
+| Real Podman Codex path | PASS | 2026-09-02、Podman 5.8.6、local rootless、crun 1.28。commit `699420f`から専用instrumented imageをbuildし、Codex／Claude両pathを含むPodman suite 14 tests、unexpected skip 0。single socket-file bind、pinned fd不在、ancestor sentinel拒否、actual conmon ancestry、duplicate denial、credential non-exposure、broker停止時のnonzeroとterminal cleanupを確認。 |
+| Real Podman Claude path | PASS | 同じ14-test実Podman suiteでClaude pathをegress有無の双方について確認。実Claude CLIによるintakeだけはlong-lived OAuth tokenの生成・private保存後もClaude Codeとraw Anthropic APIがHTTP 401を返し、fixture提出前に停止したため、次行ではPARTIALとして分離する。 |
+| Dedicated App / binding | PASS | `findsummits`のlocal state、binding、pending、audit、App metadata permissionがPASS。requested token permissionはIssues write／Metadata read、live installation inventoryはselected repository exactly 1件でbindingと一致。設定変更なし。 |
+| Intake / duplicate / non-exposure | PARTIAL | Codex実runtimeは固定fixture 1件をpendingへ保存し、同runの2回目をduplicateとして拒否。実Podman suiteではCodex／Claude双方のenvironment、argv、mount、inspection、filesystemにcredential／repository／pending path／approval commandがないことを確認。Claude実runtimeは起動したがlong-lived OAuth tokenの生成・private保存後もHTTP 401となり、intakeはnot run。 |
+| Approved real Issue | PASS | fresh approval後にrequest 1件だけを作成し、[Issue #75](https://github.com/jj1xgo/agent-container/issues/75)のtitle/body一致とOPENを確認。同requestの再approveは送信前に拒否され、terminal recordのcanonical contentは消去済み。 |
+| Forced unknown / reconciliation | PASS | 2026-09-02、host-only fake fixture 4 tests PASS。network、Podman、GitHub mutationなし。 |
+| Cleanup / rollback | PARTIAL | Codex正常終了とClaude認証前終了後、関連container 0、socket file 0、inspection marker 0。pending／audit validatorはPASS。auditは固定6 field、7 eventsで最新は`approve`／`created`／`cleanup`。App／bindingは継続検証用に保持し、作成済みIssueは変更していないためrollbackはnot run。 |
