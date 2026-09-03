@@ -329,20 +329,33 @@ def _snapshot_legacy_claude_sources(layout: StateLayout) -> tuple[Path, ...]:
         raise _ClaudeTokenFilesystemError from None
 
 
-def _require_private_token_terminal(stdin: TextIO, stderr: TextIO) -> None:
-    if not stdin.isatty() or not stderr.isatty():
-        raise ValueError("Claude setup-token requires a private terminal")
-
-
 def _open_controlling_terminal() -> int:
     return os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+
+
+def _require_private_token_terminal(
+    stdin: TextIO,
+    stderr: TextIO,
+    open_terminal: Callable[[], int] = _open_controlling_terminal,
+) -> None:
+    if not stdin.isatty() or not stderr.isatty():
+        raise ValueError("Claude setup-token requires a private terminal")
+    # The hidden prompt reads /dev/tty directly; fail here, before
+    # `claude setup-token` displays the token, if there is no controlling terminal.
+    try:
+        descriptor = open_terminal()
+    except OSError:
+        raise ValueError(
+            "Claude setup-token requires a controlling terminal (/dev/tty)"
+        ) from None
+    os.close(descriptor)
 
 
 def read_hidden_token(
     prompt: str,
     *,
     open_terminal: Callable[[], int] = _open_controlling_terminal,
-    settle_seconds: float = 0.3,
+    settle_seconds: float = 1.0,
     limit: int = 8192,
 ) -> str:
     """Read a pasted token from the terminal without echo, including wrapped lines.
@@ -352,24 +365,30 @@ def read_hidden_token(
     terminal lines is pasted with a line break, so this reader owns the
     terminal for the whole paste: echo and canonical mode are off, and after
     the first newline it keeps reading until the input has been quiet for
-    ``settle_seconds``. Everything read is returned as is; the caller joins
-    the lines.
+    ``settle_seconds``. Backspace and Ctrl-U edit the value as in canonical
+    mode. Whatever is still queued when the reader returns is flushed so the
+    shell never receives it. Everything read is returned as is; the caller
+    joins the lines.
     """
 
     descriptor = open_terminal()
     try:
-        saved = termios.tcgetattr(descriptor)
+        try:
+            saved = termios.tcgetattr(descriptor)
+        except termios.error as error:
+            raise OSError(str(error)) from None
         attributes = list(saved)
         attributes[3] &= ~(termios.ECHO | termios.ICANON)
         attributes[6] = list(attributes[6])
         attributes[6][termios.VMIN] = 1
         attributes[6][termios.VTIME] = 0
-        termios.tcsetattr(descriptor, termios.TCSAFLUSH, attributes)
+        pending = bytearray()
         try:
+            termios.tcsetattr(descriptor, termios.TCSAFLUSH, attributes)
             os.write(descriptor, prompt.encode("utf-8"))
-            pending = bytearray()
             newline_seen = False
-            while len(pending) < limit:
+            finished = False
+            while not finished and len(pending) < limit:
                 timeout = settle_seconds if newline_seen else None
                 ready, _, _ = select.select([descriptor], [], [], timeout)
                 if not ready:
@@ -377,17 +396,31 @@ def read_hidden_token(
                 chunk = os.read(descriptor, 4096)
                 if not chunk:
                     break
-                if b"\x04" in chunk:
-                    pending.extend(chunk.split(b"\x04", 1)[0])
-                    if not pending.strip():
-                        raise EOFError("hidden token input ended")
-                    break
-                pending.extend(chunk)
-                if b"\n" in chunk or b"\r" in chunk:
-                    newline_seen = True
-            os.write(descriptor, b"\n")
+                for byte in chunk:
+                    if byte == 0x04 or len(pending) >= limit:
+                        finished = True
+                        break
+                    if byte in (0x7F, 0x08):
+                        if pending:
+                            del pending[-1]
+                        continue
+                    if byte == 0x15:
+                        pending.clear()
+                        continue
+                    pending.append(byte)
+                    if byte in (0x0A, 0x0D):
+                        newline_seen = True
+            if finished and not pending.strip():
+                raise EOFError("hidden token input ended")
         finally:
-            termios.tcsetattr(descriptor, termios.TCSANOW, saved)
+            os.write(descriptor, b"\n")
+            # TCSAFLUSH discards anything still queued (an over-long paste or a
+            # tail that arrived after the settle window) instead of handing it
+            # to the shell.
+            try:
+                termios.tcsetattr(descriptor, termios.TCSAFLUSH, saved)
+            except termios.error as error:
+                raise OSError(str(error)) from None
     finally:
         os.close(descriptor)
     return pending.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")

@@ -7186,6 +7186,106 @@ class HiddenTokenInputTest(unittest.TestCase):
         with self.assertRaises(EOFError):
             self._read([(0.05, b"\x04")])
 
+    def test_input_beyond_the_limit_is_flushed_not_left_for_the_shell(self) -> None:
+        big = b"x" * 9000 + b"\nrm -rf tail\n"
+        value, _, _, _, leftover = self._read([(0.05, big)])
+
+        self.assertLessEqual(len(value), 8192)
+        self.assertEqual(leftover, b"")
+
+    def test_tail_arriving_within_the_settle_window_is_joined(self) -> None:
+        # Slow paste paths (mosh, tmux paste-buffer) can deliver the second
+        # line well after the first; the default window absorbs that.
+        value, screen, _, _, leftover = self._read(
+            [(0.05, b"first\n"), (0.5, b"second\n")], settle_seconds=1.0
+        )
+
+        self.assertEqual(value, "first\nsecond\n")
+        self.assertNotIn(b"second", screen)
+        self.assertEqual(leftover, b"")
+
+    def test_backspace_and_ctrl_u_edit_the_pasted_value(self) -> None:
+        value, _, _, _, _ = self._read([(0.05, b"tokn\x7fen\n")])
+        self.assertEqual(value, "token\n")
+
+        value, _, _, _, _ = self._read([(0.05, b"wrong\x15right\n")])
+        self.assertEqual(value, "right\n")
+
+    def test_end_of_input_moves_the_cursor_off_the_prompt_line(self) -> None:
+        import os
+        import pty
+        import threading
+
+        from agent_container.agentctl import read_hidden_token
+
+        master, slave = pty.openpty()
+        errors: list[BaseException] = []
+
+        def reader() -> None:
+            try:
+                read_hidden_token("PROMPT: ", open_terminal=lambda: os.dup(slave))
+            except BaseException as error:  # noqa: BLE001
+                errors.append(error)
+
+        thread = threading.Thread(target=reader, daemon=True)
+        thread.start()
+        screen = bytearray()
+        try:
+            while b"PROMPT: " not in screen:
+                screen.extend(os.read(master, 4096))
+            os.write(master, b"\x04")
+            thread.join(timeout=3)
+            while True:
+                ready, _, _ = select.select([master], [], [], 0.1)
+                if not ready:
+                    break
+                screen.extend(os.read(master, 4096))
+        finally:
+            os.close(master)
+            os.close(slave)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], EOFError)
+        self.assertTrue(bytes(screen).endswith(b"PROMPT: \r\n"), bytes(screen))
+
+    def test_terminal_errors_surface_as_os_errors(self) -> None:
+        import os
+
+        from agent_container.agentctl import read_hidden_token
+
+        read_end, write_end = os.pipe()
+        try:
+            with self.assertRaises(OSError):
+                read_hidden_token("p: ", open_terminal=lambda: os.dup(read_end))
+        finally:
+            os.close(read_end)
+            os.close(write_end)
+
+    def test_private_terminal_check_probes_the_controlling_terminal(self) -> None:
+        from agent_container.agentctl import _require_private_token_terminal
+
+        class Tty(StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        def no_tty() -> int:
+            raise OSError("no controlling terminal")
+
+        with self.assertRaisesRegex(ValueError, "controlling terminal"):
+            _require_private_token_terminal(Tty(), Tty(), open_terminal=no_tty)
+
+        opened: list[int] = []
+
+        def fake_tty() -> int:
+            import os
+
+            read_end, write_end = os.pipe()
+            os.close(write_end)
+            opened.append(read_end)
+            return read_end
+
+        _require_private_token_terminal(Tty(), Tty(), open_terminal=fake_tty)
+        self.assertEqual(len(opened), 1)
+
     def test_reader_fails_when_no_terminal_can_be_opened(self) -> None:
         from agent_container.agentctl import read_hidden_token
 
