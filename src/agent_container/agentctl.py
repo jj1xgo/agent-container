@@ -357,6 +357,7 @@ def read_hidden_token(
     open_terminal: Callable[[], int] = _open_controlling_terminal,
     settle_seconds: float = 1.0,
     limit: int = 8192,
+    complete: Callable[[str], bool] | None = None,
 ) -> str:
     """Read a pasted token from the terminal without echo, including wrapped lines.
 
@@ -365,10 +366,11 @@ def read_hidden_token(
     terminal lines is pasted with a line break, so this reader owns the
     terminal for the whole paste: echo and canonical mode are off, and after
     the first newline it keeps reading until the input has been quiet for
-    ``settle_seconds``. Backspace and Ctrl-U edit the value as in canonical
-    mode. Whatever is still queued when the reader returns is flushed so the
-    shell never receives it. Everything read is returned as is; the caller
-    joins the lines.
+    ``settle_seconds`` unless ``complete`` already accepts what was read.
+    The terminal's erase, kill, word-erase, and EOF characters keep working.
+    Whatever is still queued when the reader returns is flushed so the shell
+    never receives it. Everything read is returned as is; the caller joins
+    the lines.
     """
 
     descriptor = open_terminal()
@@ -377,14 +379,22 @@ def read_hidden_token(
             saved = termios.tcgetattr(descriptor)
         except termios.error as error:
             raise OSError(str(error)) from None
+        control = saved[6]
+        erase = {0x7F, 0x08, control[termios.VERASE][0]}
+        kill = control[termios.VKILL][0]
+        word_erase = control[termios.VWERASE][0]
+        end_of_file = control[termios.VEOF][0]
         attributes = list(saved)
         attributes[3] &= ~(termios.ECHO | termios.ICANON)
-        attributes[6] = list(attributes[6])
+        attributes[6] = list(control)
         attributes[6][termios.VMIN] = 1
         attributes[6][termios.VTIME] = 0
         pending = bytearray()
         try:
-            termios.tcsetattr(descriptor, termios.TCSAFLUSH, attributes)
+            try:
+                termios.tcsetattr(descriptor, termios.TCSAFLUSH, attributes)
+            except termios.error as error:
+                raise OSError(str(error)) from None
             os.write(descriptor, prompt.encode("utf-8"))
             newline_seen = False
             finished = False
@@ -395,32 +405,45 @@ def read_hidden_token(
                     break
                 chunk = os.read(descriptor, 4096)
                 if not chunk:
+                    finished = True
                     break
                 for byte in chunk:
-                    if byte == 0x04 or len(pending) >= limit:
+                    if byte == end_of_file or len(pending) >= limit:
                         finished = True
                         break
-                    if byte in (0x7F, 0x08):
+                    if byte in erase:
                         if pending:
                             del pending[-1]
                         continue
-                    if byte == 0x15:
+                    if byte == kill:
                         pending.clear()
+                        continue
+                    if byte == word_erase:
+                        while pending and pending[-1] in b" \t":
+                            del pending[-1]
+                        while pending and pending[-1] not in b" \t\n\r":
+                            del pending[-1]
                         continue
                     pending.append(byte)
                     if byte in (0x0A, 0x0D):
                         newline_seen = True
+                        if complete is not None and complete(
+                            pending.decode("utf-8", errors="replace")
+                        ):
+                            finished = True
+                            break
             if finished and not pending.strip():
                 raise EOFError("hidden token input ended")
         finally:
-            os.write(descriptor, b"\n")
             # TCSAFLUSH discards anything still queued (an over-long paste or a
             # tail that arrived after the settle window) instead of handing it
-            # to the shell.
+            # to the shell. Restore first so the terminal is sane even if the
+            # newline write below fails.
             try:
                 termios.tcsetattr(descriptor, termios.TCSAFLUSH, saved)
             except termios.error as error:
                 raise OSError(str(error)) from None
+            os.write(descriptor, b"\n")
     finally:
         os.close(descriptor)
     return pending.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
@@ -1710,7 +1733,19 @@ def main(
             _prepare_claude_auth(layout)
             setup_spec = claude_setup_token_spec(arguments.image)
             _require_success(runner(setup_spec), setup_spec)
-            reader = read_hidden_token if token_reader is None else token_reader
+            if token_reader is None:
+
+                def _valid(text: str) -> bool:
+                    try:
+                        validate_claude_oauth_token(_normalize_pasted_token(text)[0])
+                    except ValueError:
+                        return False
+                    return True
+
+                def reader(prompt: str) -> str:
+                    return read_hidden_token(prompt, complete=_valid)
+            else:
+                reader = token_reader
             token = ""
             raw = ""
             try:
@@ -1718,6 +1753,9 @@ def main(
                     raw = reader("Paste the sk-ant-oat01- token printed by claude setup-token (input hidden): ")
                 except (EOFError, KeyboardInterrupt):
                     print("error: Claude token input cancelled", file=stderr)
+                    return 1
+                except OSError:
+                    print("error: Claude token terminal input failed", file=stderr)
                     return 1
                 token, line_count = _normalize_pasted_token(raw)
                 if line_count > 1:

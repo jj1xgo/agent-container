@@ -742,6 +742,29 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
             self.assertEqual(list(active.parent.glob(".oauth-token-stage-*")), [])
             self._assert_private_values_absent(stderr.getvalue(), first, second)
 
+    def test_claude_auth_reports_terminal_input_failure_distinctly(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            active = self._make_claude_state(root, self.OLD_TOKEN) / "oauth-token"
+            old_bytes = active.read_bytes()
+            stderr = StringIO()
+
+            def broken_terminal(prompt: str) -> str:
+                raise OSError(5, "Input/output error")
+
+            result = main(
+                ["auth", "claude"],
+                environment={"AGENT_CONTAINER_HOME": temp},
+                runner=self._successful_probe,
+                token_reader=broken_terminal,
+                stderr=stderr,
+            )
+
+            self.assertEqual(result, 1)
+            self.assertIn("terminal", stderr.getvalue())
+            self.assertNotIn("filesystem", stderr.getvalue())
+            self._assert_token_matches(active, old_bytes)
+
     def test_claude_auth_status_failure_discards_stage_and_preserves_existing(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp)
@@ -7285,6 +7308,168 @@ class HiddenTokenInputTest(unittest.TestCase):
 
         _require_private_token_terminal(Tty(), Tty(), open_terminal=fake_tty)
         self.assertEqual(len(opened), 1)
+
+    def test_configured_erase_kill_and_werase_characters_are_honored(self) -> None:
+        import os
+        import pty
+        import termios
+        import threading
+
+        from agent_container.agentctl import read_hidden_token
+
+        master, slave = pty.openpty()
+        attributes = termios.tcgetattr(slave)
+        attributes[6] = list(attributes[6])
+        attributes[6][termios.VERASE] = b"\x01"
+        termios.tcsetattr(slave, termios.TCSANOW, attributes)
+        result: dict[str, str] = {}
+        thread = threading.Thread(
+            target=lambda: result.setdefault(
+                "value",
+                read_hidden_token(
+                    "P: ", open_terminal=lambda: os.dup(slave), settle_seconds=0.2
+                ),
+            ),
+            daemon=True,
+        )
+        thread.start()
+        try:
+            os.write(master, b"foo bar\x17tokn\x01en\n")
+            thread.join(timeout=3)
+        finally:
+            os.close(master)
+            os.close(slave)
+        self.assertEqual(result.get("value"), "foo token\n")
+
+    def test_closed_terminal_is_reported_as_eof(self) -> None:
+        import os
+        import pty
+
+        from agent_container.agentctl import read_hidden_token
+
+        import threading
+
+        master, slave = pty.openpty()
+        errors: list[BaseException] = []
+
+        def reader() -> None:
+            try:
+                read_hidden_token("P: ", open_terminal=lambda: os.dup(slave))
+            except BaseException as error:  # noqa: BLE001
+                errors.append(error)
+
+        thread = threading.Thread(target=reader, daemon=True)
+        try:
+            # Once the prompt is on screen the reader is past its input flush;
+            # a readable byte gets it past select(), and the patched read then
+            # reports the terminal as closed.
+            with patch("agent_container.agentctl.os.read", return_value=b""):
+                thread.start()
+                select.select([master], [], [], 2)
+                os.write(master, b"x")
+                thread.join(timeout=3)
+        finally:
+            os.close(master)
+            os.close(slave)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], EOFError)
+
+    def test_every_termios_failure_is_an_os_error(self) -> None:
+        import os
+        import pty
+        import termios
+
+        from agent_container.agentctl import read_hidden_token
+
+        master, slave = pty.openpty()
+        try:
+            with patch(
+                "agent_container.agentctl.termios.tcsetattr",
+                side_effect=termios.error(5, "Input/output error"),
+            ):
+                with self.assertRaises(OSError):
+                    read_hidden_token("P: ", open_terminal=lambda: os.dup(slave))
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    def test_terminal_is_restored_even_when_the_final_newline_write_fails(self) -> None:
+        import os
+        import pty
+        import termios
+        import threading
+
+        from agent_container.agentctl import read_hidden_token
+
+        master, slave = pty.openpty()
+        before = termios.tcgetattr(slave)
+        real_write = os.write
+        calls = {"n": 0}
+
+        def flaky_write(fd, data):
+            if data == b"\n":
+                calls["n"] += 1
+                raise OSError(5, "Input/output error")
+            return real_write(fd, data)
+
+        errors: list[BaseException] = []
+
+        def reader() -> None:
+            try:
+                with patch("agent_container.agentctl.os.write", side_effect=flaky_write):
+                    read_hidden_token(
+                        "P: ", open_terminal=lambda: os.dup(slave), settle_seconds=0.2
+                    )
+            except BaseException as error:  # noqa: BLE001
+                errors.append(error)
+
+        thread = threading.Thread(target=reader, daemon=True)
+        thread.start()
+        try:
+            os.write(master, b"only\n")
+            thread.join(timeout=3)
+            after = termios.tcgetattr(slave)
+        finally:
+            os.close(master)
+            os.close(slave)
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(before, after)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], OSError)
+
+    def test_reader_returns_at_once_when_the_first_line_is_already_complete(self) -> None:
+        import os
+        import pty
+        import threading
+        import time
+
+        from agent_container.agentctl import read_hidden_token
+
+        master, slave = pty.openpty()
+        result: dict[str, object] = {}
+
+        def reader() -> None:
+            started = time.monotonic()
+            result["value"] = read_hidden_token(
+                "P: ",
+                open_terminal=lambda: os.dup(slave),
+                settle_seconds=1.0,
+                complete=lambda text: text.strip() == "only",
+            )
+            result["elapsed"] = time.monotonic() - started
+
+        thread = threading.Thread(target=reader, daemon=True)
+        thread.start()
+        try:
+            time.sleep(0.05)
+            os.write(master, b"only\n")
+            thread.join(timeout=3)
+        finally:
+            os.close(master)
+            os.close(slave)
+        self.assertEqual(result.get("value"), "only\n")
+        self.assertLess(result["elapsed"], 0.8)
 
     def test_reader_fails_when_no_terminal_can_be_opened(self) -> None:
         from agent_container.agentctl import read_hidden_token
