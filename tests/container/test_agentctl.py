@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import threading
 from tempfile import TemporaryDirectory
+import select
 import unittest
 from unittest import mock
 from unittest.mock import patch
@@ -854,7 +855,7 @@ class AgentCtlBuildAuthTest(unittest.TestCase):
             stderr = StringIO()
 
             with patch(
-                "agent_container.agentctl.getpass.getpass", side_effect=AssertionError
+                "agent_container.agentctl.read_hidden_token", side_effect=AssertionError
             ):
                 result = main(
                     ["auth", "claude"],
@@ -7091,55 +7092,108 @@ class AgentCtlFamilyTest(unittest.TestCase):
 
 
 class HiddenTokenInputTest(unittest.TestCase):
-    def test_reader_appends_lines_left_in_the_terminal_after_getpass(self) -> None:
-        from agent_container.agentctl import read_hidden_token
+    """read_hidden_token owns the terminal for the whole paste.
 
-        value = read_hidden_token(
-            "prompt: ",
-            hidden_reader=lambda prompt: "first-line",
-            drain=lambda: "second-line\nthird\n",
-        )
+    The token printed by `claude setup-token` can wrap across two terminal
+    lines; copying it then pastes a line break. A canonical-mode getpass
+    keeps only the first line, flushes the rest, echoes what it does not
+    consume, and leaves an unterminated tail for the shell.
+    """
 
-        self.assertEqual(value, "first-line\nsecond-line\nthird\n")
-
-    def test_reader_returns_the_single_line_when_nothing_is_pending(self) -> None:
-        from agent_container.agentctl import read_hidden_token
-
-        self.assertEqual(
-            read_hidden_token("p: ", hidden_reader=lambda prompt: "only", drain=lambda: ""),
-            "only",
-        )
-
-    def test_drain_reads_pending_terminal_lines_without_blocking(self) -> None:
+    def _read(self, writes, settle_seconds: float = 0.2):
         import os
         import pty
+        import termios
+        import threading
+        import time
 
-        from agent_container.agentctl import drain_pending_terminal_input
+        from agent_container.agentctl import read_hidden_token
 
         master, slave = pty.openpty()
+        before = termios.tcgetattr(slave)
+        result: dict[str, object] = {}
+
+        def reader() -> None:
+            try:
+                result["value"] = read_hidden_token(
+                    "PROMPT: ",
+                    open_terminal=lambda: os.dup(slave),
+                    settle_seconds=settle_seconds,
+                )
+            except BaseException as error:  # noqa: BLE001 - surfaced by the test
+                result["error"] = error
+
+        thread = threading.Thread(target=reader, daemon=True)
+        thread.start()
+        screen = bytearray()
         try:
-            os.write(master, b"rest-of-token\n")
-            pending = drain_pending_terminal_input(
-                open_terminal=lambda: os.dup(slave), settle_seconds=0.2
-            )
-            self.assertEqual(pending, "rest-of-token\n")
-            self.assertEqual(
-                drain_pending_terminal_input(
-                    open_terminal=lambda: os.dup(slave), settle_seconds=0.05
-                ),
-                "",
-            )
+            deadline = time.monotonic() + 2
+            while b"PROMPT: " not in screen and time.monotonic() < deadline:
+                ready, _, _ = select.select([master], [], [], 0.1)
+                if ready:
+                    screen.extend(os.read(master, 4096))
+            for delay, data in writes:
+                time.sleep(delay)
+                os.write(master, data)
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "reader did not return")
+            while True:
+                ready, _, _ = select.select([master], [], [], 0.1)
+                if not ready:
+                    break
+                screen.extend(os.read(master, 4096))
+            after = termios.tcgetattr(slave)
+            leftover = b""
+            attributes = list(after)
+            attributes[3] &= ~(termios.ICANON | termios.ECHO)
+            attributes[6] = list(attributes[6])
+            attributes[6][termios.VMIN] = 0
+            attributes[6][termios.VTIME] = 1
+            termios.tcsetattr(slave, termios.TCSANOW, attributes)
+            leftover = os.read(slave, 4096)
         finally:
             os.close(master)
             os.close(slave)
+        if "error" in result:
+            raise result["error"]
+        return result["value"], bytes(screen), before, after, leftover
 
-    def test_drain_returns_empty_when_no_terminal_is_available(self) -> None:
-        from agent_container.agentctl import drain_pending_terminal_input
+    def test_atomic_wrapped_paste_is_read_completely_without_echo(self) -> None:
+        value, screen, before, after, leftover = self._read([(0.05, b"first\nsecond\n")])
+
+        self.assertEqual(value, "first\nsecond\n")
+        self.assertNotIn(b"first", screen)
+        self.assertNotIn(b"second", screen)
+        self.assertEqual(leftover, b"")
+        self.assertEqual(before, after)
+
+    def test_unterminated_tail_is_joined_once_enter_arrives(self) -> None:
+        value, screen, _, _, leftover = self._read(
+            [(0.05, b"first\n"), (0.05, b"second"), (0.05, b"\n")]
+        )
+
+        self.assertEqual(value, "first\nsecond\n")
+        self.assertNotIn(b"second", screen)
+        self.assertEqual(leftover, b"")
+
+    def test_single_line_returns_after_the_settle_window(self) -> None:
+        value, _, _, _, leftover = self._read([(0.05, b"only\n")])
+
+        self.assertEqual(value, "only\n")
+        self.assertEqual(leftover, b"")
+
+    def test_end_of_input_without_a_token_is_reported_as_eof(self) -> None:
+        with self.assertRaises(EOFError):
+            self._read([(0.05, b"\x04")])
+
+    def test_reader_fails_when_no_terminal_can_be_opened(self) -> None:
+        from agent_container.agentctl import read_hidden_token
 
         def no_tty() -> int:
             raise OSError("no tty")
 
-        self.assertEqual(drain_pending_terminal_input(open_terminal=no_tty), "")
+        with self.assertRaises(OSError):
+            read_hidden_token("p: ", open_terminal=no_tty)
 
 
 if __name__ == "__main__":

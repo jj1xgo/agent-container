@@ -1,7 +1,6 @@
 import argparse
 from contextlib import ExitStack
 from dataclasses import dataclass
-import getpass
 import json
 import os
 from pathlib import Path
@@ -10,6 +9,7 @@ import select
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
 from typing import Callable
@@ -335,57 +335,62 @@ def _require_private_token_terminal(stdin: TextIO, stderr: TextIO) -> None:
 
 
 def _open_controlling_terminal() -> int:
-    return os.open("/dev/tty", os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
-
-
-def drain_pending_terminal_input(
-    *,
-    open_terminal: Callable[[], int] = _open_controlling_terminal,
-    settle_seconds: float = 0.3,
-) -> str:
-    """Read the lines a wrapped paste left in the terminal after getpass returned.
-
-    getpass reads one line. A token that wrapped across two terminal lines
-    leaves its second half in the terminal buffer, where the shell would
-    execute it after this process exits. Take those lines here instead.
-    """
-
-    try:
-        descriptor = open_terminal()
-    except OSError:
-        return ""
-    try:
-        os.set_blocking(descriptor, False)
-        pending = bytearray()
-        deadline = time.monotonic() + settle_seconds
-        while len(pending) < 8192:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            ready, _, _ = select.select([descriptor], [], [], remaining)
-            if not ready:
-                break
-            try:
-                chunk = os.read(descriptor, 4096)
-            except BlockingIOError:
-                continue
-            if not chunk:
-                break
-            pending.extend(chunk)
-        return pending.decode("utf-8", errors="replace")
-    finally:
-        os.close(descriptor)
+    return os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
 
 
 def read_hidden_token(
     prompt: str,
     *,
-    hidden_reader: Callable[[str], str] = getpass.getpass,
-    drain: Callable[[], str] = drain_pending_terminal_input,
+    open_terminal: Callable[[], int] = _open_controlling_terminal,
+    settle_seconds: float = 0.3,
+    limit: int = 8192,
 ) -> str:
-    first = hidden_reader(prompt)
-    rest = drain()
-    return first + "\n" + rest if rest else first
+    """Read a pasted token from the terminal without echo, including wrapped lines.
+
+    getpass keeps only the first line, flushes the rest of the paste, and
+    echoes anything it does not consume. A token that wrapped across two
+    terminal lines is pasted with a line break, so this reader owns the
+    terminal for the whole paste: echo and canonical mode are off, and after
+    the first newline it keeps reading until the input has been quiet for
+    ``settle_seconds``. Everything read is returned as is; the caller joins
+    the lines.
+    """
+
+    descriptor = open_terminal()
+    try:
+        saved = termios.tcgetattr(descriptor)
+        attributes = list(saved)
+        attributes[3] &= ~(termios.ECHO | termios.ICANON)
+        attributes[6] = list(attributes[6])
+        attributes[6][termios.VMIN] = 1
+        attributes[6][termios.VTIME] = 0
+        termios.tcsetattr(descriptor, termios.TCSAFLUSH, attributes)
+        try:
+            os.write(descriptor, prompt.encode("utf-8"))
+            pending = bytearray()
+            newline_seen = False
+            while len(pending) < limit:
+                timeout = settle_seconds if newline_seen else None
+                ready, _, _ = select.select([descriptor], [], [], timeout)
+                if not ready:
+                    break
+                chunk = os.read(descriptor, 4096)
+                if not chunk:
+                    break
+                if b"\x04" in chunk:
+                    pending.extend(chunk.split(b"\x04", 1)[0])
+                    if not pending.strip():
+                        raise EOFError("hidden token input ended")
+                    break
+                pending.extend(chunk)
+                if b"\n" in chunk or b"\r" in chunk:
+                    newline_seen = True
+            os.write(descriptor, b"\n")
+        finally:
+            termios.tcsetattr(descriptor, termios.TCSANOW, saved)
+    finally:
+        os.close(descriptor)
+    return pending.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _normalize_pasted_token(raw: str) -> tuple[str, int]:
