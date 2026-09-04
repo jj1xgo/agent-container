@@ -112,6 +112,8 @@ launcherはtoken onboardingを抑止するために`IS_DEMO=1`も設定する。
 
 このseedが許可するのはworkspace trustだけである。permission bypass optionは引き続き渡さず、project側のhooks、settings statusLine、MCPは`allowManagedHooksOnly`と`allowManagedMcpServersOnly`のmanaged policyで引き続き遮断される。一方、trust承認により、workspace内の`.claude/settings.json`と`.claude/settings.local.json`が持つ`permissions.allow`と`permissions.additionalDirectories`は有効になる。これはinteractiveにtrust dialogを承認した場合と同じ結果であり、workspaceは利用者自身のisolated cloneで、containerが被害範囲の境界であるため受け入れる。projectのpermission ruleも遮断したい場合は、launcherではなくmanaged policyの`allowManagedPermissionRulesOnly`で制御する。`IS_DEMO`を外してdialogを復活させる案は、token onboardingが毎回再表示されるため採用しない。環境変数`CLAUDE_CODE_SANDBOXED`でもtrust扱いにできるが、Anthropicのcloud sandbox向けで他の副作用を検証していないため、file seedに限定する。
 
+`allowManagedPermissionRulesOnly`は2026-09-04時点でpinしないと決めた。Claude Code 2.1.260のschema説明では、この設定はuser、project、local、`--settings`のpermission ruleと`--allowedTools`のallow ruleを無視し、allow ruleをmanaged settingsからだけ追加できるようにする。denyとaskは引き続き効く。加えて同binaryでは、この設定が有効だとpermission promptの「Yes, and don't ask again」選択肢自体が表示されなくなるため、pinするとcontainer内Claudeが保存した`.claude/settings.local.json`のallow ruleは全て無効になり、`Bash(python3 *)`のような承認がsession毎に必要になる。pinしなくてもmanaged policyの`deny`、sandbox、`disableBypassPermissionsMode`、brokerのhost承認は変わらず効き、containerが被害範囲の境界である点はtrust seedと同じである。現在このcontainerで動かすrepositoryは利用者自身のもので、git追跡の`.claude/settings.json`を持つものは無い。利用者が中身を確認していない第三者repositoryを動かし始めた場合は、この判断を見直してpinするか、少なくとも`run`前にそのrepositoryの`.claude/settings.json`を確認する。
+
 Linuxのfile-based managed settingsである`/etc/claude-code/managed-settings.json`へ、少なくとも次のpolicyを置く。image内のread-only root filesystemに含め、workspaceやuser settingsから上書きできないようにする。
 
 - `sandbox.enabled=true`
