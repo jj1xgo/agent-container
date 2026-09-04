@@ -11,6 +11,8 @@ from typing import Callable
 
 CAPABILITY_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _CAPABILITY_FILE_BYTES = 44
+# Without O_NOFOLLOW the open cannot refuse symlinks itself; the resolve()/lstat()
+# dev+ino re-check after fstat in read_capability is what still closes that gap.
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _NONBLOCK = getattr(os, "O_NONBLOCK", None)
 

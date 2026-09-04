@@ -39,6 +39,7 @@ _REQUEST_SCHEMA = FrameSchema(
     max_bytes=MAX_REQUEST_BYTES,
     json=_JSON,
 )
+# Responses share the request byte cap; the pre-kernel encoder bounded both on MAX_REQUEST_BYTES.
 _RESPONSE_SCHEMA = FrameSchema(
     label="handover broker response",
     stream_label="handover broker stream",
