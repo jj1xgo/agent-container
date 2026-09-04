@@ -93,6 +93,7 @@ COPY profiles/codex /opt/agent-container/profiles/codex
 COPY --chmod=0644 profiles/claude/managed-settings.json /etc/claude-code/managed-settings.json
 COPY --chmod=0644 profiles/claude/managed-mcp.json /etc/claude-code/managed-mcp.json
 COPY --chmod=0644 profiles/claude/CLAUDE.md /etc/claude-code/CLAUDE.md
+COPY --chmod=0644 profiles/claude/statusline.sh /etc/claude-code/statusline.sh
 
 ENV HOME=/home/agent \
     PATH=/usr/local/bin:/opt/agent-node/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \

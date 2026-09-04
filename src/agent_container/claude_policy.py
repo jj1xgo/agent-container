@@ -34,10 +34,14 @@ EXPECTED_SETTINGS = {
         "deny": ["Read(//run/secrets/claude-oauth-token)"],
         "disableBypassPermissionsMode": "disable",
     },
-    "disableAllHooks": True,
     "allowManagedHooksOnly": True,
     "allowedMcpServers": [],
     "allowManagedMcpServersOnly": True,
+    "statusLine": {
+        "type": "command",
+        "command": "bash /etc/claude-code/statusline.sh",
+        "padding": 0,
+    },
 }
 EXPECTED_MCP = {"mcpServers": {}}
 EXPECTED_CLAUDE_MD = """# Managed Claude handover workflow
@@ -195,12 +199,22 @@ def validate_managed_policy(
     instructions_path: Path | None = None,
     *,
     expected_uid: int | None = None,
+    statusline_path: Path | None = None,
 ) -> bool:
     instructions = (
         settings_path.parent / "CLAUDE.md"
         if instructions_path is None
         else instructions_path
     )
+    statusline = (
+        settings_path.parent / "statusline.sh"
+        if statusline_path is None
+        else statusline_path
+    )
+    # The status line command runs outside the Bash sandbox, so the only
+    # script allowed is the read-only one shipped next to the managed policy.
+    # Its bytes are not pinned here; ownership and mode are, and the managed
+    # settings above pin which path Claude Code may execute.
     return (
         _load_json(settings_path, expected_uid) == EXPECTED_SETTINGS
         and _load_json(mcp_path, expected_uid) == EXPECTED_MCP
@@ -210,6 +224,12 @@ def validate_managed_policy(
             expected_mode=0o644,
         )
         == EXPECTED_CLAUDE_MD
+        and _load_bytes(
+            statusline,
+            expected_uid,
+            expected_mode=0o644,
+        )
+        is not None
     )
 
 
@@ -218,12 +238,14 @@ def main(
     mcp_path: Path = Path("/etc/claude-code/managed-mcp.json"),
     stdout: TextIO = sys.stdout,
     instructions_path: Path = Path("/etc/claude-code/CLAUDE.md"),
+    statusline_path: Path = Path("/etc/claude-code/statusline.sh"),
 ) -> int:
     valid = validate_managed_policy(
         settings_path,
         mcp_path,
         instructions_path,
         expected_uid=0,
+        statusline_path=statusline_path,
     )
     stdout.write(f"managed_policy_valid={'true' if valid else 'false'}\n")
     return 0 if valid else 1
