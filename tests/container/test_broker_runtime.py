@@ -1,12 +1,17 @@
+from io import BytesIO
+import os
 from pathlib import Path
 import socket
 import stat
+import struct
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
 from agent_container.broker.capability import CAPABILITY_PATTERN
 from agent_container.broker.runtime import MAX_UNIX_SOCKET_PATH_BYTES
+from agent_container.broker.runtime import SocketBrokerRuntime
 from agent_container.broker.runtime import allocate_run_dir
 from agent_container.broker.runtime import bind_private_listener
 from agent_container.broker.runtime import create_private_file
@@ -187,6 +192,356 @@ class RemoveRuntimeArtifactsTest(unittest.TestCase):
             self.assertFalse(capability.exists())
             self.assertTrue(socket_path.is_file())
             self.assertTrue(run_dir.exists())
+
+
+class RuntimeError_(Exception):
+    pass
+
+
+class FakeStream:
+    def __init__(self) -> None:
+        self.closed = False
+        self.outgoing = BytesIO()
+
+    def read(self, size: int) -> bytes:
+        return b""
+
+    def write(self, body: bytes) -> int:
+        return self.outgoing.write(body)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeClient:
+    def __init__(self, peer_uid: int) -> None:
+        self.peer_uid = peer_uid
+        self.timeout: float | None = None
+        self.credential_calls: list[tuple[int, int, int]] = []
+        self.stream = FakeStream()
+        self.closed = False
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def getsockopt(self, level: int, option: int, size: int) -> bytes:
+        self.credential_calls.append((level, option, size))
+        return struct.pack("3i", 1234, self.peer_uid, 5678)
+
+    def makefile(self, *_: object, **__: object) -> FakeStream:
+        return self.stream
+
+    def __enter__(self) -> "FakeClient":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.closed = True
+
+
+class FakeListener:
+    def __init__(self, clients: tuple[FakeClient, ...] = ()) -> None:
+        self.clients = list(clients)
+        self.timeout: float | None = None
+        self.closed = False
+        self.accepts = 0
+        self._wake = threading.Event()
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def accept(self) -> tuple[FakeClient, None]:
+        self.accepts += 1
+        if self.clients:
+            return self.clients.pop(0), None
+        self._wake.wait(0.01)
+        raise TimeoutError
+
+    def close(self) -> None:
+        self.closed = True
+        self._wake.set()
+
+
+class ManualGate:
+    def __init__(self) -> None:
+        self.opened = threading.Event()
+        self.registered: list[int] = []
+
+    def register(self, peer: int) -> None:
+        self.registered.append(peer)
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self.opened.wait(timeout)
+
+    def is_ready(self) -> bool:
+        return self.opened.is_set()
+
+
+def make_runtime(
+    listener: FakeListener,
+    handler=None,
+    *,
+    readiness=None,
+    open_listener=None,
+    close=None,
+) -> tuple[SocketBrokerRuntime, dict[str, int]]:
+    calls = {"open": 0, "deactivate": 0, "close": 0, "backlog": 0}
+
+    def default_open(backlog: int) -> FakeListener:
+        calls["open"] += 1
+        calls["backlog"] = backlog
+        return listener
+
+    def deactivate() -> None:
+        calls["deactivate"] += 1
+
+    def default_close() -> None:
+        calls["close"] += 1
+
+    options = {}
+    if readiness is not None:
+        options["readiness"] = readiness
+    runtime = SocketBrokerRuntime(
+        label="test broker",
+        thread_name="test-broker",
+        open_listener=open_listener or default_open,
+        handler=handler or (lambda stream, peer_uid: 0),
+        deactivate=deactivate,
+        close=close or default_close,
+        error_type=RuntimeError_,
+        backlog=4,
+        listener_timeout=0.2,
+        client_timeout=30,
+        **options,
+    )
+    return runtime, calls
+
+
+class SocketBrokerRuntimeTest(unittest.TestCase):
+    def test_start_opens_listener_and_runs_a_daemon_thread_until_stop(self) -> None:
+        listener = FakeListener()
+        runtime, calls = make_runtime(listener)
+
+        runtime.start()
+        try:
+            self.assertEqual(calls["open"], 1)
+            self.assertEqual(calls["backlog"], 4)
+            self.assertEqual(listener.timeout, 0.2)
+            self.assertIsNotNone(runtime.thread)
+            self.assertTrue(runtime.thread.is_alive())
+            self.assertTrue(runtime.thread.daemon)
+            self.assertEqual(runtime.thread.name, "test-broker")
+        finally:
+            runtime.stop(join_timeout=2)
+
+        self.assertTrue(listener.closed)
+        self.assertTrue(runtime.exited)
+        self.assertEqual(calls["deactivate"], 1)
+        self.assertEqual(calls["close"], 1)
+        self.assertFalse(runtime.thread.is_alive())
+
+    def test_handler_receives_stream_and_peer_uid_and_loop_continues(self) -> None:
+        clients = (FakeClient(1010), FakeClient(2020))
+        listener = FakeListener(clients)
+        handled = threading.Event()
+        seen: list[int] = []
+
+        def handler(stream: object, peer_uid: int) -> int:
+            seen.append(peer_uid)
+            if len(seen) == 2:
+                handled.set()
+            return 0
+
+        runtime, _ = make_runtime(listener, handler)
+        runtime.start()
+        try:
+            self.assertTrue(handled.wait(1))
+        finally:
+            runtime.stop(join_timeout=2)
+
+        self.assertEqual(seen, [1010, 2020])
+        for client in clients:
+            self.assertEqual(
+                client.credential_calls, [(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)]
+            )
+            self.assertEqual(client.timeout, 30)
+            self.assertTrue(client.stream.closed)
+            self.assertTrue(client.closed)
+
+    def test_start_failure_closes_listener_and_session_and_raises_fixed_message(self) -> None:
+        listener = FakeListener()
+
+        def failing_open(backlog: int) -> FakeListener:
+            raise OSError("private-start-marker")
+
+        runtime, calls = make_runtime(listener, open_listener=failing_open)
+        with self.assertRaises(RuntimeError_) as raised:
+            runtime.start()
+        self.assertEqual(str(raised.exception), "test broker failed to start")
+        self.assertEqual(calls["close"], 1)
+        self.assertTrue(runtime.exited)
+        with self.assertRaises(RuntimeError_):
+            runtime.start()
+
+    def test_start_failure_with_failing_close_allows_retry_through_stop(self) -> None:
+        listener = FakeListener()
+        close_calls = 0
+
+        def flaky_close() -> None:
+            nonlocal close_calls
+            close_calls += 1
+            if close_calls == 1:
+                raise ValueError("private-cleanup-marker")
+
+        class StartFailureThread:
+            daemon = True
+
+            def __init__(self, **_: object) -> None:
+                self.join_calls = 0
+
+            def start(self) -> None:
+                raise RuntimeError("private-thread-start-marker")
+
+            def join(self, timeout: float) -> None:
+                self.join_calls += 1
+
+            def is_alive(self) -> bool:
+                return False
+
+        thread = StartFailureThread()
+        runtime, calls = make_runtime(listener, close=flaky_close)
+        with mock.patch("threading.Thread", return_value=thread):
+            with self.assertRaises(RuntimeError_) as raised:
+                runtime.start()
+        self.assertEqual(str(raised.exception), "test broker failed to start")
+        self.assertNotIn("private", str(raised.exception))
+        self.assertTrue(listener.closed)
+        self.assertFalse(runtime.exited)
+        self.assertIsNone(runtime.thread)
+
+        runtime.stop(join_timeout=2)
+        runtime.stop(join_timeout=2)
+        self.assertEqual(thread.join_calls, 0)
+        self.assertEqual(close_calls, 2)
+        self.assertTrue(runtime.exited)
+
+    def test_handler_exception_is_captured_and_reported_after_cleanup(self) -> None:
+        client = FakeClient(os.getuid())
+        listener = FakeListener((client,))
+        failed = threading.Event()
+
+        def fail(stream: object, peer_uid: int) -> int:
+            failed.set()
+            raise RuntimeError("private-handler-marker")
+
+        runtime, calls = make_runtime(listener, fail)
+        runtime.start()
+        self.assertTrue(failed.wait(1))
+        with self.assertRaises(RuntimeError_) as raised:
+            runtime.stop(join_timeout=2)
+        self.assertEqual(str(raised.exception), "test broker failed")
+        self.assertNotIn("private-handler-marker", str(raised.exception))
+        self.assertEqual(calls["close"], 1)
+        self.assertTrue(listener.closed)
+        self.assertTrue(runtime.exited)
+
+    def test_stop_timeout_defers_close_until_the_thread_can_be_joined(self) -> None:
+        listener = FakeListener()
+
+        class StuckThread:
+            daemon = True
+
+            def __init__(self, **_: object) -> None:
+                self.join_timeouts: list[float] = []
+                self.alive = True
+
+            def start(self) -> None:
+                pass
+
+            def join(self, timeout: float) -> None:
+                self.join_timeouts.append(timeout)
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+        thread = StuckThread()
+        runtime, calls = make_runtime(listener)
+        with mock.patch("threading.Thread", return_value=thread):
+            runtime.start()
+        with self.assertRaises(RuntimeError_) as raised:
+            runtime.stop(join_timeout=2)
+        self.assertEqual(str(raised.exception), "test broker did not stop")
+        self.assertEqual(thread.join_timeouts, [2])
+        self.assertTrue(listener.closed)
+        self.assertEqual(calls["deactivate"], 1)
+        self.assertEqual(calls["close"], 0)
+
+        thread.alive = False
+        runtime.stop(join_timeout=2)
+        self.assertEqual(thread.join_timeouts, [2, 2])
+        self.assertEqual(calls["deactivate"], 2)
+        self.assertEqual(calls["close"], 1)
+        runtime.stop(join_timeout=2)
+        self.assertEqual(calls["close"], 1)
+
+    def test_cleanup_failure_is_reported_and_retryable(self) -> None:
+        listener = FakeListener()
+        close_calls = 0
+
+        def flaky_close() -> None:
+            nonlocal close_calls
+            close_calls += 1
+            if close_calls == 1:
+                raise OSError("private-cleanup-marker")
+
+        runtime, _ = make_runtime(listener, close=flaky_close)
+        runtime.start()
+        with self.assertRaises(RuntimeError_) as raised:
+            runtime.stop(join_timeout=2)
+        self.assertEqual(str(raised.exception), "test broker cleanup failed")
+        self.assertFalse(runtime.exited)
+        runtime.stop(join_timeout=2)
+        self.assertTrue(runtime.exited)
+        self.assertEqual(close_calls, 2)
+
+    def test_readiness_gate_blocks_accept_until_opened(self) -> None:
+        client = FakeClient(os.getuid())
+        listener = FakeListener((client,))
+        gate = ManualGate()
+        handled = threading.Event()
+        runtime, _ = make_runtime(
+            listener, lambda stream, peer_uid: handled.set(), readiness=gate
+        )
+        runtime.start()
+        try:
+            self.assertFalse(handled.wait(0.1))
+            self.assertEqual(listener.accepts, 0)
+            gate.opened.set()
+            self.assertTrue(handled.wait(1))
+        finally:
+            runtime.stop(join_timeout=2)
+
+    def test_readiness_gate_failure_is_reported_as_runtime_failure(self) -> None:
+        listener = FakeListener()
+
+        class ClosedGate:
+            def register(self, peer: int) -> None:
+                pass
+
+            def wait(self, timeout: float | None = None) -> bool:
+                return False
+
+            def is_ready(self) -> bool:
+                return False
+
+        runtime, _ = make_runtime(listener, readiness=ClosedGate())
+        runtime.start()
+        with self.assertRaises(RuntimeError_) as raised:
+            runtime.stop(join_timeout=2)
+        self.assertEqual(str(raised.exception), "test broker failed")
+        self.assertEqual(listener.accepts, 0)
 
 
 if __name__ == "__main__":
