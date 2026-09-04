@@ -331,6 +331,86 @@ class ClaudeLauncherTest(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b"{}")
             self.assertTrue((config_dir / ".claude.json").is_symlink())
 
+    def test_seed_workspace_trust_completes_the_write_after_short_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config_dir = Path(temporary)
+            real_write = os.write
+
+            def short_write(descriptor, payload):
+                return real_write(descriptor, payload[:7])
+
+            with patch("agent_container.claude_launcher.os.write", side_effect=short_write) as write_mock:
+                seed_workspace_trust(config_dir, Path("/workspace"))
+
+            self.assertGreater(write_mock.call_count, 1)
+            self.assertEqual(
+                self.read_config(config_dir),
+                {"projects": {"/workspace": {"hasTrustDialogAccepted": True}}},
+            )
+
+    def test_seed_workspace_trust_rejects_an_oversized_config_without_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config_dir = Path(temporary)
+            config_file = config_dir / ".claude.json"
+            config_file.write_bytes(b"{}")
+            config_file.chmod(0o600)
+            os.truncate(config_file, 16 * 1024 * 1024 + 1)
+
+            with patch("agent_container.claude_launcher.os.read") as read_mock:
+                self.assert_silent_failure(
+                    lambda: seed_workspace_trust(config_dir, Path("/workspace"))
+                )
+
+            self.assertEqual(read_mock.call_count, 0)
+
+    def test_seed_workspace_trust_rejects_a_config_that_grows_past_the_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config_dir = Path(temporary)
+            config_file = config_dir / ".claude.json"
+            config_file.write_bytes(b"{}")
+            config_file.chmod(0o600)
+            chunks = [b"{" + b" " * 65535] * 257 + [b""]
+
+            with patch("agent_container.claude_launcher.os.read", side_effect=chunks):
+                with self.assertRaises(ValueError) as caught:
+                    seed_workspace_trust(config_dir, Path("/workspace"))
+
+            self.assertIn("limit", str(caught.exception))
+            self.assertEqual(config_file.read_bytes(), b"{}")
+
+    def test_seed_workspace_trust_rejects_a_directory_at_the_config_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config_dir = Path(temporary)
+            (config_dir / ".claude.json").mkdir()
+
+            self.assert_silent_failure(
+                lambda: seed_workspace_trust(config_dir, Path("/workspace"))
+            )
+            self.assertTrue((config_dir / ".claude.json").is_dir())
+
+    def test_exec_claude_keys_trust_by_the_resolved_working_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            token_file = self.write_token(directory)
+            config_dir = directory / "claude-config"
+            config_dir.mkdir(mode=0o700)
+            real_workspace = directory / "real-workspace"
+            real_workspace.mkdir()
+            link = directory / "linked-workspace"
+            link.symlink_to(real_workspace)
+            observed: dict[str, object] = {}
+
+            def fake_execvpe(program, argv, environment):
+                observed["projects"] = sorted(self.read_config(config_dir)["projects"])
+                raise ExecObserved
+
+            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(config_dir)}):
+                with patch("agent_container.claude_launcher.os.getcwd", return_value=str(link)):
+                    with self.assertRaises(ExecObserved):
+                        exec_claude(token_file, ("claude",), fake_execvpe)
+
+            self.assertEqual(observed, {"projects": [os.path.realpath(real_workspace)]})
+
     def test_seed_workspace_trust_rejects_a_config_owned_by_another_user(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             config_dir = Path(temporary)

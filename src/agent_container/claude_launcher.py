@@ -61,6 +61,8 @@ def _read_config(path: Path) -> dict | None:
             payload.extend(chunk)
     finally:
         os.close(descriptor)
+    if len(payload) > _CONFIG_LIMIT:
+        raise ValueError("Claude config is larger than the launcher limit")
     try:
         config = json.loads(bytes(payload))
     except ValueError:
@@ -76,7 +78,9 @@ def _write_config(path: Path, config: dict) -> None:
     try:
         try:
             os.fchmod(descriptor, 0o600)
-            os.write(descriptor, payload)
+            view = memoryview(payload)
+            while view:
+                view = view[os.write(descriptor, view) :]
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
