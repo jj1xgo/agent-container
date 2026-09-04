@@ -108,6 +108,10 @@ build失敗時は、古い設定のimageへ黙ってfallbackしない。`run`は
 
 image-local launcherはtoken fileの`O_NOFOLLOW` open、通常file・permission・format検証、親Claude processへの`CLAUDE_CODE_OAUTH_TOKEN`設定、値を出力しない性質を維持する。一方、`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`は設定しない。
 
+launcherはtoken onboardingを抑止するために`IS_DEMO=1`も設定する。Claude Code 2.1.260では`IS_DEMO`がonboardingだけでなく起動時のworkspace trust dialogも省略し、session trustは`CLAUDE_CONFIG_DIR/.claude.json`の`projects[<cwd>].hasTrustDialogAccepted`が既に`true`のときだけ付与される。dialogが出ないためこの値は`false`のまま残り、managed statusLine、fileSuggestion、memory tool、`/goal`などtrustを前提にする機能が黙って停止していた。このため、launcherはtoken検証の後、`exec`の前に、同fileの該当project entryへ`hasTrustDialogAccepted: true`だけをseedする。fileが無ければ該当keyだけを持つ最小JSONをmode `0600`で作り、既に`true`なら書き込まない。fileは`O_NOFOLLOW`で開き、通常file・実行user所有・16 MiB以下・JSON objectであることを検証し、満たさない場合は本文を出さずに起動を停止する。書き込みは同じdirectoryの一時fileへ全byteを書いてrenameで置き換え、既存fileのmodeも`0600`へ揃える。launcherを経由する`claude auth status`のsetup containerでも同じseedがtmpfs上のconfigへ入るが、containerとともに破棄される。
+
+このseedが許可するのはworkspace trustだけである。permission bypass optionは引き続き渡さず、project側のhooks、settings statusLine、MCPは`allowManagedHooksOnly`と`allowManagedMcpServersOnly`のmanaged policyで引き続き遮断される。一方、trust承認により、workspace内の`.claude/settings.json`と`.claude/settings.local.json`が持つ`permissions.allow`と`permissions.additionalDirectories`は有効になる。これはinteractiveにtrust dialogを承認した場合と同じ結果であり、workspaceは利用者自身のisolated cloneで、containerが被害範囲の境界であるため受け入れる。projectのpermission ruleも遮断したい場合は、launcherではなくmanaged policyの`allowManagedPermissionRulesOnly`で制御する。`IS_DEMO`を外してdialogを復活させる案は、token onboardingが毎回再表示されるため採用しない。環境変数`CLAUDE_CODE_SANDBOXED`でもtrust扱いにできるが、Anthropicのcloud sandbox向けで他の副作用を検証していないため、file seedに限定する。
+
 Linuxのfile-based managed settingsである`/etc/claude-code/managed-settings.json`へ、少なくとも次のpolicyを置く。image内のread-only root filesystemに含め、workspaceやuser settingsから上書きできないようにする。
 
 - `sandbox.enabled=true`
