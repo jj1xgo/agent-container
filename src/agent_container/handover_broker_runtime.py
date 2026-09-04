@@ -3,8 +3,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import threading
 from typing import Any
-from typing import BinaryIO
 
+from agent_container.broker.runtime import Connection
 from agent_container.broker.runtime import SocketBrokerRuntime
 from agent_container.handover_broker import HandoverBrokerSession
 from agent_container.handover_broker_transport import handle_handover_connection
@@ -66,8 +66,10 @@ class HandoverBrokerRuntime(AbstractContextManager[HandoverRuntimeMount]):
         )
         return cls(session)
 
-    def _handle(self, stream: BinaryIO, peer_uid: int) -> int:
-        return handle_handover_connection(self.session, stream, peer_uid)
+    def _handle(self, connection: Connection) -> int:
+        return handle_handover_connection(
+            self.session, connection.stream, connection.peer_uid
+        )
 
     @property
     def _thread(self) -> Any | None:

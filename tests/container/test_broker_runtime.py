@@ -11,6 +11,7 @@ from unittest import mock
 
 from agent_container.broker.capability import CAPABILITY_PATTERN
 from agent_container.broker.runtime import MAX_UNIX_SOCKET_PATH_BYTES
+from agent_container.broker.runtime import Connection
 from agent_container.broker.runtime import SocketBrokerRuntime
 from agent_container.broker.runtime import allocate_run_dir
 from agent_container.broker.runtime import bind_private_listener
@@ -267,16 +268,9 @@ class FakeListener:
 class ManualGate:
     def __init__(self) -> None:
         self.opened = threading.Event()
-        self.registered: list[int] = []
-
-    def register(self, peer: int) -> None:
-        self.registered.append(peer)
 
     def wait(self, timeout: float | None = None) -> bool:
         return self.opened.wait(timeout)
-
-    def is_ready(self) -> bool:
-        return self.opened.is_set()
 
 
 def make_runtime(
@@ -307,7 +301,7 @@ def make_runtime(
         label="test broker",
         thread_name="test-broker",
         open_listener=open_listener or default_open,
-        handler=handler or (lambda stream, peer_uid: 0),
+        handler=handler or (lambda connection: 0),
         deactivate=deactivate,
         close=close or default_close,
         error_type=RuntimeError_,
@@ -347,9 +341,11 @@ class SocketBrokerRuntimeTest(unittest.TestCase):
         listener = FakeListener(clients)
         handled = threading.Event()
         seen: list[int] = []
+        captured: list[Connection] = []
 
-        def handler(stream: object, peer_uid: int) -> int:
-            seen.append(peer_uid)
+        def handler(connection: Connection) -> int:
+            seen.append(connection.peer_uid)
+            captured.append(connection)
             if len(seen) == 2:
                 handled.set()
             return 0
@@ -362,6 +358,8 @@ class SocketBrokerRuntimeTest(unittest.TestCase):
             runtime.stop(join_timeout=2)
 
         self.assertEqual(seen, [1010, 2020])
+        self.assertEqual([c.client for c in captured], list(clients))
+        self.assertEqual([c.stream for c in captured], [c.stream for c in clients])
         for client in clients:
             self.assertEqual(
                 client.credential_calls, [(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)]
@@ -432,7 +430,7 @@ class SocketBrokerRuntimeTest(unittest.TestCase):
         listener = FakeListener((client,))
         failed = threading.Event()
 
-        def fail(stream: object, peer_uid: int) -> int:
+        def fail(connection: Connection) -> int:
             failed.set()
             raise RuntimeError("private-handler-marker")
 
@@ -512,7 +510,7 @@ class SocketBrokerRuntimeTest(unittest.TestCase):
         gate = ManualGate()
         handled = threading.Event()
         runtime, _ = make_runtime(
-            listener, lambda stream, peer_uid: handled.set(), readiness=gate
+            listener, lambda connection: handled.set(), readiness=gate
         )
         runtime.start()
         try:
@@ -521,26 +519,33 @@ class SocketBrokerRuntimeTest(unittest.TestCase):
             gate.opened.set()
             self.assertTrue(handled.wait(1))
         finally:
+            gate.opened.set()
             runtime.stop(join_timeout=2)
 
-    def test_readiness_gate_failure_is_reported_as_runtime_failure(self) -> None:
+    def test_readiness_gate_that_never_opens_still_lets_stop_converge(self) -> None:
+        listener = FakeListener((FakeClient(os.getuid()),))
+        gate = ManualGate()
+        runtime, calls = make_runtime(listener, readiness=gate)
+        runtime.start()
+        runtime.stop(join_timeout=2)
+        self.assertTrue(runtime.exited)
+        self.assertIsNone(runtime.error)
+        self.assertEqual(listener.accepts, 0)
+        self.assertEqual(calls["close"], 1)
+
+    def test_readiness_gate_error_is_reported_as_runtime_failure(self) -> None:
         listener = FakeListener()
 
-        class ClosedGate:
-            def register(self, peer: int) -> None:
-                pass
-
+        class BrokenGate:
             def wait(self, timeout: float | None = None) -> bool:
-                return False
+                raise RuntimeError("private-gate-marker")
 
-            def is_ready(self) -> bool:
-                return False
-
-        runtime, _ = make_runtime(listener, readiness=ClosedGate())
+        runtime, _ = make_runtime(listener, readiness=BrokenGate())
         runtime.start()
         with self.assertRaises(RuntimeError_) as raised:
             runtime.stop(join_timeout=2)
         self.assertEqual(str(raised.exception), "test broker failed")
+        self.assertNotIn("private-gate-marker", str(raised.exception))
         self.assertEqual(listener.accepts, 0)
 
 

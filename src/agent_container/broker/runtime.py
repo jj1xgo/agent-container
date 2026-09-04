@@ -120,12 +120,19 @@ def remove_runtime_artifacts(
 _PEER_CREDENTIAL_BYTES = 12
 
 
+@dataclass(frozen=True)
+class Connection:
+    client: Any
+    stream: Any
+    peer_uid: int
+
+
 @dataclass
 class SocketBrokerRuntime:
     label: str
     thread_name: str
     open_listener: Callable[[int], Any]
-    handler: Callable[[Any, int], object]
+    handler: Callable[["Connection"], object]
     deactivate: Callable[[], None]
     close: Callable[[], None]
     error_type: type[Exception]
@@ -147,6 +154,9 @@ class SocketBrokerRuntime:
             listener = self.open_listener(self.backlog)
             listener.settimeout(self.listener_timeout)
             self.listener = listener
+            # Keep this as attribute access on the threading module: the
+            # handover runtime tests patch threading.Thread globally and rely
+            # on the kernel picking the patched class up.
             thread = threading.Thread(
                 target=self._serve,
                 args=(listener,),
@@ -173,8 +183,11 @@ class SocketBrokerRuntime:
 
     def _serve(self, listener: Any) -> None:
         try:
-            if not self.readiness.wait():
-                raise self.error_type(f"{self.label} readiness gate failed")
+            while not self.stop_event.is_set():
+                if self.readiness.wait(self.listener_timeout):
+                    break
+            else:
+                return
             while not self.stop_event.is_set():
                 try:
                     client, _ = listener.accept()
@@ -194,7 +207,7 @@ class SocketBrokerRuntime:
                     _pid, peer_uid, _gid = struct.unpack("3i", credentials)
                     stream = client.makefile("rwb", buffering=0)
                     try:
-                        self.handler(stream, peer_uid)
+                        self.handler(Connection(client, stream, peer_uid))
                     finally:
                         stream.close()
         except BaseException as error:

@@ -1,22 +1,14 @@
-"""Readiness gate a broker runtime waits on before accepting connections."""
+"""Readiness gate a broker runtime polls before accepting connections."""
 
 from typing import Protocol
 
 
 class ReadinessGate(Protocol):
-    def register(self, peer: int) -> None: ...
+    """Poll contract: True means ready, False means not yet; raise to fail."""
 
     def wait(self, timeout: float | None = None) -> bool: ...
 
-    def is_ready(self) -> bool: ...
-
 
 class AlwaysReady:
-    def register(self, peer: int) -> None:
-        return None
-
     def wait(self, timeout: float | None = None) -> bool:
-        return True
-
-    def is_ready(self) -> bool:
         return True
