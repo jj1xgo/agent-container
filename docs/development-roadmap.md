@@ -22,9 +22,9 @@ Phase 1〜5は完了した。現在地は**Phase 6**である。Phase 5は、202
 | Phase 3 | GitHub App broker | 完了 | credentialをcontainerへ渡さず、exact repositoryのclone／fetch、create-only push、PR、Issue readを提供する。 |
 | Phase 4 | scope整合・安全性安定化・`v0.4.0` | 完了 | private fixture gate、create-only強制、Issue read、cleanup、releaseを完了する。 |
 | Phase 5 | Family機能の運用完成 | 完了 | 専用App、binding、Codex／Claude intake、non-exposure、duplicate、承認付き実Issue、unknown reconciliation、cleanupの実host smokeがPASSする。 |
-| Phase 6 | 共通control plane | 進行中 | project、agent、task、eventのhost側contract、private state、監査境界を固定する。 |
+| Phase 6 | 共通broker kernel | 進行中 | GitHub／handover／egress／Familyの4 brokerが`agent_container/broker/`のframe・runtime・audit・capability・readiness上で動き（stage 1）、kernelがreadiness gate・fail-closed cleanup・統一auditを全brokerへ提供し（stage 2）、既存の実host smoke手順が変更なしでPASSする。設計は[`docs/superpowers/specs/2026-09-04-broker-kernel-design.md`](superpowers/specs/2026-09-04-broker-kernel-design.md)。 |
 | Phase 7 | Obsidian Vault config sync | 未着手 | review可能なschemaをVault原本から検査済みprivate stateへ同期し、credential、session、cacheを除外する。 |
-| Phase 8 | Worktree・task lease | 未着手 | agent別worktree、exclusive claim、期限、回収、stale writer拒否を提供する。 |
+| Phase 8 | Worktree・task lease | 未着手 | task・event・agentのhost側contractをleaseの最初の消費者として定義し、agent別worktree、exclusive claim、期限、回収、stale writer拒否を提供する。 |
 | Phase 9 | Conversation room | 未着手 | Codex／Claudeがtask単位のroomへ対等なparticipantとしてbounded read/postできる。 |
 | Phase 10 | Obsidian UI | 未着手 | task、decision、room、feedback preview／approvalをVault上の人間向けprojectionから扱える。 |
 | Phase 11 | Managed automation・相互review | 未着手 | review済みhook eventと、実装者／reviewerを分離したreview lifecycleをcontrol plane上で運用できる。 |
@@ -37,7 +37,7 @@ Phase 7〜10が「Obsidianを第2の脳として使う」ための中心範囲�
 
 実施順はPhase番号と一致する。
 
-1. Phase 6で、後続機能が共有するcontrol-plane contractを固定する。
+1. Phase 6で、後続機能が共有するbroker kernelを固定する。
 2. Phase 7で、安全なVault原本と実行用copyの同期を作る。
 3. Phase 8で、複数agentの編集をworktreeとleaseで隔離する。
 4. Phase 9で、taskに紐づくconversation roomを作る。
@@ -56,7 +56,8 @@ Phase 6（共通control plane）→Phase 7（Vault config sync）→Phase 8（Wo
 - 決定事項: 「CodexとClaudeを対等に協働させるには、agent別Git worktree、task lease、host側conversation roomを使う。MCPは相手をtool化するのでなく、両者が同じroom read/post capabilityを使う通信adapterとしてなら利用可能。」
 - Phase 8（Worktree・task lease）とPhase 9（Conversation room）が、この協働を実際に可能にする機能である。Phase 6（共通control plane）を先に固定するのは、GitHub／handover／egress／Familyの各brokerがこれまで個別に重複実装してきた問題（「先行実装済みの部品」節参照）を、worktree/leaseやconversation roomでも繰り返さないため。
 - 現在のworkspace実装は`root/workspaces/<project_id>`というproject単位の単一directoryであり（`src/agent_container/state.py`）、agentごとの分離やleaseはまだない。同一projectに対して複数agentを同時実行することは、Phase 8完了まで安全でない。
-- この理由は2026-08-27時点で「概ね」の順序として合意されたものであり、絶対的な技術依存として再検証されたわけではない。Phase 6のbrainstormingで、Phase 8の一部（agent別worktreeの分離だけ）を前倒しできないかを検討する余地は残る。
+- この理由は2026-08-27時点で「概ね」の順序として合意されたものであり、絶対的な技術依存として再検証されたわけではない。
+- 2026-09-04のPhase 6 brainstormingで次を決めた。Phase 8の一部（agent別worktreeの分離だけ）の前倒しは行わない。worktree分離はlease（誰がどこを書いてよいか）と不可分で、分離だけ入れても同一branchへの競合は防げないためである。また、Phase 6定義に含めていたtask・event・agentのhost側contractは、最初の消費者であるPhase 8のleaseと一緒に定義するためPhase 8へ移した。Phase 6は既存4 brokerの共通kernel化に集中する。
 
 ## 先行実装済みの部品
 
