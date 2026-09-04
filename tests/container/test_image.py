@@ -251,6 +251,7 @@ class ContainerImageContractTest(unittest.TestCase):
                 "ca-certificates",
                 "curl",
                 "git",
+                "jq",
                 "libatomic1",
                 "python3",
                 "python3-pip",
