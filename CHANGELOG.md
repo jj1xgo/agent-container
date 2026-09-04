@@ -21,6 +21,7 @@
 ### Security boundaries
 
 - containerへはrun限定socketとone-time capabilityだけを渡し、family App key／token、repository、pending host path、approval commandを渡しません。作成済みIssueのedit、close、deleteやfailure時fallbackは提供しません。
+- Claude managed policyに`allowManagedPermissionRulesOnly`をpinしない判断を記録しました。Claude Code 2.1.260ではこの設定がpermission promptの「don't ask again」も無効にするため、利用者自身のrepositoryだけを動かす現状では、workspaceの`.claude/settings*.json`のallow ruleをtrust承認と同じく受け入れます。managed `deny`、sandbox、bypass禁止、brokerのhost承認は変わりません。中身を確認していない第三者repositoryを動かす際に見直します。
 
 ### Validation
 
