@@ -552,10 +552,12 @@ class ContainerImageContractTest(unittest.TestCase):
         with TemporaryDirectory() as temp:
             target = Path(temp) / "src" / "agent_container"
             target.mkdir(parents=True)
-            for source in (ROOT / "src/agent_container").glob("*.py"):
+            for source in sorted((ROOT / "src/agent_container").rglob("*.py")):
                 relative = source.relative_to(ROOT).as_posix()
                 if containerignore_includes(relative, patterns):
-                    shutil.copy2(source, target / source.name)
+                    destination = target / source.relative_to(ROOT / "src/agent_container")
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
             for forbidden in (
                 "family_state.py",
                 "family_intake_runtime.py",

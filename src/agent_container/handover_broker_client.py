@@ -2,12 +2,16 @@ import argparse
 from dataclasses import dataclass
 import os
 from pathlib import Path
-import re
 import socket
-import stat
 import sys
 from typing import BinaryIO, Mapping, Sequence, TextIO
 
+from agent_container.broker.capability import CAPABILITY_PATTERN
+from agent_container.broker.capability import connect_unix
+from agent_container.broker.capability import read_capability
+from agent_container.broker.capability import validate_exact_path
+from agent_container.broker.capability import validate_socket
+from agent_container.broker.frame import write_all
 from agent_container.handover_broker_protocol import HandoverRequest
 from agent_container.handover_broker_protocol import MAX_REQUEST_BYTES
 from agent_container.handover_broker_protocol import PROTOCOL_VERSION
@@ -16,86 +20,20 @@ from agent_container.handover_broker_protocol import read_response_frame
 from agent_container.state import validate_project_id
 
 
-_CAPABILITY = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_CAPABILITY = CAPABILITY_PATTERN
 _SOCKET_TIMEOUT_SECONDS = 30
-_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_NONBLOCK = getattr(os, "O_NONBLOCK", None)
 
 
 def _validate_exact_path(path: Path) -> Path:
-    if not path.is_absolute():
-        raise ValueError("handover broker runtime path is invalid")
-    try:
-        resolved = path.resolve(strict=True)
-    except (OSError, RuntimeError):
-        raise ValueError("handover broker runtime path is invalid") from None
-    if resolved != path:
-        raise ValueError("handover broker runtime path is invalid")
-    return resolved
+    return validate_exact_path(path, label="handover broker runtime path")
 
 
 def read_handover_capability(path: Path) -> str:
-    if not path.is_absolute() or _NONBLOCK is None:
-        raise ValueError("handover broker capability file is invalid")
-    try:
-        descriptor = os.open(path, os.O_RDONLY | _NOFOLLOW | _NONBLOCK)
-    except OSError:
-        raise ValueError("handover broker capability file is invalid") from None
-    try:
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or stat.S_IMODE(metadata.st_mode) != 0o600
-            or metadata.st_uid != os.getuid()
-            or metadata.st_size != 44
-        ):
-            raise ValueError("handover broker capability file is invalid")
-
-        output = bytearray()
-        while len(output) < 45:
-            chunk = os.read(descriptor, 45 - len(output))
-            if not chunk:
-                break
-            output.extend(chunk)
-        body = bytes(output)
-
-        try:
-            resolved = path.resolve(strict=True)
-            path_metadata = path.lstat()
-        except (OSError, RuntimeError):
-            raise ValueError("handover broker capability file is invalid") from None
-        if (
-            resolved != path
-            or metadata.st_dev != path_metadata.st_dev
-            or metadata.st_ino != path_metadata.st_ino
-        ):
-            raise ValueError("handover broker capability file is invalid")
-    except OSError:
-        raise ValueError("handover broker capability file is invalid") from None
-    finally:
-        os.close(descriptor)
-    try:
-        capability = body.decode("ascii").removesuffix("\n")
-    except UnicodeDecodeError:
-        raise ValueError("handover broker capability file is invalid") from None
-    if (
-        _CAPABILITY.fullmatch(capability) is None
-        or body != (capability + "\n").encode("ascii")
-    ):
-        raise ValueError("handover broker capability file is invalid")
-    return capability
+    return read_capability(path, label="handover broker capability file")
 
 
 def validate_handover_socket(path: Path) -> Path:
-    path = _validate_exact_path(path)
-    metadata = path.stat()
-    if (
-        not stat.S_ISSOCK(metadata.st_mode)
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-        or metadata.st_uid != os.getuid()
-    ):
-        raise ValueError("handover broker socket is invalid")
-    return path
+    return validate_socket(_validate_exact_path(path), label="handover broker socket")
 
 
 @dataclass(frozen=True)
@@ -127,24 +65,15 @@ class HandoverBrokerClient:
         )
         frame = encode_request_frame(request)
 
-        client = self.socket_factory(socket.AF_UNIX, socket.SOCK_STREAM)  # type: ignore[operator]
+        client = connect_unix(
+            self.socket_path,
+            timeout=_SOCKET_TIMEOUT_SECONDS,
+            socket_factory=self.socket_factory,
+        )
         stream: BinaryIO | None = None
         try:
-            client.settimeout(_SOCKET_TIMEOUT_SECONDS)
-            client.connect(str(self.socket_path))
             stream = client.makefile("rwb", buffering=0)
-            offset = 0
-            while offset < len(frame):
-                written = stream.write(frame[offset:])
-                if (
-                    isinstance(written, bool)
-                    or not isinstance(written, int)
-                    or written <= 0
-                    or written > len(frame) - offset
-                ):
-                    raise ValueError("handover broker request write failed")
-                offset += written
-            stream.flush()
+            write_all(stream, frame, label="handover broker request")
             response = read_response_frame(stream)
             if response.status != "ok":
                 raise RuntimeError("handover broker request failed")

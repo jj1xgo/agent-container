@@ -27,12 +27,16 @@ agent-containerは、containerの中のagentがhost側の資源へ到達する�
 
 新package `src/agent_container/broker/`をkernelとする。**kernelはbroker固有moduleを一切importしない。** 依存は常に`handover_*`／`egress_*`／`github_*`／`family_*` → `broker/`の一方向である。container側clientもkernelを使うため、packageはimageに含める（`.containerignore`は`!src/**`で`src/`全体を許可しており追加設定は不要）。
 
+ただし`tests/container/test_image.py`の`test_effective_image_tree_imports_host_entrypoints_without_host_modules`はtop-levelの`.py`だけを仮image treeへcopyしていたため、6-1でsubdirectoryを含めてcopyするよう修正した。これはbroker testではなくimage contract testのinfra修正である。
+
+6-1の実装と最終reviewで判明した、6-2〜6-5の設計入力を記録する。(1) egressはframing失敗を「egress metadata …」、schema失敗を「egress request／response schema …」と別の接頭辞で報告するため、`FrameSchema`に`label`と別のframe用labelを持たせる追加（既定は`label`）が要る。(2) githubの`decode_response_frame`は長さ0・超過・切り詰め・JSON失敗を全て「broker response frame is invalid」に畳んでおり、`encode_request_frame`は`json.dumps`失敗を包まず`TypeError`を出す。kernel化でmessageと例外型が変わるので、6-4でmessage保存の要否を先に決める。(3) githubの`iter_chunk_stream`はclean EOFで`b""`を返す`read_exact(initial_eof=True)`相当を必要とする。(4) `handover_broker_transport.py`のhost側`_read_exact`は`_RequestFailure("schema")`、長さ検査は`_RequestFailure("size")`を出し、この区別がaudit行に入る。kernelの`read_frame`へ単純に置き換えると`size`が`schema`に畳まれるので、6-2ではruntime側で長さ検査を先に行うか、kernelに例外種別の口を設ける。(5) kernelの`read_capability`はgithubより厳格（前段落参照）。
+
 | module | 責務 | 置き換える重複 |
 | --- | --- | --- |
-| `broker/frame.py` | 4byte big-endian length + JSON objectのcodec。`FrameSchema`（field集合、必須field、status集合、code集合、size上限、version、JSON serialization options）を受け取り、encode／decode／read／writeを提供する。重複key拒否、定数field拒否、`_read_exact`、size上限、version検証を1実装にする。githubのchunk stream（`write_chunk_stream`／`iter_chunk_stream`）もここに置く。 | 4 protocol module |
+| `broker/frame.py` | 4byte big-endian length + JSON objectのcodec。`FrameSchema(label, stream_label, fields, max_bytes, json)`を受け取り、`encode_frame`／`decode_frame`／`read_frame`／`read_exact`／`write_all`を提供する。`label`はerror messageの接頭辞、`stream_label`はstream読み書き失敗時の接頭辞、`fields`はdecode後のkey集合との完全一致要件、`max_bytes`はbody上限、`json`は`JsonOptions(ensure_ascii, allow_nan, sort_keys, separators, encoding)`である。重複key拒否、`NaN`／`Infinity`拒否、非object拒否、size上限、bounded read、partial write retryを1実装にする。protocol version、status集合、code集合、fieldの型検証はbroker毎のpolicyであり、意図的にkernelへ入れず各protocol moduleに残す。githubのchunk stream（`write_chunk_stream`／`iter_chunk_stream`）は6-4でここに置く。 | 4 protocol module |
 | `broker/runtime.py` | `SocketBrokerRuntime`。run directory作成とprivate mode検証、capability生成とmode `0600`のfile、socket path長検証・既存path／symlink拒否・bind・`chmod 0600`、timeout付きaccept loop、`SO_PEERCRED`取得、stop、cleanup（socket → capability → run directoryの固定順序、冪等）。接続処理はbrokerが渡す`ConnectionHandler(stream, peer) -> None`に委ねる。`concurrency="inline"`（handover、github、family）と`concurrency="thread"`（egress）の両方を支える。acceptを始める前に`ReadinessGate`を待つ（後述）。返り値は`run_dir`、`socket_path`、`capability_path`を持つ最小のrecordで、各brokerはそれを自分の既存Mount型に包む。 | 4 runtime module |
 | `broker/audit.py` | `AuditLog(path)`。`O_APPEND`と`O_NOFOLLOW`で開き、親directoryとfileのprivate modeと所有者を検証し、1 record = 1行JSONで追記する。stage 1では**recordのkeyもtimestampの形式も呼び出し側が決め、`AuditLog`はそのまま書く**。 | handover／egress／githubの`_open_audit_file`＋`_write_audit_record` |
-| `broker/capability.py` | container側。`validate_exact_path`（絶対path、正規化済み、symlinkでない）、`read_capability`（`O_NOFOLLOW`、通常file、size上限、1行）、`validate_socket`（`S_ISSOCK`）、`connect_unix(path, timeout)`。 | 4 client module |
+| `broker/capability.py` | container側。`validate_exact_path(path, *, label)`（絶対path、`resolve(strict=True)`と一致）、`read_capability(path, *, label)`（`O_RDONLY|O_NOFOLLOW|O_NONBLOCK`、通常file、mode `0600`、実行user所有、**size完全一致（44 byte = 43文字 + 改行）**、open後に`resolve`と`lstat`のdev／inoを再検証、ascii、1行）、`validate_socket(path, *, label)`（`S_ISSOCK`、mode `0600`、実行user所有。pathのresolveは呼び出し側が先に行う）、`connect_unix(path, *, timeout, socket_factory)`（接続失敗時はsocketを閉じて再送出）。失敗は全て`ValueError(f"{label} is invalid")`。githubの`read_broker_capability`は`st_size > 45`の上限判定と「statしてからopen」の順序で、kernelより緩い。6-4で乗せ替える際に、この厳格化を受け入れるかparameter化するかを明示的に決める。 | 4 client module |
 | `broker/readiness.py` | `ReadinessGate` protocol（`register(peer)`、`wait(timeout)`、`is_ready()`）と既定実装`AlwaysReady`。familyの既存PID登録logicはこのprotocolの実装として6-5で移す。 | familyのPID登録gate（移動のみ） |
 
 ### stage 1で変えないもの
@@ -40,10 +44,11 @@ agent-containerは、containerの中のagentがhost側の資源へ到達する�
 - **`StateLayout`**。broker毎の`*_root`／`*_run_root`／`*_audit_file`は残す。pathを変えるとstate migrationが要り、振る舞い保存でなくなる。stage 2で`broker_root(name)`のような1関数へ畳むかを検討する。
 - **Mount型と`podman.py`**。4つのMount型は中身が異なる。githubは`BrokerRuntimeMount(run_dir, repository)`、handoverは`HandoverRuntimeMount(socket_path, capability_path)`、egressは`EgressRuntimeMount(run_dir, project_id, agent)`に`container_name`、familyは`FamilyRuntimeMount`がfile descriptorを保持し`revalidate()`を持つ状態付きobjectで、`podman.py`は`type(family) is not FamilyRuntimeMount`という完全一致の型gateをかけている。統一は振る舞い保存にならないためstage 1では行わず、`podman.py`は触らない。統一の可否はstage 2で検討する。
 - **wire形式**。`PROTOCOL_VERSION`は1のまま。JSON serialization optionsは各brokerの現状を`FrameSchema`に宣言して保存する。実測値は次の通りで、これを揃えるとgolden byte testが落ちる。
-  - handover: `ensure_ascii=False, allow_nan=False, separators=(",", ":")`
-  - family: `ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True`
-  - github: `separators=(",", ":"), sort_keys=True`（`ensure_ascii`は既定のTrue）
-  - egress: 全て既定（`separators`は既定の`(", ", ": ")`、`ensure_ascii=True`）
+  - handover: request／response とも `ensure_ascii=False, allow_nan=False, separators=(",", ":")`、utf-8
+  - family: request／response とも `ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True`、utf-8
+  - github: request は `ensure_ascii=False, allow_nan=False, separators=(",", ":")` を utf-8、response は `separators=(",", ":"), sort_keys=True` を ascii（`ensure_ascii`・`allow_nan` は既定）
+  - egress: request は `allow_nan=False, separators=(",", ":"), sort_keys=True` を ascii、response は `separators=(",", ":"), sort_keys=True` を ascii
+  - request と response で options が異なる broker があるため、`FrameSchema` は request 用と response 用を別に宣言する（6-1 で実装済み）。
 - **audit行**。keyは3系統のまま（github `bytes, issue_number, operation, policy_version, project, repository, run, status, timestamp`、handover `operation, path, project, run, stage, status, timestamp`、egress `agent, operation, project, run, stage, status, timestamp`、family `operation, project_id, request_id, stage, status, timestamp`）。timestampの形式も現状のまま（github／handover／egressはUTC ISO 8601、familyはepoch秒の整数）。統一はstage 2。
 
 ## 乗せ替えの順序とPR分割
