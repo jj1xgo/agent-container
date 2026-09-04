@@ -18,7 +18,7 @@ RUN apt-get update \
     && ! grep -q '^URIs: http://' /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-      bubblewrap ca-certificates curl git libatomic1 passwd python3 python3-pip ripgrep socat xz-utils \
+      bubblewrap ca-certificates curl git jq libatomic1 passwd python3 python3-pip ripgrep socat xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements-lint.txt /opt/agent-container/
