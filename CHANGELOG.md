@@ -22,7 +22,7 @@
 
 ### Validation
 
-- 2026-09-02の実host smokeでlocal automated gate、Codex／Claude両pathの実Podman gate、専用Appの最小権限とexact 1 repository inventory、Codex intake／duplicate拒否、fresh approval付き[Issue #75](https://github.com/jj1xgo/agent-container/issues/75)、content-free audit、terminal cleanupを確認しました。Claude実CLI intakeはlong-lived OAuth tokenの生成・private保存後もClaude Codeとraw Anthropic APIがHTTP 401を返し、fixture提出前に停止しており、Phase 5の残作業として保持します。
+- 2026-09-02の実host smokeでlocal automated gate、Codex／Claude両pathの実Podman gate、専用Appの最小権限とexact 1 repository inventory、Codex intake／duplicate拒否、fresh approval付き[Issue #75](https://github.com/jj1xgo/agent-container/issues/75)、content-free audit、terminal cleanupを確認しました。当時HTTP 401で停止していたClaude実CLI intakeは、原因がsetup tokenの貼り間違いだったため、validator強化後の2026-09-04に再実行し、実Claude runtimeからの固定fixture提出、同runの2回目拒否、host previewでのClaude署名、audit／cleanupをGitHub Issueを作らずに確認しました。これでPhase 5の実host smokeは完了です。
 
 ## [0.4.1] - 2026-09-01
 

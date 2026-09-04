@@ -4,7 +4,7 @@
 
 ## 現在地
 
-Phase 1〜4は完了した。現在地は**Phase 5**であり、Family Issue brokerのcodeとCIは完成している。2026-09-02の実host smokeでは、専用App／binding、実PodmanのCodex／Claude両path、Codex intake、承認付き実Issue、non-exposure、duplicate、audit／cleanupがPASSした。Claude実CLIのintakeだけはlong-lived OAuth tokenの生成・private保存後もClaude Codeとraw Anthropic APIがHTTP 401を返し、fixture提出前に停止しており、これを再実行してPhase 5を閉じた後にPhase 6へ進む。
+Phase 1〜5は完了した。現在地は**Phase 6**である。Phase 5は、2026-09-02の実host smokeで専用App／binding、実PodmanのCodex／Claude両path、Codex intake、承認付き実Issue、non-exposure、duplicate、audit／cleanupがPASSし、残っていたClaude実CLIのintakeを2026-09-04に再実行してPASSしたことで閉じた。以前HTTP 401で停止していた原因は、browserのlogin codeをsetup tokenとして保存していた貼り間違いであり、validatorの強化（PR #79）と折り返しpasteの連結（PR #81）で再発を防いだ。
 
 状態は次の4種類とする。
 
@@ -21,8 +21,8 @@ Phase 1〜4は完了した。現在地は**Phase 5**であり、Family Issue bro
 | Phase 2 | Claude Code対応 | 完了 | managed sandbox、認証、編集・test・resume、credential非露出の実host gateが成立する。 |
 | Phase 3 | GitHub App broker | 完了 | credentialをcontainerへ渡さず、exact repositoryのclone／fetch、create-only push、PR、Issue readを提供する。 |
 | Phase 4 | scope整合・安全性安定化・`v0.4.0` | 完了 | private fixture gate、create-only強制、Issue read、cleanup、releaseを完了する。 |
-| Phase 5 | Family機能の運用完成 | 進行中 | 専用App、binding、Codex／Claude intake、non-exposure、duplicate、承認付き実Issue、unknown reconciliation、cleanupの実host smokeがPASSする。 |
-| Phase 6 | 共通control plane | 未着手 | project、agent、task、eventのhost側contract、private state、監査境界を固定する。 |
+| Phase 5 | Family機能の運用完成 | 完了 | 専用App、binding、Codex／Claude intake、non-exposure、duplicate、承認付き実Issue、unknown reconciliation、cleanupの実host smokeがPASSする。 |
+| Phase 6 | 共通control plane | 進行中 | project、agent、task、eventのhost側contract、private state、監査境界を固定する。 |
 | Phase 7 | Obsidian Vault config sync | 未着手 | review可能なschemaをVault原本から検査済みprivate stateへ同期し、credential、session、cacheを除外する。 |
 | Phase 8 | Worktree・task lease | 未着手 | agent別worktree、exclusive claim、期限、回収、stale writer拒否を提供する。 |
 | Phase 9 | Conversation room | 未着手 | Codex／Claudeがtask単位のroomへ対等なparticipantとしてbounded read/postできる。 |
@@ -37,15 +37,14 @@ Phase 7〜10が「Obsidianを第2の脳として使う」ための中心範囲�
 
 実施順はPhase番号と一致する。
 
-1. Claude OAuth tokenが実際に受理される正式認証経路を確認した環境でPhase 5の実Claude intakeを再実行し、Family実host smokeを完了する。
-2. Phase 6で、後続機能が共有するcontrol-plane contractを固定する。
-3. Phase 7で、安全なVault原本と実行用copyの同期を作る。
-4. Phase 8で、複数agentの編集をworktreeとleaseで隔離する。
-5. Phase 9で、taskに紐づくconversation roomを作る。
-6. Phase 10で、control planeの人間向けObsidian UIを作る。
-7. Phase 11で、managed hooksと相互reviewを自動化する。
-8. Phase 12で、必要なHTTP MCPとcredential brokerの共通化を行う。
-9. Phase 13は、安全性の前提を実証できた場合だけ着手する。
+1. Phase 6で、後続機能が共有するcontrol-plane contractを固定する。
+2. Phase 7で、安全なVault原本と実行用copyの同期を作る。
+3. Phase 8で、複数agentの編集をworktreeとleaseで隔離する。
+4. Phase 9で、taskに紐づくconversation roomを作る。
+5. Phase 10で、control planeの人間向けObsidian UIを作る。
+6. Phase 11で、managed hooksと相互reviewを自動化する。
+7. Phase 12で、必要なHTTP MCPとcredential brokerの共通化を行う。
+8. Phase 13は、安全性の前提を実証できた場合だけ着手する。
 
 Phase内の実装は複数の設計・PRへ分割できるが、完了条件を満たすまでPhase番号を進めない。緊急のsecurity fixや回帰修正はPhase外の保守作業として優先できるが、それだけで現在地を変更しない。
 

@@ -279,7 +279,7 @@ class DevelopmentRoadmapDocumentationTest(unittest.TestCase):
             self.assertIn(f"| Phase {phase} |", roadmap)
         self.assertNotIn("| Phase 0 |", roadmap)
         self.assertNotIn("| Phase 14 |", roadmap)
-        self.assertIn("現在地は**Phase 5**", roadmap)
+        self.assertIn("現在地は**Phase 6**", roadmap)
         self.assertIn("旧Phase番号は現在の進捗管理に使用しない", roadmap)
         self.assertIn("## 当初順序から変更した理由", roadmap)
         self.assertIn("## 現在の実施順", roadmap)
@@ -875,9 +875,9 @@ class FamilyIssueBrokerDocumentationTest(unittest.TestCase):
             self.smoke,
         )
         for expected in (
-            "Codex suiteは`Ran 30 tests ... OK`",
-            "container suiteは`Ran 954 tests ... OK`",
-            "socket suiteは`Ran 17 tests ... OK`",
+            "Codex suiteは`Ran 44 tests ... OK`",
+            "container suiteは`Ran 976 tests ... OK`",
+            "socket suiteは`Ran 18 tests ... OK`",
             "forced-unknown fixtureは`Ran 4 tests ... OK`",
             "Podman suiteは`Ran 14 tests ... OK`",
             "unexpected skipは0件",
@@ -889,7 +889,9 @@ class FamilyIssueBrokerDocumentationTest(unittest.TestCase):
         )
         self.assertIn("Ran 4 tests", self.smoke)
         self.assertIn("missing prerequisiteごとにnot run", self.smoke)
-        self.assertIn("HTTP 401", self.smoke)
+        self.assertIn("| Intake / duplicate / non-exposure | PASS |", self.smoke)
+        self.assertIn("| Cleanup / rollback | PASS |", self.smoke)
+        self.assertNotIn("| PARTIAL |", self.smoke)
         self.assertNotIn("subscription access無効", self.smoke)
         self.assertNotIn("UNOBSERVED", self.operator + self.smoke)
 
