@@ -48,6 +48,16 @@ Phase 7〜10が「Obsidianを第2の脳として使う」ための中心範囲�
 
 Phase内の実装は複数の設計・PRへ分割できるが、完了条件を満たすまでPhase番号を進めない。緊急のsecurity fixや回帰修正はPhase外の保守作業として優先できるが、それだけで現在地を変更しない。
 
+## Phase 6〜9の依存理由
+
+Phase 6（共通control plane）→Phase 7（Vault config sync）→Phase 8（Worktree・task lease）→Phase 9（Conversation room）の順序は、単なる技術的な積み上げではなく、**CodexとClaudeを対等に協働させ、並行して作業を進められるようにする**という利用者の目的のために2026-08-27に合意された順序である。
+
+- 出典: handover `2026-08-27_031151_4dc890f8`（Phase 0開始前・複数AI開発基盤ロードマップ合意）。
+- 決定事項: 「CodexとClaudeを対等に協働させるには、agent別Git worktree、task lease、host側conversation roomを使う。MCPは相手をtool化するのでなく、両者が同じroom read/post capabilityを使う通信adapterとしてなら利用可能。」
+- Phase 8（Worktree・task lease）とPhase 9（Conversation room）が、この協働を実際に可能にする機能である。Phase 6（共通control plane）を先に固定するのは、GitHub／handover／egress／Familyの各brokerがこれまで個別に重複実装してきた問題（「先行実装済みの部品」節参照）を、worktree/leaseやconversation roomでも繰り返さないため。
+- 現在のworkspace実装は`root/workspaces/<project_id>`というproject単位の単一directoryであり（`src/agent_container/state.py`）、agentごとの分離やleaseはまだない。同一projectに対して複数agentを同時実行することは、Phase 8完了まで安全でない。
+- この理由は2026-08-27時点で「概ね」の順序として合意されたものであり、絶対的な技術依存として再検証されたわけではない。Phase 6のbrainstormingで、Phase 8の一部（agent別worktreeの分離だけ）を前倒しできないかを検討する余地は残る。
+
 ## 先行実装済みの部品
 
 将来構想の一部は、安全性や直近の実用性を優先して先行実装された。これらは後続Phaseを完了した証拠ではなく、各Phaseで再利用する既存部品として扱う。
