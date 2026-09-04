@@ -27,6 +27,8 @@ agent-containerは、containerの中のagentがhost側の資源へ到達する�
 
 新package `src/agent_container/broker/`をkernelとする。**kernelはbroker固有moduleを一切importしない。** 依存は常に`handover_*`／`egress_*`／`github_*`／`family_*` → `broker/`の一方向である。container側clientもkernelを使うため、packageはimageに含める（`.containerignore`は`!src/**`で`src/`全体を許可しており追加設定は不要）。
 
+ただし`tests/container/test_image.py`の`test_effective_image_tree_imports_host_entrypoints_without_host_modules`はtop-levelの`.py`だけを仮image treeへcopyしていたため、6-1でsubdirectoryを含めてcopyするよう修正した。これはbroker testではなくimage contract testのinfra修正である。
+
 | module | 責務 | 置き換える重複 |
 | --- | --- | --- |
 | `broker/frame.py` | 4byte big-endian length + JSON objectのcodec。`FrameSchema`（field集合、必須field、status集合、code集合、size上限、version、JSON serialization options）を受け取り、encode／decode／read／writeを提供する。重複key拒否、定数field拒否、`_read_exact`、size上限、version検証を1実装にする。githubのchunk stream（`write_chunk_stream`／`iter_chunk_stream`）もここに置く。 | 4 protocol module |
@@ -40,10 +42,11 @@ agent-containerは、containerの中のagentがhost側の資源へ到達する�
 - **`StateLayout`**。broker毎の`*_root`／`*_run_root`／`*_audit_file`は残す。pathを変えるとstate migrationが要り、振る舞い保存でなくなる。stage 2で`broker_root(name)`のような1関数へ畳むかを検討する。
 - **Mount型と`podman.py`**。4つのMount型は中身が異なる。githubは`BrokerRuntimeMount(run_dir, repository)`、handoverは`HandoverRuntimeMount(socket_path, capability_path)`、egressは`EgressRuntimeMount(run_dir, project_id, agent)`に`container_name`、familyは`FamilyRuntimeMount`がfile descriptorを保持し`revalidate()`を持つ状態付きobjectで、`podman.py`は`type(family) is not FamilyRuntimeMount`という完全一致の型gateをかけている。統一は振る舞い保存にならないためstage 1では行わず、`podman.py`は触らない。統一の可否はstage 2で検討する。
 - **wire形式**。`PROTOCOL_VERSION`は1のまま。JSON serialization optionsは各brokerの現状を`FrameSchema`に宣言して保存する。実測値は次の通りで、これを揃えるとgolden byte testが落ちる。
-  - handover: `ensure_ascii=False, allow_nan=False, separators=(",", ":")`
-  - family: `ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True`
-  - github: `separators=(",", ":"), sort_keys=True`（`ensure_ascii`は既定のTrue）
-  - egress: 全て既定（`separators`は既定の`(", ", ": ")`、`ensure_ascii=True`）
+  - handover: request／response とも `ensure_ascii=False, allow_nan=False, separators=(",", ":")`、utf-8
+  - family: request／response とも `ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True`、utf-8
+  - github: request は `ensure_ascii=False, allow_nan=False, separators=(",", ":")` を utf-8、response は `separators=(",", ":"), sort_keys=True` を ascii（`ensure_ascii`・`allow_nan` は既定）
+  - egress: request は `allow_nan=False, separators=(",", ":"), sort_keys=True` を ascii、response は `separators=(",", ":"), sort_keys=True` を ascii
+  - request と response で options が異なる broker があるため、`FrameSchema` は request 用と response 用を別に宣言する（6-1 で実装済み）。
 - **audit行**。keyは3系統のまま（github `bytes, issue_number, operation, policy_version, project, repository, run, status, timestamp`、handover `operation, path, project, run, stage, status, timestamp`、egress `agent, operation, project, run, stage, status, timestamp`、family `operation, project_id, request_id, stage, status, timestamp`）。timestampの形式も現状のまま（github／handover／egressはUTC ISO 8601、familyはepoch秒の整数）。統一はstage 2。
 
 ## 乗せ替えの順序とPR分割
