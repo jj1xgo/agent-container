@@ -208,6 +208,8 @@ containerは`--read-only`、`--cap-drop=all`、`no-new-privileges`、host user�
 
 専用launcherだけがsecret fileを`O_NOFOLLOW`で開いてtokenをClaude親processへ渡します。tokenはPodman argvにもhost環境にも入りません。現在のClaude Codeでは`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`がrootless Podman内で利用できない強いsandboxを強制し、新しい`/proc`のmountに失敗するため、global scrubは意図的に設定しません。
 
+launcherはtoken onboardingを抑止する`IS_DEMO=1`も設定します。この設定はClaude Codeのworkspace trust dialogも省略するため、launcherは起動直前にproject configの`.claude.json`へ現在のworkspaceに対する`hasTrustDialogAccepted: true`だけをseedします。これがないとmanaged status lineなどtrustを前提にする機能が黙って動きません。seedはworkspace trustだけを与え、permission bypass optionは渡さず、project側のhooksとMCPはmanaged policyで引き続き遮断されます。`.claude.json`が通常fileでない、実行user所有でない、またはJSON objectとして読めない場合は、本文を出さずに起動を停止します。
+
 代わりに、image内のEnterprise managed settingsでweaker nested sandboxを有効にし、unsandboxed fallbackを禁止します。credential環境変数とtoken fileへのsubprocess access、built-in Readによるtoken path参照を拒否し、hooksとMCPは初期状態で無効にします。review済みHTTP MCPは将来managed policyへ追加できますが、stdio MCPはglobal scrubとnested modeが安全に共存できるまで無効のままです。
 
 外側のPodman制約である`--read-only`、`--cap-drop=all`、`no-new-privileges`、keep-id、狭いmount、container PID namespace、bounded tmpfsは変更しません。weaker nested modeではClaude親processが既存`/proc`に見える可能性があるため、実hostでは専用probeの`parent_token_via_proc_readable=false`を必須にします。`parent_token_via_proc_readable=true`、token fileを読める、またはBash環境にtokenが見える場合は運用を停止し、sandboxを無効化して再試行しません。確認時も環境一覧、値、prefix、長さ、hash、process environment、secret fileや`/proc/*/environ`の本文を表示しません。

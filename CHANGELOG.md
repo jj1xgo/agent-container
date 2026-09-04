@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Claude launcherが設定する`IS_DEMO=1`はtoken onboardingだけでなくworkspace trust dialogも省略するため、project configの`.claude.json`に`hasTrustDialogAccepted`が残らず、managed status lineを含むtrust前提の機能が黙って動いていませんでした。launcherは起動直前に現在のworkspaceの該当keyだけをseedし、fileが無ければmode `0600`で作り、通常fileでない・実行user所有でない・JSON objectとして読めない場合は本文を出さずに起動を停止します。permission bypass optionやproject側hooks／MCPの扱いは変わりません。
 - `bin/agentctl auth claude`のtoken validatorが印字可能ASCIIなら何でも受理していたため、browserに表示される`code#state`形式のlogin codeを`claude setup-token`のtokenとして保存でき、local `claude auth status`とdoctorがPASSしたまま実inferenceがHTTP 401になっていました。validatorを`sk-ant-oatNN-` prefixと英数・`-`・`_`に限定し、`#`を含む値はlogin codeの貼り間違いとして拒否します。既存の不正な保存値はdoctorの`claude-auth`がFAILとして報告します。
 - terminalの幅で2行に折り返されたtokenを貼り付けると、hidden promptが1行目だけを保存し、2行目がagentctl終了後にshellへ渡ってhistoryに残っていました。hidden promptはgetpassを使わずechoとcanonical modeを切ってterminalを直接読み、Enterの後も入力が静止するまで読み続けて行を連結し、連結後も不正な場合は折り返しの可能性を示して停止します。
 
