@@ -30,8 +30,12 @@
     ],
     "disableBypassPermissionsMode": "disable"
   },
-  "disableAllHooks": true,
   "allowManagedHooksOnly": true,
   "allowedMcpServers": [],
-  "allowManagedMcpServersOnly": true
+  "allowManagedMcpServersOnly": true,
+  "statusLine": {
+    "type": "command",
+    "command": "bash /etc/claude-code/statusline.sh",
+    "padding": 0
+  }
 }

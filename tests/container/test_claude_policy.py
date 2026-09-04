@@ -52,6 +52,7 @@ handover の作成には次の command だけを使い、完成した以下の 7
 
 credential、token、環境値、transcript 全文を含めない。broker が拒否した場合は停止し、sandbox や mount を弱めず、別 path への直接書き込みや fallback を行わない。
 """.encode("utf-8")
+MANAGED_STATUSLINE = (ROOT / "profiles/claude/statusline.sh").read_bytes()
 
 
 class ClaudeManagedPolicyTest(unittest.TestCase):
@@ -65,6 +66,9 @@ class ClaudeManagedPolicyTest(unittest.TestCase):
         instructions_path = root / "CLAUDE.md"
         instructions_path.write_bytes(MANAGED_INSTRUCTIONS)
         instructions_path.chmod(0o644)
+        statusline_path = root / "statusline.sh"
+        statusline_path.write_bytes(MANAGED_STATUSLINE)
+        statusline_path.chmod(0o644)
         return settings_path, mcp_path
 
     def test_accepts_repository_managed_policy(self) -> None:
@@ -192,8 +196,15 @@ class ClaudeManagedPolicyTest(unittest.TestCase):
             "missing credentials": lambda value: value["sandbox"].pop("credentials"),
             "missing read deny": lambda value: value["permissions"].update(deny=[]),
             "bypass enabled": lambda value: value["permissions"].update(disableBypassPermissionsMode="enable"),
-            "hooks enabled": lambda value: value.update(disableAllHooks=False),
+            "all hooks disabled": lambda value: value.update(disableAllHooks=True),
             "unmanaged hooks": lambda value: value.update(allowManagedHooksOnly=False),
+            "status line removed": lambda value: value.pop("statusLine"),
+            "unmanaged status line": lambda value: value["statusLine"].update(
+                command="bash ~/.claude/statusline.sh"
+            ),
+            "status line via /workspace": lambda value: value["statusLine"].update(
+                command="bash /workspace/statusline.sh"
+            ),
             "MCP allowed": lambda value: value.update(allowedMcpServers=["sentinel"]),
             "unmanaged MCP": lambda value: value.update(allowManagedMcpServersOnly=False),
         }
@@ -209,6 +220,49 @@ class ClaudeManagedPolicyTest(unittest.TestCase):
                     valid = validate_managed_policy(settings_path, mcp_path)
                 self.assertFalse(valid)
                 self.assertEqual(output.getvalue(), "")
+
+    def test_rejects_missing_wrong_mode_and_symlinked_managed_statusline(self) -> None:
+        baseline = json.loads(
+            (ROOT / "profiles/claude/managed-settings.json").read_text()
+        )
+        for failure in ("missing", "mode", "world-writable", "symlink", "fifo"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                settings, mcp = self._write_policy(
+                    Path(temporary), baseline, {"mcpServers": {}}
+                )
+                statusline = settings.parent / "statusline.sh"
+                self.assertTrue(
+                    validate_managed_policy(
+                        settings,
+                        mcp,
+                        expected_uid=os.getuid(),
+                        statusline_path=statusline,
+                    )
+                )
+                if failure == "missing":
+                    statusline.unlink()
+                elif failure == "mode":
+                    statusline.chmod(0o600)
+                elif failure == "world-writable":
+                    statusline.chmod(0o666)
+                elif failure == "symlink":
+                    target = settings.parent / "real-statusline.sh"
+                    target.write_bytes(MANAGED_STATUSLINE)
+                    target.chmod(0o644)
+                    statusline.unlink()
+                    statusline.symlink_to(target)
+                else:
+                    statusline.unlink()
+                    os.mkfifo(statusline, 0o644)
+
+                self.assertFalse(
+                    validate_managed_policy(
+                        settings,
+                        mcp,
+                        expected_uid=os.getuid(),
+                        statusline_path=statusline,
+                    )
+                )
 
     def test_main_prints_only_boolean_for_invalid_content(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -183,8 +183,17 @@ class ContainerImageContractTest(unittest.TestCase):
         self.assertEqual(
             settings["permissions"]["disableBypassPermissionsMode"], "disable"
         )
-        self.assertTrue(settings["disableAllHooks"])
+        self.assertNotIn("disableAllHooks", settings)
         self.assertTrue(settings["allowManagedHooksOnly"])
+        self.assertNotIn("hooks", settings)
+        self.assertEqual(
+            settings["statusLine"],
+            {
+                "type": "command",
+                "command": "bash /etc/claude-code/statusline.sh",
+                "padding": 0,
+            },
+        )
         self.assertEqual(settings["allowedMcpServers"], [])
         self.assertTrue(settings["allowManagedMcpServersOnly"])
         self.assertEqual(
@@ -200,6 +209,30 @@ class ContainerImageContractTest(unittest.TestCase):
             "COPY --chmod=0644 profiles/claude/managed-mcp.json /etc/claude-code/managed-mcp.json",
             body,
         )
+        self.assertIn(
+            "COPY --chmod=0644 profiles/claude/statusline.sh /etc/claude-code/statusline.sh",
+            body,
+        )
+
+    def test_managed_claude_statusline_only_renders_stdin_session_json(self) -> None:
+        statusline_path = ROOT / "profiles/claude/statusline.sh"
+        script = statusline_path.read_text(encoding="utf-8")
+
+        self.assertFalse(statusline_path.stat().st_mode & 0o111)
+        self.assertTrue(script.startswith("#!/usr/bin/env bash\n"))
+        self.assertIn("input=$(cat)", script)
+        for forbidden in (
+            "printenv",
+            "environ",
+            "/run/secrets",
+            "OAUTH_TOKEN",
+            "API_KEY",
+            "AUTH_TOKEN",
+            "curl",
+            "wget",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, script)
 
     def test_image_installs_claude_sandbox_dependencies(self) -> None:
         body = (ROOT / "Containerfile").read_text(encoding="utf-8")
@@ -425,6 +458,7 @@ class ContainerImageContractTest(unittest.TestCase):
                 "!profiles/claude/managed-settings.json",
                 "!profiles/claude/managed-mcp.json",
                 "!profiles/claude/CLAUDE.md",
+                "!profiles/claude/statusline.sh",
                 "!container/",
                 "!container/bin/",
                 "!container/bin/codex",

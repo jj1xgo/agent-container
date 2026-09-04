@@ -18,6 +18,7 @@ src/agent_container/family_pending.py
 !profiles/claude/managed-settings.json
 !profiles/claude/managed-mcp.json
 !profiles/claude/CLAUDE.md
+!profiles/claude/statusline.sh
 !container/
 !container/bin/
 !container/bin/codex

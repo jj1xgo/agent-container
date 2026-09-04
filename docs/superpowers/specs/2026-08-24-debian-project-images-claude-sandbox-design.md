@@ -118,11 +118,11 @@ Linuxのfile-based managed settingsである`/etc/claude-code/managed-settings.j
 - `sandbox.credentials.files`で`/run/secrets/claude-oauth-token`をdeny
 - managed permission ruleでbuilt-in `Read`からtoken pathをdeny
 - permission bypass modeをdisable
-- `disableAllHooks=true`
-- managed hook以外をblockし、初期状態ではmanaged hookも定義しない
+- `allowManagedHooksOnly=true`でmanaged hook以外をblockし、初期状態ではmanaged hookも定義しない
+- `disableAllHooks`は設定しない。managed `statusLine`だけを許可し、imageへroot所有0644で焼き込んだ`/etc/claude-code/statusline.sh`(stdinのsession JSONのみ描画)を指す
 - managed MCPだけを許可し、初期状態のmanaged MCP mapを空にする
 
-これにより、command、prompt、agent、HTTP、MCP toolを含むClaude hookは初期状態ですべて動かさない。stdio MCPを含むMCPも初期状態ですべて動かさない。通常のRead/Edit/Write、sandboxed Bash、build/test、Git、package manager、compilerは利用できる。
+これにより、command、prompt、agent、HTTP、MCP toolを含むClaude hookは初期状態ですべて動かさない。sandbox外で動くhook様commandのうち、managed `statusLine`だけを例外とし、user/project/pluginのstatusLineは読み込まない。stdio MCPを含むMCPも初期状態ですべて動かさない。通常のRead/Edit/Write、sandboxed Bash、build/test、Git、package manager、compilerは利用できる。
 
 HTTP MCPを追加する場合は別のsecurity reviewを行う。managed MCPへ審査済みserverだけを登録し、allowlistはuser-assigned nameではなく限定した`serverUrl`で照合する。stdio commandはglobal scrubを安全に戻せるまで許可しない。
 
@@ -193,7 +193,7 @@ operator向け資料へ次を明記する。
 - reproducibility/rollback時だけversion overrideを使うこと。
 - `.agent-container.d/`の許可file、例、変更後の自動rebuild。
 - runtime中にpackageを追加せず、宣言を変更して再起動すること。
-- Claudeでは当面hooksとMCPを利用できないこと。
+- Claudeでは当面hooksとMCPを利用できないこと。status lineはmanaged policyが指すimage内scriptだけが動き、`~/.claude/settings.json`のstatusLineは無視されること。
 - HTTP MCP追加はmanaged policyのreviewが必要なこと。
 - Anthropicがscrubとweaker nested sandboxの共存を修正した場合に再検証すること。
 - security acceptance gateが失敗したら運用を継続しないこと。
