@@ -27,6 +27,8 @@
 
 ### Validation
 
+- 2026-09-05、基準`2fed914`でFamily実intakeの準備を行いました。`findsummits`のFamily local doctorはstate／binding／pending／audit／App metadata permissionsがPASS、live inventoryはこの確認では`not run`です。専用image `c0607c9fa48b`を指定した通常Codex doctorも必須項目PASSで、外向きdomain制限なしのWARNを確認しました。追加調査した任意の`--github-broker` doctorはproject policy未配置でFAILでした。このoptionを有効化したり、policy／binding／認証設定を変更したりしていません。固定fixtureを既存schemaで検証し、1回目pending／同runの2回目拒否を指示するprivate promptを準備しました。実Codex intake、pending新規作成、実Issue作成は`not run — 対象runtimeの実行前`です。
+
 - 2026-09-05、基準`3c6502a`と修正版image `c0607c9fa48b282befa1054363630b33f388804082c939a4666d3349ca195029`で、個別承認により`ab.chatgpt.com`を追加し、`chatgpt.com`／`pypi.org`／`sdmntprsouthcentralus.oaiusercontent.com`と合わせた4 domainでCodex 0.153.4を1回実行しました。通常mount／managed adapter／`--network=none`、非対話・ephemeral・read-onlyの最小応答をメモリ内で照合し、自然終了exit 0と応答一致を確認しました。このCodex runtime gateはPASSです。`github.com`のpolicy拒否を維持し、拒否requestより大きいsequenceの受理、authentication denial 0件、作成tunnel 13件、audit ok 13／policy denial 1件と固定field検査成功を観測しました。container／broker thread／run directory回収と追加後policyのbyte不変を確認し、通信本文・raw agent出力は保存していません。許可先は4件を保持し、rollback／Claude egress／Family実intake・実Issue／handoverなどの未実施gateへ成功を読み替えません。Phase 6-6全体は未完了です。
 
 - 2026-09-05、基準`9f5b4de`と修正版image `c0607c9fa48b`で、個別承認により`sdmntprsouthcentralus.oaiusercontent.com`を追加し、既存`chatgpt.com`／`pypi.org`と合わせた3 domainでCodexの最小応答要求を1回実行しました。新たな未許可候補`ab.chatgpt.com`を検出して停止し、応答成功は未確認で実runtime gateはFAILです。候補の用途は未確定です。既知の`github.com`拒否を維持し、拒否requestより大きいsequenceの受理、authentication denial 0件、作成tunnel 13件、audit ok 13／policy denial 2件と固定field検査成功を観測しました。停止後のprocess exit 0を推論成功には数えません。container／broker thread／run directory回収、追加後policyのbyte不変を確認しました。許可先は3件のまま保持し、通信本文・raw agent出力は保存せず、自動再実行・追加許可はしていません。
