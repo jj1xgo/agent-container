@@ -43,6 +43,12 @@ agent-containerは、containerの中のagentがhost側の資源へ到達する�
 | `broker/capability.py` | container側。`validate_exact_path(path, *, label)`（絶対path、`resolve(strict=True)`と一致）、`read_capability(path, *, label)`（`O_RDONLY|O_NOFOLLOW|O_NONBLOCK`、通常file、mode `0600`、実行user所有、**size完全一致（44 byte = 43文字 + 改行）**、open後に`resolve`と`lstat`のdev／inoを再検証、ascii、1行）、`validate_socket(path, *, label)`（`S_ISSOCK`、mode `0600`、実行user所有。pathのresolveは呼び出し側が先に行う）、`connect_unix(path, *, timeout, socket_factory)`（接続失敗時はsocketを閉じて再送出）。失敗は全て`ValueError(f"{label} is invalid")`。githubの`read_broker_capability`は`st_size > 45`の上限判定と「statしてからopen」の順序で、kernelより緩い。6-4の承認済み方針では旧readerを残し、厳格化や統一はstage 2で設計する。egressの`egress_adapter._read_capability`も同種で、mode `0400`／`0444`を受理し、owner・size検査と`O_NONBLOCK`を持たず、既存testは`0600`を拒否することを固定している。`open_gateway_tunnel`はtimeoutを設定しないため`connect_unix`にも乗らない。6-3ではadapterを据え置き、6-4ではgithubとともに旧readerを残すと決め、厳格化や統一はstage 2へ送る。 | 4 client module |
 | `broker/readiness.py` | `ReadinessGate` protocol（`wait(timeout) -> bool`のみ。Trueで準備完了、Falseで未完了、失敗はraise）と既定実装`AlwaysReady`。runtimeは`stop_event`を見ながら`listener_timeout`間隔で`wait`をpollし、準備完了までacceptしない。stopが先に来れば何もせずに終了する。6-1で想定した`register`／`is_ready`は消費者が無く、familyのPID登録はaccept前のgateではなくrequest毎の`validate_peer`による拒否だと判明したため削除した。familyを乗せ替える6-5では、この差を踏まえてreadiness seamの適用可否を再設計する。 | familyのPID登録gate（移動のみ） |
 
+### stage 1 から分離した停止処理の修正・課題
+
+[#97](https://github.com/jj1xgo/agent-container/issues/97) は振る舞い保存refactorから分離した修正である。worker登録後・開始前にaccept threadのjoinがtimeoutした場合、未開始workerはjoinせず管理対象に残す。既存のearly／late deactivate順序を通ったうえで停止未完了を`error_type`で報告し、session closeは延期する。開始が進むか失敗した後のstop再試行で回収する。thread開始中にlockを保持して停止待ちを無期限に延ばす変更はしない。
+
+`deactivate()`自体の例外伝播は現行契約を維持する。失効失敗後のcleanup、例外の優先順位、再試行・完了条件は[#98](https://github.com/jj1xgo/agent-container/issues/98)で追跡し、stage 2のfail-closed lifecycle設計で扱う。現在のhandover／egressのdeactivateに通常の例外発生経路を確認したという意味ではない。
+
 ### 6-4 の承認済み互換性範囲
 
 前述の6-1／6-3の設計入力は当時の記録であり、GitHubの例外保存、clean EOF、capability検証についての現在の決定は本節を優先する。
