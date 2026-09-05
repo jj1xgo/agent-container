@@ -45,7 +45,7 @@ egressの実Codex検証で見つかったsequence不整合は、stage 1のrefact
 
 実施順はPhase番号と一致する。
 
-Family実Codex intakeと固定`printf`診断はtool item 0件、新規pending／audit追加0件で未達です。診断harnessが通常起動の`--approve-for-me`を除去していた差分を発見し、通常spec保持・stdout／stderr分離・厳密なevent判定へ見直しました。外部接続なしの一時harness test 13件はPASSです。基本OCI制限下の直接`printf`は成功し、sandbox内の`/proc` mount拒否と区別できましたが、実認証runの原因は未確定です。利用者とのやり取りを踏まえ、実認証の追加実行は停止したままです。containerとFamily runtimeは回収済みです。
+Family実Codex intakeは新規pending／audit追加0件で未達です。診断harnessの通常spec保持・出力分離・判定を見直し、一時test 13件がPASSしました。さらに外部接続なしの実CLI＋模擬APIで、固定tool callがsandboxの`/proc` mount拒否で失敗しても`command_execution` eventが出ないことを再現しました。過去のevent 0件から「toolを呼ばなかった」とした解釈は撤回します。offlineでは通常承認引数の有無で同じ失敗となり、その復元だけでは解消しません。実認証runとの因果関係と安全な修正は未確定で、実認証の追加実行は停止したままです。live stateと権限設定は変更していません。
 
 1. Phase 6で、後続機能が共有するbroker kernelを固定する。
 2. Phase 7で、安全なVault原本と実行用copyの同期を作る。
