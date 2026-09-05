@@ -33,6 +33,16 @@ class CreatePrivateFileTest(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 create_private_file(path, "again\n", label=LABEL)
 
+    def test_mode_parameter_creates_an_owner_read_only_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "capability"
+            create_private_file(path, "abc\n", label=LABEL, mode=0o400)
+            self.assertEqual(path.read_bytes(), b"abc\n")
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o400)
+            default = Path(directory) / "default"
+            create_private_file(default, "abc\n", label=LABEL)
+            self.assertEqual(stat.S_IMODE(default.stat().st_mode), 0o600)
+
     def test_refuses_symlink_target_and_short_writes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

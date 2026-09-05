@@ -20,14 +20,16 @@ MAX_UNIX_SOCKET_PATH_BYTES = 107
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
-def create_private_file(path: Path, body: str, *, label: str) -> None:
+def create_private_file(
+    path: Path, body: str, *, label: str, mode: int = 0o600
+) -> None:
     descriptor = os.open(
         path,
         os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW,
-        0o600,
+        mode,
     )
     try:
-        os.fchmod(descriptor, 0o600)
+        os.fchmod(descriptor, mode)
         encoded = body.encode("ascii")
         offset = 0
         while offset < len(encoded):
