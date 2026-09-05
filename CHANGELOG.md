@@ -25,7 +25,9 @@
 
 ### Validation
 
-- Phase 6-6の準備として、2026-09-05に基準`e2ce4a9`のhost上でlint、Codex 48件、container 1111件、broker socket 18件、forced-unknown 4件、whitespace検査が成功しました。最終実行はskipなし、socketのResourceWarningは0件です。containerの初回実行はsandboxのsocket制限で16 errors／1 skipとなり、host権限での再実行は成功しました。Podman 5.8.6／rootless／crunを確認済みですが、この基準での実Podman suiteと認証済み実host smokeは`not run`です。Family手順は利用者承認により固定期待件数だけを更新し、操作・検証項目と過去の観測記録を維持します。
+- Phase 6-6の実Podman gateは、基準`e2ce4a9`とproduction／image入力が同一の専用worktree（文書・期待件数更新commit `9d8f5b3`）で専用imageをbuildし、14 tests／skip 0／ResourceWarning 0で成功しました（103.907秒）。image IDは`129ea06302ee495ac5c5f30cc3a036c645076b80b9b0db1d9f2626e9cbf6cc4a`、Node v26.8.1、Codex 0.153.4、Claude 2.1.261です。既存手順の専用imageを`AGENT_CONTAINER_INTEGRATION_BASE_IMAGE`にも指定し、egress／派生image testも同じbuildを使用しました。実行後は開始前からのcontainer 1件だけが稼働し、テスト用containerは残っていません。認証済み実host smokeは引き続き`not run — 対象を明示した個別承認前`で、6-6全体は未完了です。
+
+- Phase 6-6の準備として、2026-09-05に基準`e2ce4a9`のhost上でlint、Codex 48件、container 1111件、broker socket 18件、forced-unknown 4件、whitespace検査が成功しました。最終実行はskipなし、socketのResourceWarningは0件です。containerの初回実行はsandboxのsocket制限で16 errors／1 skipとなり、host権限での再実行は成功しました。Podman 5.8.6／rootless／crunを確認済みですが、この準備確認時点では実Podman suiteと認証済み実host smokeは`not run`でした。実Podmanの後続結果は前項に記録します。Family手順は利用者承認により固定期待件数だけを更新し、操作・検証項目と過去の観測記録を維持します。
 
 - Phase 6-5のproduction／test commit `a65704b1c64681064d2602e0a31e57c52da3ba3b`で、container 1,111件、Codex 48件、broker socket 18件、forced-unknown 4件、lintとwhitespace検査がPASSしました。ResourceWarningは0件、既存test/support/fixture 88 filesと対象外source 62 filesは基準`39fbc5e`から不変、保持33関数とserve内側処理のAST一致、256 codec casesの値・例外一致、旧encoder/auditからのstatic golden再生成一致を確認しました。local Podmanは`not run — podman unavailable`、required CIはPRで実行、認証済み実host smokeは`not run — 6-6`です。
 
