@@ -13,6 +13,7 @@
 - 標準agent imageに`jq`を追加しました。agentがJSON出力(`.claude.json`、CLI応答など)を扱う際、代替commandを自作せず本物の`jq`を使えます。
 - Phase 6 stage 1の最初の乗せ替えとして、共通broker kernel package `agent_container/broker/`に`frame`（length-prefixed JSON frame codecとstream helper）と`capability`（container側のexact path・capability file・socket検証と接続）を追加し、handover brokerのprotocolとcontainer側clientをその上に移しました。wire形式、audit、既存のhandover testは変更していません。kernel化前のencoderで生成したgolden byte fixtureを`tests/container/test_broker_frame_golden.py`に固定しました。
 - Phase 6 stage 1の2番目の乗せ替えとして、共通broker kernelに`audit`（private append-only audit log）、`readiness`（`ReadinessGate`と`AlwaysReady`）、`runtime`（run directory・capability・private socketの生成回収と、accept loop・stop・error captureの`SocketBrokerRuntime`）を追加し、handover brokerのsessionとruntimeをその上に移しました。audit行、error message、停止順序、既存のhandover testは変更していません。kernel化前のwriterで生成したaudit行のgolden fixtureを`tests/container/test_broker_audit_golden.py`に固定しました。
+- Phase 6 stage 1の3番目の乗せ替えとして、egress brokerのprotocol、session、runtimeを共通broker kernelの上に移しました。kernelには`FrameSchema.frame_label`（framing／JSON errorの接頭辞をschema errorと分ける）、`create_private_file`の`mode`、`open_connection`、`SocketBrokerRuntime`の`concurrency="thread"`（接続毎のworker threadと回収）・`wait_failed`・`raw_client`・`deactivate_after_join`を既定値を変えずに追加しました。wire byte、audit行、error message、停止順序、既存のegress testは変更していません。kernel化前のencoderとwriterで生成したgolden fixtureを`tests/container/test_broker_egress_golden.py`に固定しました。container側の`egress_adapter.py`は6-4でgithubと一緒に扱うため据え置きです。
 
 ### Fixed
 
