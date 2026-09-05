@@ -30,3 +30,15 @@ local doctorはpolicy schema、private state、managed adapter self-checkを確�
 - `not run`: 環境不足またはfresh approval待ちで実行していない。PASSへ読み替えない。
 
 CIはsocketとPodmanのlocal fixtureをpublic internetやcredentialなしで実行します。実serviceを使う確認は[smoke guide](egress-domain-allowlist-smoke-test.md)に従います。
+
+## Request sequenceと再送拒否
+
+adapterは各CONNECTに1から始まるsequenceを割り当てます。接続処理は並行するため、
+brokerは厳密な到着順を要求せず、最大受信番号から直近4,096番号の範囲で未使用の番号を受け付けます。
+同じ番号の再送と範囲より古い番号は拒否します。追跡状態は固定4,096-bitのbitmapで、
+大きい番号への移動でもメモリを無制限に増やしません。
+
+uid・version・capability・projectの認証に通らない要求は追跡状態を変えません。
+認証済み要求はpolicyで拒否した場合も番号を消費するため、次の許可済み要求が連番不一致で
+止まることはありません。範囲より大きく遅れた要求は再接続時の新しい番号で試す必要があります。
+新しいruntimeは新しいcapabilityと空の追跡状態で始まります。wire version・domain許可・audit schemaは変わりません。

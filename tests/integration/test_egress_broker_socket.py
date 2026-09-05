@@ -108,6 +108,7 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                 audited = self._AuditedRequests(
                     mount.socket_path, runtime.session.audit_file
                 )
+                sequences = EgressSequence()
                 for request, expected_code in (
                     (
                         EgressRequest(
@@ -138,7 +139,7 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                             1,
                             capability,
                             "agent-container",
-                            1,
+                            sequences.next(),
                             "connect",
                             "denied.example",
                             443,
@@ -174,7 +175,7 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                 def run_adapter() -> None:
                     with adapter_peer:
                         handle_connect_client(
-                            adapter_peer, adapter, EgressSequence()
+                            adapter_peer, adapter, sequences
                         )
 
                 worker = threading.Thread(
@@ -212,7 +213,7 @@ class EgressBrokerSocketIntegrationTest(unittest.TestCase):
                     1,
                     capability,
                     "agent-container",
-                    1,
+                    2,
                     "connect",
                     "allowed.example",
                     443,
