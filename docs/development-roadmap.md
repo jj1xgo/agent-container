@@ -39,6 +39,8 @@ Phase 7〜10が「Obsidianを第2の脳として使う」ための中心範囲�
 
 Phase 6-5はFamilyのframe codecとaccept iterationを既存kernelへ共通化する。PID登録はrequest毎の検証を保持し、readiness待機・lifecycle・audit transactionの完全統一はstage 2で扱う。詳細は[6-5計画](superpowers/plans/2026-09-05-broker-kernel-6-5-family.md)を参照する。
 
+6-5はPR #106でmerge済みです。6-6は実host smokeの準備中で、2026-09-05に基準`e2ce4a9`のhost上でlint、Codex 48件、container 1111件、socket 18件、forced-unknown 4件がskipなしで成功しました。Family手順の期待件数だけを利用者承認により更新し、操作・検証項目は維持します。認証済み実host smokeは`not run`であり、6-6とstage 2は未完了です。
+
 実施順はPhase番号と一致する。
 
 1. Phase 6で、後続機能が共有するbroker kernelを固定する。

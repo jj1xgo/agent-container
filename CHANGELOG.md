@@ -25,6 +25,8 @@
 
 ### Validation
 
+- Phase 6-6の準備として、2026-09-05に基準`e2ce4a9`のhost上でlint、Codex 48件、container 1111件、broker socket 18件、forced-unknown 4件、whitespace検査が成功しました。最終実行はskipなし、socketのResourceWarningは0件です。containerの初回実行はsandboxのsocket制限で16 errors／1 skipとなり、host権限での再実行は成功しました。Podman 5.8.6／rootless／crunを確認済みですが、この基準での実Podman suiteと認証済み実host smokeは`not run`です。Family手順は利用者承認により固定期待件数だけを更新し、操作・検証項目と過去の観測記録を維持します。
+
 - Phase 6-5のproduction／test commit `a65704b1c64681064d2602e0a31e57c52da3ba3b`で、container 1,111件、Codex 48件、broker socket 18件、forced-unknown 4件、lintとwhitespace検査がPASSしました。ResourceWarningは0件、既存test/support/fixture 88 filesと対象外source 62 filesは基準`39fbc5e`から不変、保持33関数とserve内側処理のAST一致、256 codec casesの値・例外一致、旧encoder/auditからのstatic golden再生成一致を確認しました。local Podmanは`not run — podman unavailable`、required CIはPRで実行、認証済み実host smokeは`not run — 6-6`です。
 
 - Phase 6-4の最終production／test tree `4e330826f3c04d5058ea54d7d65866945ebd8ca7`で、`bin/lint`、container unit 1,097件、Codex unit 48件、docs unit 67件、GitHub／handover／egress socket integration 8件がPASSし、socket stderrの`ResourceWarning`は0件でした。基準commit `a69bb780dc61f3f0f50c92f668f8686837280f12`から既存test 82 filesとscope外production 7 filesが不変であることをmachine-checkし、同commitから独立再生成したGitHub golden fixture（6,422 bytes、SHA-256 `398db7fe64dd10fa622a54da987ad7e6750c10e3a52ebe92ccd7dbbe5403eb49`）および90 synthetic protocol casesの一致も確認済みです。local Podman 14-test gateは`not run — podman unavailable`、required CIは`not run — PR作成後にcontrollerが実行`、実host smokeは`not run — 6-6`です。Phase 6は引き続き進行中で、stage 2のlifecycle／capability／audit opener完全統一が残っています。

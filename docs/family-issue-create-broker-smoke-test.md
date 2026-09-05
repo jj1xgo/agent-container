@@ -24,7 +24,9 @@ PYTHONPATH=src python3 -m unittest tests.integration.test_family_forced_unknown 
 git diff --check
 ```
 
-固定期待値はCodex suiteは`Ran 44 tests ... OK`、container suiteは`Ran 976 tests ... OK`、socket suiteは`Ran 18 tests ... OK`、forced-unknown fixtureは`Ran 4 tests ... OK`です。すべてのcommandでunexpected skipは0件を要求し、件数不一致または1件でも想定外skipがあればPASSにしません。host生成署名、duplicate denial、content-free audit、credential non-exposure、terminal cleanup、forced unknownとcreated / not-created reconciliationがunit／socket testで通ったことをtest名と件数で記録します。秘密値やcanonical本文を記録しません。
+固定期待値はCodex suiteは`Ran 48 tests ... OK`、container suiteは`Ran 1111 tests ... OK`、socket suiteは`Ran 18 tests ... OK`、forced-unknown fixtureは`Ran 4 tests ... OK`です。すべてのcommandでunexpected skipは0件を要求し、件数不一致または1件でも想定外skipがあればPASSにしません。host生成署名、duplicate denial、content-free audit、credential non-exposure、terminal cleanup、forced unknownとcreated / not-created reconciliationがunit／socket testで通ったことをtest名と件数で記録します。秘密値やcanonical本文を記録しません。
+
+2026-09-05、利用者承認によりPhase 6-6の基準`e2ce4a9`に合わせ、期待件数だけを44／976から48／1111へ更新しました。実行command、検証項目、skip禁止と件数一致の条件は維持します。過去の観測表の件数は当時の実測として保持します。
 
 ## 2. Real Podman gate
 

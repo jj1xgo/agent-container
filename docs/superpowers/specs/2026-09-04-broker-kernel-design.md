@@ -142,6 +142,8 @@ kernel固有のunit testは、既存brokerがばらばらに持っていた境�
 
 **実host smoke（stage 1完了gate）。** roadmapの規則「external-state smokeが未実施ならcodeがmerge済みでもPhaseを完了にしない」に従い、6-6で既存の手順書を**変更せずに**再実行する。`docs/phase3-github-broker-smoke-test.md`（fetch、create-only push、PR、Issue read）、`docs/egress-domain-allowlist-smoke-test.md`、`docs/family-issue-create-broker-smoke-test.md`、handoverは`docs/phase2-smoke-test.md`のCodex／Claude handover create。新しい手順書は書かない。既存手順がそのまま通ることが振る舞い保存の最終証拠であり、結果は`CHANGELOG.md`のValidationとroadmapへ記録する。
 
+2026-09-05の利用者承認により、上記「変更せずに」にはFamily手順の古い固定suite件数だけを更新する例外を設けます。基準`e2ce4a9`でCodex 44→48、container 976→1111とし、操作command、検証する保証、件数一致、unexpected skip禁止、外部操作の承認条件は変更しません。過去の観測結果は書き換えません。
+
 ## stage 2への継ぎ目
 
 stage 2を後から入れてもstage 1の設計を壊さないよう、kernelの内側に閉じた3つの継ぎ目を用意する。stage 1ではどれも既定値で動く。
