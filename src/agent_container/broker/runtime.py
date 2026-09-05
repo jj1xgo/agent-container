@@ -8,6 +8,7 @@ import socket
 import stat
 import struct
 import threading
+import time
 from typing import Any
 from typing import Callable
 
@@ -120,6 +121,7 @@ def remove_runtime_artifacts(
 
 
 _PEER_CREDENTIAL_BYTES = 12
+_CONCURRENCY_MODES = frozenset({"inline", "thread"})
 
 
 @dataclass(frozen=True)
@@ -129,12 +131,24 @@ class Connection:
     peer_uid: int
 
 
+def open_connection(client: Any, *, timeout: float) -> Connection:
+    client.settimeout(timeout)
+    credentials = client.getsockopt(
+        socket.SOL_SOCKET,
+        socket.SO_PEERCRED,
+        _PEER_CREDENTIAL_BYTES,
+    )
+    _pid, peer_uid, _gid = struct.unpack("3i", credentials)
+    return Connection(client, client.makefile("rwb", buffering=0), peer_uid)
+
+
 @dataclass
 class SocketBrokerRuntime:
     label: str
     thread_name: str
     open_listener: Callable[[int], Any]
-    handler: Callable[["Connection"], object]
+    # raw_client=False: handler(Connection). raw_client=True: handler(client socket).
+    handler: Callable[[Any], object]
     deactivate: Callable[[], None]
     close: Callable[[], None]
     error_type: type[Exception]
@@ -142,11 +156,24 @@ class SocketBrokerRuntime:
     backlog: int = 4
     listener_timeout: float = 0.2
     client_timeout: float = 30
+    concurrency: str = "inline"
+    worker_thread_name: str = ""
+    raw_client: bool = False
+    deactivate_after_join: bool = False
     stop_event: threading.Event = field(default_factory=threading.Event, init=False)
+    failed: threading.Event = field(default_factory=threading.Event, init=False)
     thread: Any | None = field(default=None, init=False)
     listener: Any | None = field(default=None, init=False, repr=False)
     error: BaseException | None = field(default=None, init=False, repr=False)
     exited: bool = field(default=False, init=False, repr=False)
+    workers: set[Any] = field(default_factory=set, init=False, repr=False)
+    worker_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        if self.concurrency not in _CONCURRENCY_MODES:
+            raise ValueError(f"{self.label} concurrency mode is invalid")
 
     def start(self) -> None:
         if self.thread is not None or self.exited:
@@ -199,27 +226,74 @@ class SocketBrokerRuntime:
                     if self.stop_event.is_set():
                         break
                     raise
-                with client:
-                    client.settimeout(self.client_timeout)
-                    credentials = client.getsockopt(
-                        socket.SOL_SOCKET,
-                        socket.SO_PEERCRED,
-                        _PEER_CREDENTIAL_BYTES,
-                    )
-                    _pid, peer_uid, _gid = struct.unpack("3i", credentials)
-                    stream = client.makefile("rwb", buffering=0)
-                    try:
-                        self.handler(Connection(client, stream, peer_uid))
-                    finally:
-                        stream.close()
+                if self.concurrency == "thread":
+                    self._start_worker(client)
+                else:
+                    with client:
+                        self._handle_client(client)
         except BaseException as error:
             self.error = error
+            self.failed.set()
+
+    def _handle_client(self, client: Any) -> None:
+        if self.raw_client:
+            self.handler(client)
+            return
+        connection = open_connection(client, timeout=self.client_timeout)
+        try:
+            self.handler(connection)
+        finally:
+            connection.stream.close()
+
+    def _start_worker(self, client: Any) -> None:
+        thread = threading.Thread(
+            target=self._run_worker,
+            args=(client,),
+            name=self.worker_thread_name or f"{self.thread_name}-worker",
+            daemon=True,
+        )
+        with self.worker_lock:
+            self.workers.add(thread)
+        try:
+            thread.start()
+        except BaseException:
+            with self.worker_lock:
+                self.workers.discard(thread)
+            client.close()
+            raise
+
+    def _run_worker(self, client: Any) -> None:
+        try:
+            self._handle_client(client)
+        except OSError:
+            pass
+        except BaseException as error:
+            self.error = error
+            self.stop_event.set()
+            self.failed.set()
+        finally:
+            client.close()
+            with self.worker_lock:
+                self.workers.discard(threading.current_thread())
+
+    def wait_failed(self, timeout: float) -> bool:
+        return self.failed.wait(timeout)
+
+    def _join_workers(self, join_timeout: float) -> bool:
+        deadline = time.monotonic() + join_timeout
+        with self.worker_lock:
+            workers = tuple(self.workers)
+        for worker in workers:
+            worker.join(timeout=max(0, deadline - time.monotonic()))
+        with self.worker_lock:
+            return bool(self.workers)
 
     def stop(self, *, join_timeout: float) -> None:
         if self.exited:
             return
         self.stop_event.set()
-        self.deactivate()
+        if not self.deactivate_after_join:
+            self.deactivate()
         cleanup_failed = False
         if self.listener is not None:
             try:
@@ -233,6 +307,10 @@ class SocketBrokerRuntime:
         if self.thread is not None:
             self.thread.join(timeout=join_timeout)
             did_not_stop = self.thread.is_alive()
+        if self._join_workers(join_timeout):
+            did_not_stop = True
+        if self.deactivate_after_join:
+            self.deactivate()
 
         if did_not_stop:
             raise self.error_type(f"{self.label} did not stop") from None
