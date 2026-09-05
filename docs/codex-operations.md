@@ -1,5 +1,23 @@
 # Codex運用ガイド
 
+## 継続的な作業指示
+
+このrepository固有の入口・検証command・review観点は、rootの[AGENTS.md](../AGENTS.md)にまとめる。承認済み作業の継続、skillとの優先関係、検証量の調整など、全project共通の個人方針は実際に利用しているCodex homeの`AGENTS.md`で管理する。launcherが専用`CODEX_HOME`を使う場合、hostの`~/.codex/AGENTS.md`とは別のfileになる。別のCodex homeへ個人指示が自動同期されるとは限らない。
+
+Codexは起動時にglobalとprojectの指示を読み込む。同じdirectoryでは`AGENTS.override.md`が`AGENTS.md`に優先し、project内では作業directoryに近い指示が優先される。更新後は新しいsessionで確認する。詳細は[公式のAGENTS.mdガイド](https://learn.chatgpt.com/docs/agent-configuration/agents-md)を参照。
+
+新しいsessionで「現在有効な指示fileと、このrepositoryで変更に応じて実行する検証を要約して」と依頼し、global指示とrootの`AGENTS.md`が反映されていることを確認する。反映されない場合は、実際のCodex home、作業directory、`AGENTS.override.md`、指示の合計size上限（既定32 KiB）を確認する。通常のdocsは必要時の参照先として使う。
+
+## 公式資料に基づく指示の点検
+
+2026-09-05に[OpenAIのAstra向けguidance](https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices)を確認した。承認済み作業の継続、skillとユーザー指示の優先関係、変更に見合った検証は、ユーザーの希望により利用中のグローバル`AGENTS.md`へ反映し、repositoryには固有の指示を残した。モデル別の担当分けは[検討メモ](agent-collaboration-notes.md)に残す。
+
+点検では、利用中のSuperpowers 6.3.0の`brainstorming/SKILL.md`が小さな変更にも設計提示後の承認を求め、`using-git-worktrees/SKILL.md`がworktree作成前の同意を求めることを確認した。これらはpluginの手順であり、OpenAIの必須設定ではない。既存承認との関係が曖昧だと追加確認で止まる可能性がある。plugin cache自体は編集せず、グローバル指示で既存承認の確認と停止理由の説明を明確にした。将来のplugin版にも同じ記述があるとは限らない。
+
+Codexやskillの更新時は、停止理由が権限・不足情報・skillの手順・その解釈のどれか、検証を理由なく繰り返していないか、指示に重複や矛盾がないかを点検する。plugin管理下のcacheを直接編集すると更新で失われるため、継続的な指示は自分で管理するfileに置く。
+
+運用指示はsandbox・承認policy・brokerが許す操作を拡大しない。設定の層と実際の制約は[公式のConfig basics](https://learn.chatgpt.com/docs/config-file/config-basic)を参照する。この整備では個人のmodel、reasoning effort、認証、trust、hook設定は変更していない。
+
 ## 普段の再開
 
 - 同じ会話を続ける: `/rename`で名前を付け、`/resume`または`codex resume`で再開する。
