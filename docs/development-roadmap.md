@@ -4,6 +4,8 @@
 
 ## 現在地
 
+この`release/0.5`系統はPhase 5完了時点（`e154d4b`）を基にした`v0.5.0`のrelease候補である。以下のPhase 6以降はmain側の開発計画を示す。公開と検証の状態は[release記録](v0.5.0-release.md)で管理する。
+
 Phase 1〜5は完了した。現在地は**Phase 6**である。Phase 5は、2026-09-02の実host smokeで専用App／binding、実PodmanのCodex／Claude両path、Codex intake、承認付き実Issue、non-exposure、duplicate、audit／cleanupがPASSし、残っていたClaude実CLIのintakeを2026-09-04に再実行してPASSしたことで閉じた。以前HTTP 401で停止していた原因は、browserのlogin codeをsetup tokenとして保存していた貼り間違いであり、validatorの強化（PR #79）と折り返しpasteの連結（PR #81）で再発を防いだ。
 
 状態は次の4種類とする。
@@ -75,6 +77,8 @@ Phase内の実装は複数の設計・PRへ分割できるが、完了条件を�
 本roadmapでは、baseline、Claude handover、Issue readを完了済みPhase 1〜4の実績へ、feedback inboxとIssue publishをPhase 5へ統合した。control planeからObsidian UIをPhase 6〜10、managed hooksと相互reviewをPhase 11、network／HTTP MCPとcredential brokerをPhase 12、stdio MCPをPhase 13として依存順に再編した。
 
 ## 更新規則
+
+- Phase完了時にはreleaseするか、延期するなら理由と次の判定時点を同じPRへ記録する。機能・実host検証の完了と、tag／GitHub Releaseの公開を分けて報告する。
 
 - Phaseを分割、統合、延期、置換するときは、同じPRでこの文書を更新する。
 - 現在Phaseを変更するPRは、直前Phaseの完了条件と検証証拠を明記する。

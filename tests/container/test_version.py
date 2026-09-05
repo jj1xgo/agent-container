@@ -34,16 +34,16 @@ class DevelopmentVersionTest(unittest.TestCase):
         self._git(root, "commit", "-m", message)
 
     def test_release_metadata_is_internally_consistent(self) -> None:
-        self.assertEqual(RELEASE_TAG, "v0.4.1")
-        self.assertEqual(RELEASE_VERSION, "0.4.1")
+        self.assertEqual(RELEASE_TAG, "v0.5.0")
+        self.assertEqual(RELEASE_VERSION, "0.5.0")
         self.assertEqual(DEVELOPMENT_BASE_TAG, "v0.4.0")
         self.assertEqual(DEVELOPMENT_VERSION, "0.5.0-dev")
         self.assertEqual(FALLBACK_VERSION, "0.5.0-dev.0")
 
     def test_exact_release_tag_returns_release_version(self) -> None:
         for tag_arguments in (
-            ("v0.4.1",),
-            ("-a", "v0.4.1", "-m", "release"),
+            ("v0.5.0",),
+            ("-a", "v0.5.0", "-m", "release"),
         ):
             with self.subTest(tag_arguments=tag_arguments), TemporaryDirectory() as temp:
                 root = Path(temp)
@@ -55,7 +55,7 @@ class DevelopmentVersionTest(unittest.TestCase):
                 self._commit(root, "candidate", "candidate\n")
                 self._git(root, "tag", *tag_arguments)
 
-                self.assertEqual(resolve_version(root), "0.4.1")
+                self.assertEqual(resolve_version(root), "0.5.0")
 
     def test_post_release_commit_uses_next_development_version(self) -> None:
         with TemporaryDirectory() as temp:
@@ -117,11 +117,11 @@ class DevelopmentVersionTest(unittest.TestCase):
             self._commit(root, "release", "release\n")
             self._git(root, "tag", "v0.4.0")
             self._commit(root, "candidate", "candidate\n")
-            self._git(root, "tag", "v0.4.1")
+            self._git(root, "tag", "v0.5.0")
             sha = self._git(root, "rev-parse", "--short=7", "HEAD")
             (root / "untracked.txt").write_text("ignored\n", encoding="utf-8")
 
-            self.assertEqual(resolve_version(root), "0.4.1")
+            self.assertEqual(resolve_version(root), "0.5.0")
 
             (root / "tracked.txt").write_text("dirty\n", encoding="utf-8")
             self.assertEqual(resolve_version(root), f"0.5.0-dev.1+g{sha}.dirty")

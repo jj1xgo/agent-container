@@ -4,7 +4,11 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-05
+
 ### Added
+
+- project単位のexact-domain egress allowlistを追加しました。許可したdomainへのHTTPS CONNECTだけをhost側gatewayで仲介し、DNS／宛先IPの検査と監査を行います。
 
 - 開発用Appとは権限・installation・stateを共有しないfamily専用GitHub Appと、hostのrequest単位承認後だけ登録済みrepositoryへIssueを1件作成するfamily Issue brokerを追加しました。
 - Codex／Claudeのcredential-free intake、24時間／10件limit、canonical preview、unknown reconciliation、content-free audit、doctor、実Podman／実host smoke手順を追加しました。
@@ -12,6 +16,8 @@
 - ホストのCodexとClaude Codeから、現在のGit originと登録済みproject metadataだけで保存先を決めるstandalone host handover publisherを追加しました。Claude Code向けには、最新handoverのpathだけを通知するSessionStart hookとhost skillを`profiles/host-claude/`へ追加し、publisherは`CODEX_SESSION_ID`がない場合に`CLAUDE_SESSION_ID`をSession欄へ記録します。
 
 ### Fixed
+
+- 旧egress runtimeでも、登録済み・開始前workerと停止処理の競合を再現し、PR #99と同じjoin guardを適用しました。停止未完了時にcapabilityを失効し、開始成功／失敗後の再試行でworkerとruntimeを回収します。
 
 - `bin/agentctl auth claude`のtoken validatorが印字可能ASCIIなら何でも受理していたため、browserに表示される`code#state`形式のlogin codeを`claude setup-token`のtokenとして保存でき、local `claude auth status`とdoctorがPASSしたまま実inferenceがHTTP 401になっていました。validatorを`sk-ant-oatNN-` prefixと英数・`-`・`_`に限定し、`#`を含む値はlogin codeの貼り間違いとして拒否します。既存の不正な保存値はdoctorの`claude-auth`がFAILとして報告します。
 - terminalの幅で2行に折り返されたtokenを貼り付けると、hidden promptが1行目だけを保存し、2行目がagentctl終了後にshellへ渡ってhistoryに残っていました。hidden promptはgetpassを使わずechoとcanonical modeを切ってterminalを直接読み、Enterの後も入力が静止するまで読み続けて行を連結し、連結後も不正な場合は折り返しの可能性を示して停止します。
@@ -129,6 +135,7 @@
 
 通常のlocal image buildは既定で各agent CLIの`latest`を解決します。このbaselineは`v0.1.0`のCI再現用固定値であり、runtime dependencyを恒久固定するものではありません。
 
+[0.5.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.5.0
 [0.4.1]: https://github.com/jj1xgo/agent-container/releases/tag/v0.4.1
 [0.4.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.4.0
 [0.3.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.3.0
