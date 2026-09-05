@@ -2,7 +2,7 @@
 
 ## Follow-up (2026-09-05)
 
-独立修正PR #107をmain `7a9e927`へmerge済み。以下は修正前の基準`8cb0422`／`v0.5.0`での診断記録です。reproducerは旧挙動をassertするため、修正版の期待結果を表しません。修正版の認証済み実host smokeは再実行前です。
+独立修正PR #107をmain `7a9e927`へmerge済み。以下は修正前の基準`8cb0422`／`v0.5.0`での診断記録です。reproducerは旧挙動をassertするため、修正版の期待結果を表しません。修正版の認証済み実host smoke 1回では拒否requestより大きいsequenceの受理とauthentication denial 0件を観測しましたが、新たな未許可domainで停止し、最小応答は未確認です。詳細はCHANGELOGの後続記録を参照してください。
 
 ## Scope and status
 
