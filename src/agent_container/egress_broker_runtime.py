@@ -291,7 +291,8 @@ class EgressBrokerRuntime(AbstractContextManager[EgressRuntimeMount]):
             if not workers:
                 break
             for worker in workers:
-                worker.join(timeout=max(0, deadline - time.monotonic()))
+                if worker.is_alive():
+                    worker.join(timeout=max(0, deadline - time.monotonic()))
             with self._worker_lock:
                 did_not_stop = did_not_stop or bool(self._workers)
             break
