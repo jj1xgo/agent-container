@@ -1933,3 +1933,4 @@ push と PR は controller が最終 review の後に行う。PR 本文には `g
 - Placeholder: なし。golden byte は実測値を転記済み。
 - 既知の注意: Task 6 の test は実 thread を使う。`FakeListener.accept` は 10 ms の wait で `TimeoutError` を返すので stop は速く収束する。`test_deactivate_after_join_still_deactivates_when_a_worker_does_not_stop` は `join_timeout=0.05` で `did not stop` を作り、`release` 後に 2 回目の `stop` で回収する（2 回目でも `deactivate` が再度呼ばれるのは egress の旧 `__exit__` と同じ）。
 - 6-2 plan との差: 6-2 は `Claude-Session` trailer を commit に付けたが、本 session の web session id は不明なので付けない。
+- 最終 whole-branch review で判明: Task 7 の「削除されるもの」に `_listener` field を含めたが、`tests/integration/test_egress_podman.py:206-207` が `runtime._listener` を使う。private surface の列挙が unit test file だけを見ていたため。fix wave で `_listener` を property として復元し、`tests/container/test_egress_broker_runtime_surface.py` で lifecycle を固定した。6-4 の plan では `tests/` 全体（integration を含む）を `runtime\._`／`session\._` で grep して preserved private surface を列挙する。
