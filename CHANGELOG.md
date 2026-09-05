@@ -27,6 +27,8 @@
 
 ### Validation
 
+- 2026-09-05、基準`3f5a859`と専用image `c0607c9fa48b`で、個別承認された`findsummits`の通常Codexを1回起動し、固定fixtureの受付と同runの2回目拒否を指示しました。通常のFamily supervisor／PID登録を保ち、Codex execは非対話・ephemeral・workspace-writeで実行しました。runtime exit 0でしたが、新規pending 0件／audit追加0件で受付は未達、intake gateはFAILです。検証scriptが識別したintake tool callも0件でした。raw runtime出力はメモリ内で検査後に破棄しており、未提出の原因は特定できません。family runtime cleanup、container回収、既存auditとworkspace Git statusの不変を確認しました。GitHub Issue作成、policy変更、自動再実行はしていません。次回診断用に本文を出さないevent件数・message分類の記録を準備し、実行は`not run — 再実行前`です。
+
 - 2026-09-05、基準`2fed914`でFamily実intakeの準備を行いました。`findsummits`のFamily local doctorはstate／binding／pending／audit／App metadata permissionsがPASS、live inventoryはこの確認では`not run`です。専用image `c0607c9fa48b`を指定した通常Codex doctorも必須項目PASSで、外向きdomain制限なしのWARNを確認しました。追加調査した任意の`--github-broker` doctorはproject policy未配置でFAILでした。このoptionを有効化したり、policy／binding／認証設定を変更したりしていません。固定fixtureを既存schemaで検証し、1回目pending／同runの2回目拒否を指示するprivate promptを準備しました。実Codex intake、pending新規作成、実Issue作成は`not run — 対象runtimeの実行前`です。
 
 - 2026-09-05、基準`3c6502a`と修正版image `c0607c9fa48b282befa1054363630b33f388804082c939a4666d3349ca195029`で、個別承認により`ab.chatgpt.com`を追加し、`chatgpt.com`／`pypi.org`／`sdmntprsouthcentralus.oaiusercontent.com`と合わせた4 domainでCodex 0.153.4を1回実行しました。通常mount／managed adapter／`--network=none`、非対話・ephemeral・read-onlyの最小応答をメモリ内で照合し、自然終了exit 0と応答一致を確認しました。このCodex runtime gateはPASSです。`github.com`のpolicy拒否を維持し、拒否requestより大きいsequenceの受理、authentication denial 0件、作成tunnel 13件、audit ok 13／policy denial 1件と固定field検査成功を観測しました。container／broker thread／run directory回収と追加後policyのbyte不変を確認し、通信本文・raw agent出力は保存していません。許可先は4件を保持し、rollback／Claude egress／Family実intake・実Issue／handoverなどの未実施gateへ成功を読み替えません。Phase 6-6全体は未完了です。

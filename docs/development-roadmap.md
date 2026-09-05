@@ -45,6 +45,8 @@ egressの実Codex検証で見つかったsequence不整合は、stage 1のrefact
 
 実施順はPhase番号と一致する。
 
+Family実Codex intakeは承認済みの1回を実行しましたが、新規pending／audit追加とも0件で未達です。通常終了を受付成功には数えず、原因を特定するための診断準備まで進めています。containerとFamily runtimeは回収済みです。
+
 1. Phase 6で、後続機能が共有するbroker kernelを固定する。
 2. Phase 7で、安全なVault原本と実行用copyの同期を作る。
 3. Phase 8で、複数agentの編集をworktreeとleaseで隔離する。
