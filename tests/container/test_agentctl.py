@@ -61,7 +61,7 @@ from agent_container.state import Repository
 
 
 VERSION_OUTPUT_PATTERN = re.compile(
-    r"^agentctl (?:0\.4\.1|0\.5\.0-dev\.\d+"
+    r"^agentctl (?:0\.5\.0|0\.5\.0-dev\.\d+"
     r"\+g[0-9a-f]{7}(?:\.dirty)?)\n$"
 )
 
@@ -5023,6 +5023,9 @@ class AgentCtlParserTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 0)
         self.assertRegex(stdout.getvalue(), VERSION_OUTPUT_PATTERN)
+        if __version__ == "0.5.0":
+            self.assertEqual(stdout.getvalue(), "agentctl 0.5.0\n")
+            return
         repository_root = Path(agentctl.__file__).resolve().parents[2]
         commit = subprocess.run(
             ("git", "-C", str(repository_root), "rev-parse", "--short=7", "HEAD"),
