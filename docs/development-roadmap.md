@@ -41,7 +41,7 @@ Phase 6-5はPR #106で完了し、6-6の実host smokeを進めています。Git
 
 egressの実Codex検証で見つかったsequence不整合は、stage 1のrefactorと分離したPR #107で修正し、main `7a9e927`へmergeしました。拒否後・到着順逆転の回帰testを含むcontainer1119／Codex48／local socket18件、独立review、required CIの実Podman14件が成功しています。[診断記録](superpowers/plans/2026-09-05-egress-sequence-investigation.md)は修正前の観測・再現です。
 
-修正版imageでの承認済みegress実runtime 1回では、拒否requestより大きいsequenceの受理とauthentication denial 0件を観測しました。ただし新たな未許可候補`sdmntprsouthcentralus.oaiusercontent.com`で停止し、最小応答は未確認でgateはFAILです。候補の用途は未確定で、次は候補reviewと個別承認後の操作です。専用projectの許可先は`chatgpt.com`／`pypi.org`の2件を維持しています。Family実intake／実Issue、handoverを含む残存gateとstage 2は未完了で、Phase 6全体は進行中です。
+修正版imageでの承認済みegress実runtimeでは、拒否requestより大きいsequenceの受理とauthentication denial 0件を観測しました。続く個別承認で`sdmntprsouthcentralus.oaiusercontent.com`を追加して1回実行しましたが、新たな未許可候補`ab.chatgpt.com`で停止し、最小応答は未確認でgateはFAILです。候補の用途は未確定で、次は候補reviewと個別承認後の操作です。専用projectの許可先は`chatgpt.com`／`pypi.org`／`sdmntprsouthcentralus.oaiusercontent.com`の3件を維持しています。Family実intake／実Issue、handoverを含む残存gateとstage 2は未完了で、Phase 6全体は進行中です。
 
 実施順はPhase番号と一致する。
 

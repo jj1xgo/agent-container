@@ -27,6 +27,8 @@
 
 ### Validation
 
+- 2026-09-05、基準`9f5b4de`と修正版image `c0607c9fa48b`で、個別承認により`sdmntprsouthcentralus.oaiusercontent.com`を追加し、既存`chatgpt.com`／`pypi.org`と合わせた3 domainでCodexの最小応答要求を1回実行しました。新たな未許可候補`ab.chatgpt.com`を検出して停止し、応答成功は未確認で実runtime gateはFAILです。候補の用途は未確定です。既知の`github.com`拒否を維持し、拒否requestより大きいsequenceの受理、authentication denial 0件、作成tunnel 13件、audit ok 13／policy denial 2件と固定field検査成功を観測しました。停止後のprocess exit 0を推論成功には数えません。container／broker thread／run directory回収、追加後policyのbyte不変を確認しました。許可先は3件のまま保持し、通信本文・raw agent出力は保存せず、自動再実行・追加許可はしていません。
+
 - 2026-09-05、基準`f592974`と修正版image `c0607c9fa48b`で、個別承認されたCodexの非対話・ephemeral・read-only最小応答要求を1回実行しました。通常mount／managed adapter／`--network=none`、許可先`chatgpt.com`／`pypi.org`を維持し、既知の`github.com`拒否後も継続しました。拒否されたrequestより大きいsequenceの受理を観測し、authentication denialは0件でした。一方、新たな未許可候補`sdmntprsouthcentralus.oaiusercontent.com`を検出して停止したため、最小応答成功は未確認で実runtime gateはFAILです。候補の用途は未確定です。作成tunnel 7件、audit 9件（ok 6／policy denial 2／relay error 1）、固定field検査成功を記録しました。停止後のprocess exit 0は推論成功に数えません。container／broker thread／run directory回収とpolicyのbyte不変を確認し、通信本文・raw agent出力は保存せず、domain追加・自動再実行はしていません。
 
 - 2026-09-05に独立修正PR #107をmain `7a9e927`へmergeし、smoke branchへ`fe24314`で取り込みました。mainと修正commit `1eb7ad9`のtree一致、smoke branchのproduction／profile／Containerfile一致を確認しました。修正版の専用image `c0607c9fa48b282befa1054363630b33f388804082c939a4666d3349ca195029`（Node v26.8.1／Codex 0.153.4／Claude 2.1.261）のbuildと、同imageを指定したlocal実Podman 14件が成功しました（108.361秒、skip 0、ResourceWarning 0）。開始前からのcontainer 1件のみが残り、検証containerは回収済みです。Family手順のcontainer期待値を回帰test追加後の1119へ更新し、docs test 67件とwhitespace検査も成功しました。修正版の認証済みegress runtimeは`not run — 再実行の個別承認前`で、6-6は未完了です。以下の修正前の観測記録は当時の結果として保持します。
