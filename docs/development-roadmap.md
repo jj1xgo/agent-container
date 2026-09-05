@@ -55,6 +55,8 @@ egress discoveryの個別承認後、Codexを1回起動し、policyが拒否し�
 
 次の個別承認で`chatgpt.com`を追加してCodexを1回実行したところ、未許可`github.com`要求を検出して停止しました。最小応答成功は未確認で実runtime gateはFAIL、接続元処理とauditのauthentication denial 7件の原因は調査中です。cleanupは成功し、許可先は`chatgpt.com`／`pypi.org`の2件を維持しています。失敗を回避するdomain追加や再実行は承認なしに行いません。
 
+egressの追加診断で、後続のauthentication denialがsequence不一致であることを特定しました。拒否後と到着順逆転の問題はlocal reproductionにより現在のsrcと公開`v0.5.0`の両方で再現しました。[診断記録](superpowers/plans/2026-09-05-egress-sequence-investigation.md)を参照し、stage 1の振る舞い保存refactorとは別の修正として扱います。修正・Issue登録は未実施で、6-6は未完了です。
+
 実施順はPhase番号と一致する。
 
 1. Phase 6で、後続機能が共有するbroker kernelを固定する。
