@@ -11,6 +11,7 @@ import threading
 import time
 from typing import Any
 from typing import Callable
+from typing import Iterator
 
 from agent_container.broker.capability import CAPABILITY_PATTERN
 from agent_container.broker.readiness import AlwaysReady
@@ -142,6 +143,19 @@ def open_connection(client: Any, *, timeout: float) -> Connection:
     return Connection(client, client.makefile("rwb", buffering=0), peer_uid)
 
 
+def accept_clients(listener: Any, *, stop_event: threading.Event) -> Iterator[Any]:
+    while not stop_event.is_set():
+        try:
+            client, _ = listener.accept()
+        except TimeoutError:
+            continue
+        except OSError:
+            if stop_event.is_set():
+                return
+            raise
+        yield client
+
+
 @dataclass
 class SocketBrokerRuntime:
     label: str
@@ -217,15 +231,7 @@ class SocketBrokerRuntime:
                     break
             else:
                 return
-            while not self.stop_event.is_set():
-                try:
-                    client, _ = listener.accept()
-                except TimeoutError:
-                    continue
-                except OSError:
-                    if self.stop_event.is_set():
-                        break
-                    raise
+            for client in accept_clients(listener, stop_event=self.stop_event):
                 if self.concurrency == "thread":
                     self._start_worker(client)
                 else:

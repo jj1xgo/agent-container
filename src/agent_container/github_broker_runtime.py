@@ -8,6 +8,7 @@ import socket
 import stat
 import threading
 
+from agent_container.broker.runtime import accept_clients
 from agent_container.github_app import GitHubAppMetadata
 from agent_container.github_app import InstallationTokenProvider
 from agent_container.github_broker import BrokerSession
@@ -349,11 +350,7 @@ class UploadPackBrokerRuntime(AbstractContextManager[BrokerRuntimeMount]):
 
     def _serve(self, listener: socket.socket) -> None:
         try:
-            while not self._stop.is_set():
-                try:
-                    client, _ = listener.accept()
-                except TimeoutError:
-                    continue
+            for client in accept_clients(listener, stop_event=self._stop):
                 with client:
                     stream = client.makefile("rwb", buffering=0)
                     try:

@@ -1,9 +1,11 @@
 import io
 import struct
+import threading
 import unittest
 from unittest import mock
 
 from agent_container.broker import frame as kernel
+from agent_container.broker import runtime as runtime_kernel
 
 
 class GitHubPrimitiveFrameTest(unittest.TestCase):
@@ -84,3 +86,33 @@ class GitHubPrimitiveFrameTest(unittest.TestCase):
             kernel.write_chunk_stream(
                 io.BytesIO(), [b""], maximum_chunk=2, label="unit stream"
             )
+
+
+class AcceptClientsTest(unittest.TestCase):
+    def test_timeout_retries_and_consumer_owns_client(self):
+        stop = threading.Event()
+        client = mock.Mock()
+        listener = mock.Mock()
+        listener.accept.side_effect = [TimeoutError(), (client, None)]
+        clients = runtime_kernel.accept_clients(listener, stop_event=stop)
+        self.assertIs(next(clients), client)
+        stop.set()
+        self.assertEqual(list(clients), [])
+        self.assertEqual(listener.accept.call_count, 2)
+        client.close.assert_not_called()
+
+    def test_live_error_escapes_but_stopped_error_ends_iteration(self):
+        stop = threading.Event()
+        listener = mock.Mock()
+        error = OSError("synthetic-accept")
+        listener.accept.side_effect = error
+        with self.assertRaises(OSError) as caught:
+            list(runtime_kernel.accept_clients(listener, stop_event=stop))
+        self.assertIs(caught.exception, error)
+
+        def fail_after_stop():
+            stop.set()
+            raise error
+
+        listener.accept.side_effect = fail_after_stop
+        self.assertEqual(list(runtime_kernel.accept_clients(listener, stop_event=stop)), [])
