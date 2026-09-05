@@ -45,7 +45,7 @@ egressの実Codex検証で見つかったsequence不整合は、stage 1のrefact
 
 実施順はPhase番号と一致する。
 
-Family実Codex intakeと承認済み診断は新規pending／audit追加とも0件で未達です。診断のJSON eventではagent messageだけを観測し、tool itemは0件でした。ローカル設定とimageのfeature既定値にはshell tool無効化を確認できておらず、原因は未確定です。次はFamily提出を伴わない固定`printf`でtool実行自体を切り分けます。containerとFamily runtimeは回収済みです。
+Family実Codex intakeと固定`printf`診断はtool item 0件、新規pending／audit追加0件で未達です。診断harnessが通常起動の`--approve-for-me`を除去していた差分を発見し、通常の承認経路を保持するprobeを準備しました。credential・外部接続なしの別containerではsandboxの`/proc` mount拒否も再現しましたが、実認証runの原因との因果関係は未確定です。次は通常起動引数を保持した固定`printf`の個別実行です。containerとFamily runtimeは回収済みです。
 
 1. Phase 6で、後続機能が共有するbroker kernelを固定する。
 2. Phase 7で、安全なVault原本と実行用copyの同期を作る。
