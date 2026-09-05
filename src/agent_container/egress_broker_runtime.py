@@ -3,11 +3,12 @@ from dataclasses import dataclass, field
 import hashlib
 from pathlib import Path
 import socket
-import struct
 import threading
-import time
+from typing import Any
 from typing import BinaryIO
 
+from agent_container.broker.runtime import SocketBrokerRuntime
+from agent_container.broker.runtime import open_connection
 from agent_container.egress_broker import EgressBrokerSession
 from agent_container.egress_broker_protocol import EgressResponse
 from agent_container.egress_broker_protocol import encode_response_frame
@@ -26,7 +27,6 @@ _LISTENER_BACKLOG = 32
 _MAX_ACTIVE_TUNNELS = 32
 _MAX_CREATED_TUNNELS = 128
 _CLIENT_TIMEOUT_SECONDS = 30
-_PEER_CREDENTIAL_BYTES = 12
 
 
 class EgressBrokerRuntimeError(Exception):
@@ -56,12 +56,7 @@ class EgressRuntimeMount:
 @dataclass
 class EgressBrokerRuntime(AbstractContextManager[EgressRuntimeMount]):
     session: EgressBrokerSession
-    _stop: threading.Event = field(default_factory=threading.Event, init=False)
-    _thread: threading.Thread | None = field(default=None, init=False)
-    _listener: socket.socket | None = field(default=None, init=False, repr=False)
-    _error: BaseException | None = field(default=None, init=False, repr=False)
-    _failed: threading.Event = field(default_factory=threading.Event, init=False)
-    _exited: bool = field(default=False, init=False, repr=False)
+    _runtime: SocketBrokerRuntime = field(init=False, repr=False)
     _limit_lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False
     )
@@ -69,12 +64,25 @@ class EgressBrokerRuntime(AbstractContextManager[EgressRuntimeMount]):
     _active_reservations: set[int] = field(default_factory=set, init=False, repr=False)
     _created_reservations: set[int] = field(default_factory=set, init=False, repr=False)
     _created_tunnels: int = field(default=0, init=False, repr=False)
-    _worker_lock: threading.Lock = field(
-        default_factory=threading.Lock, init=False, repr=False
-    )
-    _workers: set[threading.Thread] = field(
-        default_factory=set, init=False, repr=False
-    )
+
+    def __post_init__(self) -> None:
+        self._runtime = SocketBrokerRuntime(
+            label="egress broker",
+            thread_name="egress-broker",
+            open_listener=lambda backlog: self.session.open_listener(backlog=backlog),
+            # Looked up per call so tests can patch _handle_client on the instance.
+            handler=lambda client: self._handle_client(client),
+            deactivate=lambda: self.session.deactivate(),
+            close=lambda: self.session.close(),
+            error_type=EgressBrokerRuntimeError,
+            backlog=_LISTENER_BACKLOG,
+            listener_timeout=_LISTENER_TIMEOUT_SECONDS,
+            client_timeout=_CLIENT_TIMEOUT_SECONDS,
+            concurrency="thread",
+            worker_thread_name="egress-tunnel",
+            raw_client=True,
+            deactivate_after_join=True,
+        )
 
     @classmethod
     def create(
@@ -116,90 +124,18 @@ class EgressBrokerRuntime(AbstractContextManager[EgressRuntimeMount]):
             self._active_reservations.remove(reservation)
             self._created_reservations.discard(reservation)
 
+    @property
+    def _thread(self) -> Any | None:
+        return self._runtime.thread
+
     def __enter__(self) -> EgressRuntimeMount:
-        if self._thread is not None or self._exited:
-            raise EgressBrokerRuntimeError("egress broker failed to start")
-        listener: socket.socket | None = None
-        try:
-            listener = self.session.open_listener(backlog=_LISTENER_BACKLOG)
-            listener.settimeout(_LISTENER_TIMEOUT_SECONDS)
-            self._listener = listener
-            thread = threading.Thread(
-                target=self._serve,
-                args=(listener,),
-                name="egress-broker",
-                daemon=True,
-            )
-            thread.start()
-            self._thread = thread
-        except BaseException:
-            if listener is not None:
-                try:
-                    listener.close()
-                except OSError:
-                    pass
-            cleanup_complete = False
-            try:
-                self.session.close()
-            except (OSError, ValueError):
-                pass
-            else:
-                cleanup_complete = True
-            self._exited = cleanup_complete
-            raise EgressBrokerRuntimeError("egress broker failed to start") from None
+        self._runtime.start()
         return EgressRuntimeMount(
             self.session.run_dir, self.session.project_id, self.session.agent
         )
 
-    def _serve(self, listener: socket.socket) -> None:
-        try:
-            while not self._stop.is_set():
-                try:
-                    client, _ = listener.accept()
-                except TimeoutError:
-                    continue
-                except OSError:
-                    if self._stop.is_set():
-                        break
-                    raise
-                self._start_worker(client)
-        except BaseException as error:
-            self._error = error
-            self._failed.set()
-
-    def _start_worker(self, client: socket.socket) -> None:
-        thread = threading.Thread(
-            target=self._run_worker,
-            args=(client,),
-            name="egress-tunnel",
-            daemon=True,
-        )
-        with self._worker_lock:
-            self._workers.add(thread)
-        try:
-            thread.start()
-        except BaseException:
-            with self._worker_lock:
-                self._workers.discard(thread)
-            client.close()
-            raise
-
-    def _run_worker(self, client: socket.socket) -> None:
-        try:
-            self._handle_client(client)
-        except OSError:
-            pass
-        except BaseException as error:
-            self._error = error
-            self._failed.set()
-            self._stop.set()
-        finally:
-            client.close()
-            with self._worker_lock:
-                self._workers.discard(threading.current_thread())
-
     def wait_failed(self, timeout: float) -> bool:
-        return self._failed.wait(timeout)
+        return self._runtime.wait_failed(timeout)
 
     def _write_response(
         self, stream: BinaryIO, status: str, code: str
@@ -208,14 +144,9 @@ class EgressBrokerRuntime(AbstractContextManager[EgressRuntimeMount]):
         stream.flush()
 
     def _handle_client(self, client: socket.socket) -> None:
-        client.settimeout(_CLIENT_TIMEOUT_SECONDS)
-        credentials = client.getsockopt(
-            socket.SOL_SOCKET,
-            socket.SO_PEERCRED,
-            _PEER_CREDENTIAL_BYTES,
-        )
-        _pid, peer_uid, _gid = struct.unpack("3i", credentials)
-        stream: BinaryIO = client.makefile("rwb", buffering=0)
+        connection = open_connection(client, timeout=_CLIENT_TIMEOUT_SECONDS)
+        stream: BinaryIO = connection.stream
+        peer_uid = connection.peer_uid
         reservation: int | None = None
         upstream: socket.socket | None = None
         try:
@@ -269,43 +200,4 @@ class EgressBrokerRuntime(AbstractContextManager[EgressRuntimeMount]):
             stream.close()
 
     def __exit__(self, *_: object) -> None:
-        if self._exited:
-            return
-        self._stop.set()
-        cleanup_failed = False
-        if self._listener is not None:
-            try:
-                self._listener.close()
-            except OSError:
-                cleanup_failed = True
-            else:
-                self._listener = None
-        did_not_stop = False
-        if self._thread is not None:
-            self._thread.join(timeout=_STOP_TIMEOUT_SECONDS)
-            did_not_stop = self._thread.is_alive()
-        deadline = time.monotonic() + _STOP_TIMEOUT_SECONDS
-        while True:
-            with self._worker_lock:
-                workers = tuple(self._workers)
-            if not workers:
-                break
-            for worker in workers:
-                worker.join(timeout=max(0, deadline - time.monotonic()))
-            with self._worker_lock:
-                did_not_stop = did_not_stop or bool(self._workers)
-            break
-        if did_not_stop:
-            self.session.deactivate()
-            raise EgressBrokerRuntimeError("egress broker did not stop") from None
-        self.session.deactivate()
-        try:
-            self.session.close()
-        except (OSError, ValueError):
-            cleanup_failed = True
-        else:
-            self._exited = True
-        if cleanup_failed:
-            raise EgressBrokerRuntimeError("egress broker cleanup failed") from None
-        if self._error is not None:
-            raise EgressBrokerRuntimeError("egress broker failed") from None
+        self._runtime.stop(join_timeout=_STOP_TIMEOUT_SECONDS)
