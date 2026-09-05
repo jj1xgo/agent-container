@@ -27,6 +27,8 @@
 
 ### Validation
 
+- 2026-09-05に独立修正PR #107をmain `7a9e927`へmergeし、smoke branchへ`fe24314`で取り込みました。mainと修正commit `1eb7ad9`のtree一致、smoke branchのproduction／profile／Containerfile一致を確認しました。修正版の専用image `c0607c9fa48b282befa1054363630b33f388804082c939a4666d3349ca195029`（Node v26.8.1／Codex 0.153.4／Claude 2.1.261）のbuildと、同imageを指定したlocal実Podman 14件が成功しました（108.361秒、skip 0、ResourceWarning 0）。開始前からのcontainer 1件のみが残り、検証containerは回収済みです。Family手順のcontainer期待値を回帰test追加後の1119へ更新し、docs test 67件とwhitespace検査も成功しました。修正版の認証済みegress runtimeは`not run — 再実行の個別承認前`で、6-6は未完了です。以下の修正前の観測記録は当時の結果として保持します。
+
 - 2026-09-05の承認済みegress診断1回で、未許可`github.com`要求時のproxy socket保持者が`git-remote-http`、祖先のGit操作が`ls-remote`であることを観測しました。後続のauthentication denial 8件はすべてsequence不一致でした。外部接続なしの決定的再現により、policy拒否後の許可済みrequest、および到着順が逆転したrequestが連番不一致で拒否され続ける問題を現在のsrcと公開`v0.5.0`の両方で確認しました。kernel共通化より前からの既存不具合で、修正・Issue登録はまだ行っていません。[診断記録とreproducer](docs/superpowers/plans/2026-09-05-egress-sequence-investigation.md)に根拠を保存しました。実runtime gateはFAIL、policyの2 domainは不変、診断container／brokerは回収済みです。
 
 - Phase 6-6 egressの実runtime gateは2026-09-05、個別承認により専用projectへ`chatgpt.com`だけを追加し、`pypi.org`と合わせた2 domainでCodexを1回起動しました（基準`4eaf808`、専用image `129ea06302ee`）。実行中に未許可`github.com`の要求を観測したため停止し、最小応答成功は未確認でgateはFAILです。停止後のprocess exit 0を推論成功には数えません。作成tunnel 1件、auditはok 1／policy denial 1／authentication denial 7件で、認証拒否の原因は未確定です。container／broker thread／run directoryを回収し、追加後のpolicyはbyte不変です。ローカル設定にGitHub上の既知superpowers marketplace URLがあることは確認しましたが、今回の接続元処理との対応は未確定です。audit検証scriptのbyte-count field名誤りは既存の`bytes_from_client`／`bytes_from_upstream`に合わせて保存済みauditをローカル再検証し、固定fieldを確認しました。通信本文・raw agent出力は保存せず、自動再実行・`github.com`追加・policy解除はしていません。

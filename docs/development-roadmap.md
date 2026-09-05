@@ -37,25 +37,11 @@ Phase 7〜10が「Obsidianを第2の脳として使う」ための中心範囲�
 
 ## 現在の実施順
 
-Phase 6-5はFamilyのframe codecとaccept iterationを既存kernelへ共通化する。PID登録はrequest毎の検証を保持し、readiness待機・lifecycle・audit transactionの完全統一はstage 2で扱う。詳細は[6-5計画](superpowers/plans/2026-09-05-broker-kernel-6-5-family.md)を参照する。
+Phase 6-5はPR #106で完了し、6-6の実host smokeを進めています。GitHubのfetch／Issue参照／新規branch push／PR create・view・checks、専用branchの更新拒否、Familyのlocal doctor／live inventory照合まで観測済みです。実施commitと限界はCHANGELOGに記録しています。smoke PR #4と専用branchはmerge・削除せず保持しています。
 
-6-5はPR #106でmerge済みです。6-6は実host smokeの準備中で、2026-09-05に基準`e2ce4a9`のhost上でlint、Codex 48件、container 1111件、socket 18件、forced-unknown 4件がskipなしで成功しました。Family手順の期待件数だけを利用者承認により更新し、操作・検証項目は維持します。認証済み実host smokeは`not run`であり、6-6とstage 2は未完了です。
+egressの実Codex検証で見つかったsequence不整合は、stage 1のrefactorと分離したPR #107で修正し、main `7a9e927`へmergeしました。拒否後・到着順逆転の回帰testを含むcontainer1119／Codex48／local socket18件、独立review、required CIの実Podman14件が成功しています。[診断記録](superpowers/plans/2026-09-05-egress-sequence-investigation.md)は修正前の観測・再現です。
 
-続いて同日、同じproduction／image入力から専用imageをbuildし、実Podman suite 14件がskipなしで成功しました（文書更新commit `9d8f5b3`、詳細はCHANGELOG）。次は対象を明示した個別承認後の認証済みGitHub／egress／Family／handover smokeです。自動検証成功をこれらの実host観測へ読み替えません。
-
-2026-09-05のGitHub read-only実host smokeでは、承認された専用projectでfetch、既存Issue list／view、GitHub credentialの環境・mount検査、停止後拒否とcleanupを確認しました。通常runtimeのmountを使った固定probeであり、認証済みagent本体の操作とは区別します。audit確認の検証script誤判定とローカル再検証、未観測項目はCHANGELOGに記録しました。GitHub全体はPARTIALで、push／PR作成および他brokerの実host gateは残っています。
-
-Familyの既存bindingはlocal doctorとlive installation inventoryの読み取り照合まで成功しました（selected repository exactly 1件、binding一致）。実intake／承認付きIssue作成は未実施です。GitHubのpush／PR検証用には既存workspaceと別のlocal checkoutで1行のfixture候補を準備しましたが、remoteへの書き込みはまだ行っていません。
-
-その後の個別承認により、GitHub broker経由の新規branch pushとsmoke PR #4のcreate／view／checksも成功しました。checks 0件をCI成功には数えず、PR／branchはmerge・削除せず保持します。既存branch更新等のnegative gate、他brokerの実agent操作は残っており、6-6は未完了です。
-
-2026-09-05にGitHubの専用branchでfast-forward／non-fast-forward更新のbroker拒否を確認し、remote OID不変とcleanupまで成功しました。egressは専用smoke projectを有効化し、`pypi.org`だけを追加してlocal doctorまで成功しました。agent接続先discoveryと実サービス操作は個別承認前のため未実施で、他のnegative gate・他brokerの実agent操作も残っています。
-
-egress discoveryの個別承認後、Codexを1回起動し、policyが拒否した接続先候補`chatgpt.com`を観測しました。外向きtunnelは0件、最初の拒否後に停止・cleanupし、許可先は`pypi.org`だけのまま保持しています。domain追加と実runtime gateは次の個別承認待ちで、推論成功やegress全体のPASSには数えていません。
-
-次の個別承認で`chatgpt.com`を追加してCodexを1回実行したところ、未許可`github.com`要求を検出して停止しました。最小応答成功は未確認で実runtime gateはFAIL、接続元処理とauditのauthentication denial 7件の原因は調査中です。cleanupは成功し、許可先は`chatgpt.com`／`pypi.org`の2件を維持しています。失敗を回避するdomain追加や再実行は承認なしに行いません。
-
-egressの追加診断で、後続のauthentication denialがsequence不一致であることを特定しました。拒否後と到着順逆転の問題はlocal reproductionにより現在のsrcと公開`v0.5.0`の両方で再現しました。[診断記録](superpowers/plans/2026-09-05-egress-sequence-investigation.md)を参照し、stage 1の振る舞い保存refactorとは別の修正として扱います。修正・Issue登録は未実施で、6-6は未完了です。
+次は修正版imageでのegress実runtime gateです。専用projectの許可先は`chatgpt.com`／`pypi.org`の2件を維持し、`github.com`の自動許可はしません。認証済みruntimeの再実行は既存手順の個別承認後に行います。Family実intake／実Issue、handoverを含む残存gateとstage 2は未完了で、Phase 6全体は進行中です。
 
 実施順はPhase番号と一致する。
 
