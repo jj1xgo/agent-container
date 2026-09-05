@@ -4,6 +4,12 @@ import struct
 from typing import Any
 from typing import BinaryIO, Iterable
 
+from agent_container.broker.frame import FrameSchema
+from agent_container.broker.frame import JsonOptions
+from agent_container.broker.frame import decode_frame
+from agent_container.broker.frame import iter_chunk_stream as kernel_iter_chunks
+from agent_container.broker.frame import write_chunk_stream as kernel_write_chunks
+
 
 PROTOCOL_VERSION = 1
 MAX_REQUEST_BYTES = 65_536
@@ -15,6 +21,18 @@ _RESPONSE_FIELDS = frozenset({"version", "status"})
 _RESPONSE_STATUSES = frozenset({"ok", "denied", "error"})
 MAX_STREAM_CHUNK_BYTES = 1_048_576
 MAX_REQUEST_NONCE = (1 << 63) - 1
+_REQUEST_SCHEMA = FrameSchema(
+    label="broker request",
+    stream_label="broker stream",
+    fields=_REQUEST_FIELDS,
+    max_bytes=MAX_REQUEST_BYTES,
+    json=JsonOptions(
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        encoding="utf-8",
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -46,6 +64,17 @@ def _object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _decode_request_json(body: bytes) -> Any:
+    try:
+        return json.loads(
+            body.decode("utf-8"),
+            parse_constant=_reject_constant,
+            object_pairs_hook=_object_without_duplicates,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        raise ValueError("broker request JSON is invalid") from None
+
+
 def encode_request_frame(request: BrokerRequest) -> bytes:
     payload = json.dumps(
         {
@@ -66,24 +95,9 @@ def encode_request_frame(request: BrokerRequest) -> bytes:
 
 
 def decode_request_frame(data: bytes) -> tuple[BrokerRequest, int]:
-    if not isinstance(data, bytes) or len(data) < _HEADER_BYTES:
-        raise ValueError("broker request frame is incomplete")
-    length = struct.unpack(">I", data[:_HEADER_BYTES])[0]
-    if length == 0 or length > MAX_REQUEST_BYTES:
-        raise ValueError("broker request frame size is invalid")
-    consumed = _HEADER_BYTES + length
-    if len(data) < consumed:
-        raise ValueError("broker request frame is incomplete")
-    try:
-        decoded = json.loads(
-            data[_HEADER_BYTES:consumed].decode("utf-8"),
-            parse_constant=_reject_constant,
-            object_pairs_hook=_object_without_duplicates,
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
-        raise ValueError("broker request JSON is invalid") from None
-    if not isinstance(decoded, dict) or set(decoded) != _REQUEST_FIELDS:
-        raise ValueError("broker request schema is invalid")
+    decoded, consumed = decode_frame(
+        _REQUEST_SCHEMA, data, json_decoder=_decode_request_json
+    )
     version = decoded["version"]
     capability = decoded["capability"]
     project_id = decoded["project_id"]
@@ -188,36 +202,23 @@ def read_response_frame(stream: BinaryIO) -> BrokerResponse:
 
 
 def write_chunk_stream(stream: BinaryIO, chunks: Iterable[bytes]) -> int:
-    transferred = 0
-    for chunk in chunks:
-        if not isinstance(chunk, bytes) or not chunk or len(chunk) > MAX_STREAM_CHUNK_BYTES:
-            raise ValueError("broker stream chunk is invalid")
-        stream.write(struct.pack(">I", len(chunk)))
-        stream.write(chunk)
-        transferred += len(chunk)
-    stream.write(b"\x00\x00\x00\x00")
-    stream.flush()
-    return transferred
+    return kernel_write_chunks(
+        stream,
+        chunks,
+        maximum_chunk=MAX_STREAM_CHUNK_BYTES,
+        label="broker stream",
+    )
 
 
 def iter_chunk_stream(
     stream: BinaryIO, *, maximum_total: int, allow_initial_eof: bool = False
 ) -> Iterable[bytes]:
-    if maximum_total < 0:
-        raise ValueError("broker stream limit is invalid")
-    transferred = 0
-    while True:
-        header = _read_exact(
-            stream, _HEADER_BYTES, initial_eof=allow_initial_eof and transferred == 0
-        )
-        if header == b"":
-            return
-        length = struct.unpack(">I", header)[0]
-        if length == 0:
-            return
-        if length > MAX_STREAM_CHUNK_BYTES:
-            raise ValueError("broker stream chunk is invalid")
-        transferred += length
-        if transferred > maximum_total:
-            raise ValueError("broker stream is too large")
-        yield _read_exact(stream, length)
+    yield from kernel_iter_chunks(
+        read_bytes=lambda size, initial: _read_exact(
+            stream, size, initial_eof=initial
+        ),
+        maximum_total=maximum_total,
+        maximum_chunk=MAX_STREAM_CHUNK_BYTES,
+        label="broker stream",
+        allow_initial_eof=allow_initial_eof,
+    )
