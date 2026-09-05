@@ -41,31 +41,31 @@ Files: new `tests/container/broker_family_golden_support.py`,
 `tests/fixtures/broker_family_golden.json`,
 `tests/container/test_family_kernel_compatibility.py`.
 
-- [ ] Run existing Family protocol/client/runtime/transport/broker baseline suites.
-- [ ] Build a fixed synthetic UTF-8 request and pending response collector, including
+- [x] Run existing Family protocol/client/runtime/transport/broker baseline suites.
+- [x] Build a fixed synthetic UTF-8 request and pending response collector, including
   request frame at the16384 boundary and audit events appended through the real
-  Family audit API to a private temporary directory. Store hex bytes, not live values.
-- [ ] Generate the static fixture using an archive of the baseline src plus the
+  Family audit API to a private temporary directory. Store hex bytes for representative frames/audit and the boundary frame length/SHA-256; use no live values.
+- [x] Generate the static fixture using an archive of the baseline src plus the
   collector. Do not regenerate from the modified encoder. Add golden tests comparing
   encode output and decode values/consumed length with trailing bytes.
-- [ ] Add characterization of exact bytes rejection, duplicate/non-object/invalid JSON,
+- [x] Add characterization of exact bytes rejection, duplicate/non-object/invalid JSON,
   response total maximum, partial stream operations and sanitized error messages.
-- [ ] Run the new tests against the old implementation; deliberately corrupt a copy
+- [x] Run the new tests against the old implementation; deliberately corrupt a copy
   of a golden expectation to demonstrate the comparison catches changed wire bytes.
 
 ## Task 2 — Share Family protocol primitives
 
 Files: `src/agent_container/family_intake_protocol.py` only.
 
-- [ ] Add imports for FrameSchema, JsonOptions, encode_frame, decode_frame.
-- [ ] Construct schemas with label `family intake {kind}`, stream_label `family intake
+- [x] Add imports for FrameSchema, JsonOptions, encode_frame, decode_frame.
+- [x] Construct schemas with label `family intake {kind}`, stream_label `family intake
   stream`, fields as the existing request/response field sets, max_bytes=maximum-4,
   JsonOptions(ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).
-- [ ] `_encode(values, maximum, kind)` delegates to encode_frame with that schema.
-- [ ] Public decoders delegate to the new adapter, retaining typed validators.
+- [x] `_encode(values, maximum, kind)` delegates to encode_frame with that schema.
+- [x] Public decoders delegate to the new adapter, retaining typed validators.
   The adapter begins `if type(data) is not bytes: raise ValueError(...)` and uses
   `json_decoder=lambda body: _decode_json(body, kind)`. Preserve private helpers.
-- [ ] Run golden, characterization and all existing Family suites. Differentially
+- [x] Run golden, characterization and all existing Family suites. Differentially
   compare baseline/current public codecs on valid/invalid inputs and exceptions.
 
 ## Task 3 — Share accept iteration
@@ -73,28 +73,59 @@ Files: `src/agent_container/family_intake_protocol.py` only.
 Files: `src/agent_container/family_intake_runtime.py` and new
 `tests/container/test_family_kernel_runtime.py`.
 
-- [ ] Characterize timeout, pre-stopped loop, stop during accept, accept failure,
+- [x] Characterize timeout, pre-stopped loop, stop during accept, accept failure,
   consumed/failed session and handler exception using ordered fake listener/client
   fixtures. Assert actual client close/timeout, stop/error state and handler outcome.
-- [ ] Replace only the outer loop with
+- [x] Replace only the outer loop with
   `for client in accept_clients(listener, stop_event=self._stop):`.
   Retain the client lock and stop check before assigning `_client`, inner context
   manager/handler/finally and failed/consumed actions verbatim.
-- [ ] Run new and existing runtime/transport suites plus socket integration.
+- [x] Run new and existing runtime/transport suites plus socket integration.
 
 ## Task 4 — Verify and integrate
 
 Files: spec above, this plan, roadmap and CHANGELOG.
 
-- [ ] Verify no baseline tests or excluded source files changed; compare retained
+- [x] Verify no baseline tests or excluded source files changed; compare retained
   protocol helpers and runtime methods via AST; independently regenerate golden
   from the baseline archive and check identical bytes/hash.
-- [ ] Run bin/lint, container/Codex suites, all broker socket suites and forced-unknown
+- [x] Run bin/lint, container/Codex suites, all broker socket suites and forced-unknown
   tests with socket integration enabled. Record failures and exact counts honestly.
-- [ ] Update 6-5 scope/evidence in spec, roadmap and CHANGELOG. Keep Phase6 in progress;
+- [x] Update 6-5 scope/evidence in spec, roadmap and CHANGELOG. Keep Phase6 in progress;
   authenticated host smoke is not run here and remains the6-6 gate.
 - [ ] Independent review before pushing the final immutable feature head and creating
   the PR. Required CI Unit tests and Podman integration must pass, all14 real Podman
   tests without skips. Analyze any failure before retrying; do not assume a known race.
 - [ ] Merge the verified head, confirm merged tree equality and local main sync.
   Preserve existing unrelated worktrees and the11 empty untracked root files.
+
+## Local evidence at a65704b (2026-09-05)
+
+- Baseline Family unit54 passed before changes. Added golden/compatibility/runtime12
+  passed on baseline; a temporary corrupted wire expectation failed, then restoration passed.
+- Related66 passed after refactor. Full container1111, Codex48, broker sockets18,
+  forced-unknown4 passed; no skips and ResourceWarning0. Ruff and whitespace passed.
+- Public codec differential256 synthetic cases matched baseline values and exception
+  type/message/context-suppression. Baseline was loaded from archived39fbc5e sources.
+- All88 baseline test/support/fixture files and62 excluded source files are identical.
+  Retained33 functions/methods are AST-identical, as are Family serve's client/body
+  and outer error handlers. Production changes are limited to the two planned files.
+- Static golden1859 bytes, SHA-256
+  `12aff838887715de7205d35eb7867a6ea9afb3a1f871733a322e479a15b97979`.
+  Independent export from baseline source matched the committed fixture exactly.
+- New kernel API tests: not added — no kernel API or implementation changed; new
+  tests cover the Family consumer's compatibility boundary and retained behavior.
+- Local Podman: not run — podman unavailable. Required CI: pending PR.
+  Authenticated real-host smoke: not run — stage1 completion remains6-6.
+  Stage2 readiness/lifecycle/capability/audit guarantees remain unimplemented here.
+
+Re-export command (from this worktree, with a baseline-only src archive):
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/tmp/family65-baseline-src/src python3 tests/container/broker_family_golden_support.py > /tmp/family65-regenerated-golden.json
+cmp tests/fixtures/broker_family_golden.json /tmp/family65-regenerated-golden.json
+```
+
+Temporary differential and AST-check outputs are supporting investigation artifacts;
+Git base/head, the static fixture, preserved tests, this record and PR CI are the
+persistent review evidence. No fresh authenticated smoke is claimed.

@@ -6,6 +6,8 @@
 
 ### Added
 
+- Phase 6 stage 1の5番目として、Family intakeのrequest／response frame codecとaccept iterationを既存の共通broker kernelへ移しました。total-frame上限、exact bytes型、JSON例外はFamily adapterで保持し、PID/uid検証、stream処理、停止・descriptor cleanup、capability、audit transactionはFamily側に残します。既存testとwire／auditは不変で、readiness gateを含む保証の統一はstage 2で扱います。
+
 - 標準agent imageに`jq`を追加しました。agentがJSON出力(`.claude.json`、CLI応答など)を扱う際、代替commandを自作せず本物の`jq`を使えます。
 - Phase 6 stage 1の最初の乗せ替えとして、共通broker kernel package `agent_container/broker/`に`frame`（length-prefixed JSON frame codecとstream helper）と`capability`（container側のexact path・capability file・socket検証と接続）を追加し、handover brokerのprotocolとcontainer側clientをその上に移しました。wire形式、audit、既存のhandover testは変更していません。kernel化前のencoderで生成したgolden byte fixtureを`tests/container/test_broker_frame_golden.py`に固定しました。
 - Phase 6 stage 1の2番目の乗せ替えとして、共通broker kernelに`audit`（private append-only audit log）、`readiness`（`ReadinessGate`と`AlwaysReady`）、`runtime`（run directory・capability・private socketの生成回収と、accept loop・stop・error captureの`SocketBrokerRuntime`）を追加し、handover brokerのsessionとruntimeをその上に移しました。audit行、error message、停止順序、既存のhandover testは変更していません。kernel化前のwriterで生成したaudit行のgolden fixtureを`tests/container/test_broker_audit_golden.py`に固定しました。
@@ -22,6 +24,8 @@
 - Claude managed policyに`allowManagedPermissionRulesOnly`をpinしない判断を記録しました。Claude Code 2.1.260ではこの設定がpermission promptの「don't ask again」も無効にするため、利用者自身のrepositoryだけを動かす現状では、workspaceの`.claude/settings*.json`のallow ruleをtrust承認と同じく受け入れます。managed `deny`、sandbox、bypass禁止、brokerのhost承認は変わりません。中身を確認していない第三者repositoryを動かす際に見直します。
 
 ### Validation
+
+- Phase 6-5のproduction／test commit `a65704b1c64681064d2602e0a31e57c52da3ba3b`で、container 1,111件、Codex 48件、broker socket 18件、forced-unknown 4件、lintとwhitespace検査がPASSしました。ResourceWarningは0件、既存test/support/fixture 88 filesと対象外source 62 filesは基準`39fbc5e`から不変、保持33関数とserve内側処理のAST一致、256 codec casesの値・例外一致、旧encoder/auditからのstatic golden再生成一致を確認しました。local Podmanは`not run — podman unavailable`、required CIはPRで実行、認証済み実host smokeは`not run — 6-6`です。
 
 - Phase 6-4の最終production／test tree `4e330826f3c04d5058ea54d7d65866945ebd8ca7`で、`bin/lint`、container unit 1,097件、Codex unit 48件、docs unit 67件、GitHub／handover／egress socket integration 8件がPASSし、socket stderrの`ResourceWarning`は0件でした。基準commit `a69bb780dc61f3f0f50c92f668f8686837280f12`から既存test 82 filesとscope外production 7 filesが不変であることをmachine-checkし、同commitから独立再生成したGitHub golden fixture（6,422 bytes、SHA-256 `398db7fe64dd10fa622a54da987ad7e6750c10e3a52ebe92ccd7dbbe5403eb49`）および90 synthetic protocol casesの一致も確認済みです。local Podman 14-test gateは`not run — podman unavailable`、required CIは`not run — PR作成後にcontrollerが実行`、実host smokeは`not run — 6-6`です。Phase 6は引き続き進行中で、stage 2のlifecycle／capability／audit opener完全統一が残っています。
 
