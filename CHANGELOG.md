@@ -16,6 +16,8 @@
 
 ### Fixed
 
+- egressで未許可CONNECTを拒否すると、adapterだけがsequenceを進めて後続の許可済み通信も拒否されていました。並行requestの到着順逆転も同じ不整合を起こしました。brokerは認証済みrequestの直近4,096番号を固定bitmapで追跡し、到着順が逆でも未使用番号を受け付け、policy拒否の番号も消費します。再送・範囲より古い番号は拒否し、未認証requestは追跡状態を変えません。これは`v0.5.0`でも再現した既存不具合の独立修正で、wire・許可domain・audit schemaは変更していません。
+
 - broker workerの登録後・開始前にstopが重なると、未開始threadのjoinが`RuntimeError`を出し、egressの失効処理にも到達していませんでした。未開始workerを管理対象に残し、停止未完了を所定の例外で報告して、開始後の再試行で回収できるようにしました（[#97](https://github.com/jj1xgo/agent-container/issues/97)）。
 - Claude launcherが設定する`IS_DEMO=1`はtoken onboardingだけでなくworkspace trust dialogも省略するため、project configの`.claude.json`に`hasTrustDialogAccepted`が残らず、managed status lineを含むtrust前提の機能が黙って動いていませんでした。launcherは起動直前に現在のworkspaceの該当keyだけをseedし、fileが無ければmode `0600`で作り、通常fileでない・実行user所有でない・JSON objectとして読めない場合は本文を出さずに起動を停止します。permission bypass optionやproject側hooks／MCPの扱いは変わりませんが、trust承認と同じくworkspace内`.claude/settings*.json`の`permissions.allow`と`additionalDirectories`は有効になります。
 
