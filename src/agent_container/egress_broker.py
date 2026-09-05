@@ -15,6 +15,7 @@ from agent_container.broker.runtime import create_private_file
 from agent_container.broker.runtime import generate_capability
 from agent_container.broker.runtime import remove_runtime_artifacts
 from agent_container.egress_broker_protocol import EgressRequest
+from agent_container.egress_broker_protocol import MAX_SEQUENCE
 from agent_container.egress_broker_protocol import PROTOCOL_VERSION
 from agent_container.egress_policy import EgressPolicy
 from agent_container.state import ensure_private_directory
@@ -36,6 +37,8 @@ _AUDIT_STAGES = frozenset(
     {"authentication", "policy", "resolve", "connect", "limit", "relay", "unavailable"}
 )
 _MAX_TUNNEL_BYTES = 1 << 31
+_SEQUENCE_WINDOW = 4096
+_SEQUENCE_MASK = (1 << _SEQUENCE_WINDOW) - 1
 
 
 class EgressAuthorizationError(ValueError):
@@ -58,7 +61,8 @@ class EgressBrokerSession:
     audit_file: Path
     _allowed_domains: frozenset[str] = field(repr=False)
     _capability: str = field(repr=False)
-    _expected_sequence: int = field(default=1, repr=False)
+    _highest_sequence: int = field(default=0, repr=False)
+    _seen_sequences: int = field(default=0, repr=False)
     _listener: socket.socket | None = field(default=None, repr=False)
     _closed: bool = field(default=False, repr=False)
     _cleanup_complete: bool = field(default=False, repr=False)
@@ -132,13 +136,28 @@ class EgressBrokerSession:
                 raise ValueError("egress broker request is not authorized")
             if request.project_id != self.project_id:
                 raise ValueError("egress broker request project is not allowed")
-            if request.sequence != self._expected_sequence:
+            sequence = request.sequence
+            if type(sequence) is not int or not 1 <= sequence <= MAX_SEQUENCE:
                 raise ValueError("egress broker request sequence is invalid")
+            if sequence > self._highest_sequence:
+                advance = sequence - self._highest_sequence
+                # Bound the shift before evaluating it, even for a MAX_SEQUENCE jump.
+                self._seen_sequences = (
+                    1 if advance >= _SEQUENCE_WINDOW
+                    else ((self._seen_sequences << advance) | 1) & _SEQUENCE_MASK
+                )
+                self._highest_sequence = sequence
+            else:
+                age = self._highest_sequence - sequence
+                if age >= _SEQUENCE_WINDOW or self._seen_sequences & (1 << age):
+                    raise ValueError("egress broker request sequence is invalid")
+                self._seen_sequences |= 1 << age
+            # Authenticated policy denials consume their sequence too. Concurrent
+            # adapter threads may deliver fresh sequences out of allocation order.
             if request.operation != "connect" or request.port != 443:
                 raise EgressAuthorizationError("policy")
             if request.domain not in self._allowed_domains:
                 raise EgressAuthorizationError("policy")
-            self._expected_sequence += 1
             return request.domain
 
     def deactivate(self) -> None:
