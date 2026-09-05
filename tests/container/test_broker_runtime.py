@@ -17,6 +17,7 @@ from agent_container.broker.runtime import allocate_run_dir
 from agent_container.broker.runtime import bind_private_listener
 from agent_container.broker.runtime import create_private_file
 from agent_container.broker.runtime import generate_capability
+from agent_container.broker.runtime import open_connection
 from agent_container.broker.runtime import remove_runtime_artifacts
 
 
@@ -32,6 +33,16 @@ class CreatePrivateFileTest(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             with self.assertRaises(FileExistsError):
                 create_private_file(path, "again\n", label=LABEL)
+
+    def test_mode_parameter_creates_an_owner_read_only_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "capability"
+            create_private_file(path, "abc\n", label=LABEL, mode=0o400)
+            self.assertEqual(path.read_bytes(), b"abc\n")
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o400)
+            default = Path(directory) / "default"
+            create_private_file(default, "abc\n", label=LABEL)
+            self.assertEqual(stat.S_IMODE(default.stat().st_mode), 0o600)
 
     def test_refuses_symlink_target_and_short_writes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -241,6 +252,9 @@ class FakeClient:
     def __exit__(self, *_: object) -> None:
         self.closed = True
 
+    def close(self) -> None:
+        self.closed = True
+
 
 class FakeListener:
     def __init__(self, clients: tuple[FakeClient, ...] = ()) -> None:
@@ -280,6 +294,7 @@ def make_runtime(
     readiness=None,
     open_listener=None,
     close=None,
+    **options,
 ) -> tuple[SocketBrokerRuntime, dict[str, int]]:
     calls = {"open": 0, "deactivate": 0, "close": 0, "backlog": 0}
 
@@ -294,7 +309,6 @@ def make_runtime(
     def default_close() -> None:
         calls["close"] += 1
 
-    options = {}
     if readiness is not None:
         options["readiness"] = readiness
     runtime = SocketBrokerRuntime(
@@ -547,6 +561,223 @@ class SocketBrokerRuntimeTest(unittest.TestCase):
         self.assertEqual(str(raised.exception), "test broker failed")
         self.assertNotIn("private-gate-marker", str(raised.exception))
         self.assertEqual(listener.accepts, 0)
+
+
+class OpenConnectionTest(unittest.TestCase):
+    def test_sets_timeout_reads_peer_uid_and_opens_an_unbuffered_stream(self) -> None:
+        client = FakeClient(4040)
+        connection = open_connection(client, timeout=7)
+        self.assertEqual(client.timeout, 7)
+        self.assertEqual(
+            client.credential_calls, [(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)]
+        )
+        self.assertEqual(connection, Connection(client, client.stream, 4040))
+
+
+class ThreadedSocketBrokerRuntimeTest(unittest.TestCase):
+    def test_rejects_unknown_concurrency_mode(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            make_runtime(FakeListener(), concurrency="process")
+        self.assertEqual(str(raised.exception), "test broker concurrency mode is invalid")
+
+    def test_thread_mode_serves_connections_concurrently_on_named_workers(self) -> None:
+        clients = (FakeClient(1010), FakeClient(2020))
+        listener = FakeListener(clients)
+        both_entered = threading.Event()
+        release = threading.Event()
+        seen: list[tuple[int, str]] = []
+
+        def blocking_handler(connection: Connection) -> None:
+            seen.append((connection.peer_uid, threading.current_thread().name))
+            if len(seen) == 2:
+                both_entered.set()
+            release.wait(2)
+
+        runtime, calls = make_runtime(
+            listener,
+            blocking_handler,
+            concurrency="thread",
+            worker_thread_name="test-worker",
+        )
+        runtime.start()
+        try:
+            self.assertTrue(both_entered.wait(1))
+            with runtime.worker_lock:
+                self.assertEqual(len(runtime.workers), 2)
+        finally:
+            release.set()
+            runtime.stop(join_timeout=2)
+
+        self.assertEqual(sorted(seen), [(1010, "test-worker"), (2020, "test-worker")])
+        self.assertTrue(all(client.closed for client in clients))
+        self.assertTrue(all(client.stream.closed for client in clients))
+        self.assertEqual(runtime.workers, set())
+        self.assertFalse(runtime.wait_failed(0))
+        self.assertEqual(calls["deactivate"], 1)
+        self.assertEqual(calls["close"], 1)
+
+    def test_thread_mode_default_worker_name_derives_from_thread_name(self) -> None:
+        client = FakeClient(1010)
+        listener = FakeListener((client,))
+        names: list[str] = []
+        handled = threading.Event()
+
+        def handler(connection: Connection) -> None:
+            names.append(threading.current_thread().name)
+            handled.set()
+
+        runtime, _ = make_runtime(listener, handler, concurrency="thread")
+        runtime.start()
+        try:
+            self.assertTrue(handled.wait(1))
+        finally:
+            runtime.stop(join_timeout=2)
+        self.assertEqual(names, ["test-broker-worker"])
+
+    def test_raw_client_hands_the_socket_without_opening_a_connection(self) -> None:
+        for concurrency in ("inline", "thread"):
+            with self.subTest(concurrency=concurrency):
+                client = FakeClient(1010)
+                listener = FakeListener((client,))
+                received: list[object] = []
+                handled = threading.Event()
+
+                def handler(raw: object) -> None:
+                    received.append(raw)
+                    handled.set()
+
+                runtime, _ = make_runtime(
+                    listener, handler, concurrency=concurrency, raw_client=True
+                )
+                runtime.start()
+                try:
+                    self.assertTrue(handled.wait(1))
+                finally:
+                    runtime.stop(join_timeout=2)
+
+                self.assertEqual(received, [client])
+                self.assertIsNone(client.timeout)
+                self.assertEqual(client.credential_calls, [])
+                self.assertFalse(client.stream.closed)
+                self.assertTrue(client.closed)
+
+    def test_thread_mode_swallows_os_errors_but_reports_other_worker_failures(self) -> None:
+        for error, fatal in (
+            (ConnectionResetError("private-client-marker"), False),
+            (RuntimeError("private-worker-marker"), True),
+        ):
+            with self.subTest(fatal=fatal):
+                client = FakeClient(1010)
+                listener = FakeListener((client,))
+                handled = threading.Event()
+
+                def fail(connection: Connection) -> None:
+                    handled.set()
+                    raise error
+
+                runtime, calls = make_runtime(listener, fail, concurrency="thread")
+                runtime.start()
+                self.assertTrue(handled.wait(1))
+                self.assertEqual(runtime.wait_failed(0.2), fatal)
+                self.assertEqual(runtime.stop_event.is_set(), fatal)
+                if fatal:
+                    with self.assertRaises(RuntimeError_) as raised:
+                        runtime.stop(join_timeout=2)
+                    self.assertEqual(str(raised.exception), "test broker failed")
+                    self.assertNotIn("private-worker-marker", str(raised.exception))
+                    self.assertIs(runtime.error, error)
+                else:
+                    runtime.stop(join_timeout=2)
+                    self.assertIsNone(runtime.error)
+
+                self.assertTrue(client.closed)
+                self.assertTrue(runtime.exited)
+                self.assertEqual(calls["close"], 1)
+
+    def test_accept_loop_failure_sets_failed_in_inline_mode_too(self) -> None:
+        class BrokenListener(FakeListener):
+            def accept(self):
+                raise RuntimeError("private-accept-marker")
+
+        listener = BrokenListener()
+        runtime, _ = make_runtime(listener)
+        runtime.start()
+        self.assertTrue(runtime.wait_failed(1))
+        with self.assertRaises(RuntimeError_) as raised:
+            runtime.stop(join_timeout=2)
+        self.assertEqual(str(raised.exception), "test broker failed")
+
+    def test_deactivate_after_join_runs_deactivate_once_workers_have_finished(self) -> None:
+        client = FakeClient(1010)
+        listener = FakeListener((client,))
+        worker_entered = threading.Event()
+        deactivations_seen: list[int] = []
+
+        runtime, calls = make_runtime(
+            listener, None, concurrency="thread", deactivate_after_join=True
+        )
+
+        def finish_after_listener_close(connection: Connection) -> None:
+            worker_entered.set()
+            listener._wake.wait(5)
+            deactivations_seen.append(calls["deactivate"])
+
+        runtime.handler = finish_after_listener_close
+        runtime.start()
+        self.assertTrue(worker_entered.wait(1))
+        runtime.stop(join_timeout=2)
+
+        self.assertEqual(deactivations_seen, [0])
+        self.assertEqual(calls["deactivate"], 1)
+        self.assertEqual(calls["close"], 1)
+        self.assertTrue(runtime.exited)
+
+    def test_deactivate_after_join_still_deactivates_when_a_worker_does_not_stop(self) -> None:
+        client = FakeClient(1010)
+        listener = FakeListener((client,))
+        release = threading.Event()
+        entered = threading.Event()
+
+        def stuck(connection: Connection) -> None:
+            entered.set()
+            release.wait(5)
+
+        runtime, calls = make_runtime(
+            listener, stuck, concurrency="thread", deactivate_after_join=True
+        )
+        runtime.start()
+        self.assertTrue(entered.wait(1))
+        with self.assertRaises(RuntimeError_) as raised:
+            runtime.stop(join_timeout=0.05)
+        self.assertEqual(str(raised.exception), "test broker did not stop")
+        self.assertEqual(calls["deactivate"], 1)
+        self.assertEqual(calls["close"], 0)
+        self.assertFalse(runtime.exited)
+
+        release.set()
+        runtime.stop(join_timeout=2)
+        self.assertEqual(calls["close"], 1)
+        self.assertTrue(runtime.exited)
+        self.assertTrue(client.closed)
+
+    def test_deactivate_before_join_is_still_the_default(self) -> None:
+        client = FakeClient(1010)
+        listener = FakeListener((client,))
+        worker_entered = threading.Event()
+        deactivations_seen: list[int] = []
+
+        runtime, calls = make_runtime(listener, None, concurrency="thread")
+
+        def observe(connection: Connection) -> None:
+            worker_entered.set()
+            listener._wake.wait(5)
+            deactivations_seen.append(calls["deactivate"])
+
+        runtime.handler = observe
+        runtime.start()
+        self.assertTrue(worker_entered.wait(1))
+        runtime.stop(join_timeout=2)
+        self.assertEqual(deactivations_seen, [1])
 
 
 if __name__ == "__main__":

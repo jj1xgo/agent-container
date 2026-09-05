@@ -1,16 +1,19 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
-import json
 import os
 from pathlib import Path
-import re
 import secrets
 import shutil
 import socket
-import stat
 import threading
 
+from agent_container.broker.audit import AuditLog
+from agent_container.broker.runtime import allocate_run_dir
+from agent_container.broker.runtime import bind_private_listener
+from agent_container.broker.runtime import create_private_file
+from agent_container.broker.runtime import generate_capability
+from agent_container.broker.runtime import remove_runtime_artifacts
 from agent_container.egress_broker_protocol import EgressRequest
 from agent_container.egress_broker_protocol import PROTOCOL_VERSION
 from agent_container.egress_policy import EgressPolicy
@@ -23,15 +26,16 @@ MANAGED_EGRESS_DOMAINS: dict[str, frozenset[str]] = {
     "codex": frozenset(),
     "claude": frozenset(),
 }
-_CAPABILITY = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_LABEL = "egress broker"
+_AUDIT_LABEL = "egress broker audit"
+# The container-side adapter reads the capability through a read-only bind
+# mount and rejects writable files, so the file is created owner-read-only.
+_CAPABILITY_FILE_MODE = 0o400
 _AUDIT_STATUSES = frozenset({"ok", "denied", "error"})
 _AUDIT_STAGES = frozenset(
     {"authentication", "policy", "resolve", "connect", "limit", "relay", "unavailable"}
 )
 _MAX_TUNNEL_BYTES = 1 << 31
-_MAX_UNIX_SOCKET_PATH_BYTES = 107
-_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 
 class EgressAuthorizationError(ValueError):
@@ -40,79 +44,6 @@ class EgressAuthorizationError(ValueError):
             raise ValueError("egress authorization stage is invalid")
         self.stage = stage
         super().__init__("egress broker request is not allowed")
-
-
-def _create_private_file(path: Path, body: str) -> None:
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW,
-        0o400,
-    )
-    try:
-        encoded = body.encode("ascii")
-        offset = 0
-        while offset < len(encoded):
-            written = os.write(descriptor, encoded[offset:])
-            if written <= 0:
-                raise OSError("egress broker private file write failed")
-            offset += written
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _open_audit_file(path: Path) -> int:
-    try:
-        descriptor = os.open(
-            path,
-            os.O_WRONLY | os.O_APPEND | os.O_CREAT | _NOFOLLOW | _NONBLOCK,
-            0o600,
-        )
-    except OSError:
-        raise ValueError(
-            "egress broker audit file must be a regular non-symlink file"
-        ) from None
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise ValueError(
-                "egress broker audit file must be a regular non-symlink file"
-            )
-        if stat.S_IMODE(metadata.st_mode) != 0o600:
-            raise PermissionError("egress broker audit file must have mode 0600")
-        if metadata.st_uid != os.getuid():
-            raise PermissionError(
-                "egress broker audit file must be owned by the current user"
-            )
-        try:
-            current = os.stat(path, follow_symlinks=False)
-        except OSError:
-            raise ValueError(
-                "egress broker audit file must be a regular non-symlink file"
-            ) from None
-        if current.st_dev != metadata.st_dev or current.st_ino != metadata.st_ino:
-            raise ValueError("egress broker audit file changed during validation")
-    except BaseException:
-        os.close(descriptor)
-        raise
-    return descriptor
-
-
-def _write_audit_record(path: Path, record: dict[str, object]) -> None:
-    body = (json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode(
-        "ascii"
-    )
-    descriptor = _open_audit_file(path)
-    try:
-        offset = 0
-        while offset < len(body):
-            written = os.write(descriptor, body[offset:])
-            if written <= 0:
-                raise OSError("egress broker audit write failed")
-            offset += written
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 @dataclass
@@ -153,27 +84,22 @@ class EgressBrokerSession:
             layout.egress_broker_run_root, create=True
         )
         audit_file = layout.egress_broker_audit_file
-        audit_descriptor = _open_audit_file(audit_file)
-        os.close(audit_descriptor)
+        AuditLog(audit_file, label=_AUDIT_LABEL).validate()
 
-        for _ in range(8):
-            run_id = secrets.token_hex(8)
-            run_dir = project_root / run_id
-            try:
-                run_dir.mkdir(mode=0o700)
-                break
-            except FileExistsError:
-                continue
-        else:
-            raise FileExistsError("could not allocate egress broker runtime")
-
-        capability = secrets.token_urlsafe(32)
-        if _CAPABILITY.fullmatch(capability) is None:
+        run_id, run_dir = allocate_run_dir(project_root, label=_LABEL)
+        try:
+            capability = generate_capability(label=_LABEL)
+        except RuntimeError:
             shutil.rmtree(run_dir)
-            raise RuntimeError("generated egress broker capability has invalid format")
+            raise
         capability_path = run_dir / "capability"
         try:
-            _create_private_file(capability_path, capability + "\n")
+            create_private_file(
+                capability_path,
+                capability + "\n",
+                label=_LABEL,
+                mode=_CAPABILITY_FILE_MODE,
+            )
         except Exception:
             shutil.rmtree(run_dir)
             raise
@@ -223,25 +149,9 @@ class EgressBrokerSession:
     def open_listener(self, backlog: int = 4) -> socket.socket:
         if self._closed or self._listener is not None:
             raise ValueError("egress broker listener state is invalid")
-        if len(os.fsencode(self.socket_path)) > _MAX_UNIX_SOCKET_PATH_BYTES:
-            raise ValueError("egress broker socket path is too long")
-        if self.socket_path.exists() or self.socket_path.is_symlink():
-            raise FileExistsError("egress broker socket path already exists")
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            listener.bind(str(self.socket_path))
-            os.chmod(self.socket_path, 0o600)
-            listener.listen(backlog)
-        except Exception:
-            listener.close()
-            try:
-                metadata = self.socket_path.lstat()
-            except FileNotFoundError:
-                pass
-            else:
-                if stat.S_ISSOCK(metadata.st_mode):
-                    self.socket_path.unlink()
-            raise
+        listener = bind_private_listener(
+            self.socket_path, backlog=backlog, label=_LABEL
+        )
         self._listener = listener
         return listener
 
@@ -286,7 +196,7 @@ class EgressBrokerSession:
         for key, value in counts.items():
             if value is not None:
                 record[key] = value
-        _write_audit_record(self.audit_file, record)
+        AuditLog(self.audit_file, label=_AUDIT_LABEL).append(record)
 
     def close(self) -> None:
         if self._cleanup_complete:
@@ -300,29 +210,11 @@ class EgressBrokerSession:
                 cleanup_failed = True
             else:
                 self._listener = None
-        for path, expected_type in (
-            (self.capability_path, stat.S_ISREG),
-            (self.socket_path, stat.S_ISSOCK),
+        if remove_runtime_artifacts(
+            capability_path=self.capability_path,
+            socket_path=self.socket_path,
+            run_dir=self.run_dir,
         ):
-            try:
-                metadata = path.lstat()
-            except FileNotFoundError:
-                continue
-            except OSError:
-                cleanup_failed = True
-                continue
-            if not expected_type(metadata.st_mode):
-                cleanup_failed = True
-                continue
-            try:
-                path.unlink()
-            except OSError:
-                cleanup_failed = True
-        try:
-            self.run_dir.rmdir()
-        except FileNotFoundError:
-            pass
-        except OSError:
             cleanup_failed = True
         if cleanup_failed:
             raise ValueError("egress broker cleanup failed")

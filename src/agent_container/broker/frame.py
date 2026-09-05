@@ -26,6 +26,11 @@ class FrameSchema:
     fields: frozenset[str]
     max_bytes: int
     json: JsonOptions
+    frame_label: str | None = None
+
+    @property
+    def frame_prefix(self) -> str:
+        return self.label if self.frame_label is None else self.frame_label
 
 
 def _reject_constant(_: str) -> None:
@@ -60,13 +65,13 @@ def encode_frame(schema: FrameSchema, values: dict[str, Any]) -> bytes:
 
 def decode_frame(schema: FrameSchema, data: bytes) -> tuple[dict[str, Any], int]:
     if not isinstance(data, bytes) or len(data) < HEADER_BYTES:
-        raise ValueError(f"{schema.label} frame is incomplete")
+        raise ValueError(f"{schema.frame_prefix} frame is incomplete")
     length = struct.unpack(">I", data[:HEADER_BYTES])[0]
     if length == 0 or length > schema.max_bytes:
-        raise ValueError(f"{schema.label} frame size is invalid")
+        raise ValueError(f"{schema.frame_prefix} frame size is invalid")
     consumed = HEADER_BYTES + length
     if len(data) < consumed:
-        raise ValueError(f"{schema.label} frame is incomplete")
+        raise ValueError(f"{schema.frame_prefix} frame is incomplete")
     try:
         text = data[HEADER_BYTES:consumed].decode(schema.json.encoding)
         decoded = json.loads(
@@ -75,7 +80,7 @@ def decode_frame(schema: FrameSchema, data: bytes) -> tuple[dict[str, Any], int]
             parse_constant=_reject_constant,
         )
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-        raise ValueError(f"{schema.label} JSON is invalid") from None
+        raise ValueError(f"{schema.frame_prefix} JSON is invalid") from None
     if not isinstance(decoded, dict) or set(decoded) != schema.fields:
         raise ValueError(f"{schema.label} schema is invalid")
     return decoded, consumed
@@ -98,11 +103,11 @@ def read_frame(schema: FrameSchema, stream: BinaryIO) -> dict[str, Any]:
     header = read_exact(stream, HEADER_BYTES, label=schema.stream_label)
     length = struct.unpack(">I", header)[0]
     if length == 0 or length > schema.max_bytes:
-        raise ValueError(f"{schema.label} frame size is invalid")
+        raise ValueError(f"{schema.frame_prefix} frame size is invalid")
     body = read_exact(stream, length, label=schema.stream_label)
     decoded, consumed = decode_frame(schema, header + body)
     if consumed != len(header) + len(body):
-        raise ValueError(f"{schema.label} frame is invalid")
+        raise ValueError(f"{schema.frame_prefix} frame is invalid")
     return decoded
 
 

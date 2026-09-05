@@ -197,5 +197,47 @@ class WriteAllTest(unittest.TestCase):
             stream.flush.assert_not_called()
 
 
+class FrameLabelTest(unittest.TestCase):
+    def test_frame_label_defaults_to_label(self) -> None:
+        self.assertIsNone(SCHEMA.frame_label)
+        self.assertEqual(SCHEMA.frame_prefix, "test request")
+        with self.assertRaises(ValueError) as raised:
+            decode_frame(SCHEMA, frame(b"not-json"))
+        self.assertEqual(str(raised.exception), "test request JSON is invalid")
+
+    def test_frame_label_prefixes_framing_and_json_errors_only(self) -> None:
+        schema = FrameSchema(
+            label="test request",
+            stream_label="test stream",
+            fields=frozenset({"version", "name"}),
+            max_bytes=64,
+            json=COMPACT,
+            frame_label="test metadata",
+        )
+        self.assertEqual(schema.frame_prefix, "test metadata")
+        cases = (
+            (b"\x00\x00\x00", "test metadata frame is incomplete"),
+            (struct.pack(">I", 0), "test metadata frame size is invalid"),
+            (struct.pack(">I", 5) + b"{}", "test metadata frame is incomplete"),
+            (frame(b"not-json"), "test metadata JSON is invalid"),
+            (frame(b'{"version":1,"version":1}'), "test metadata JSON is invalid"),
+            (frame(b'{"version":1}'), "test request schema is invalid"),
+        )
+        for data, message in cases:
+            with self.subTest(message=message), self.assertRaises(ValueError) as raised:
+                decode_frame(schema, data)
+            self.assertEqual(str(raised.exception), message)
+
+        with self.assertRaises(ValueError) as raised:
+            read_frame(schema, BytesIO(struct.pack(">I", 0)))
+        self.assertEqual(str(raised.exception), "test metadata frame size is invalid")
+        with self.assertRaises(ValueError) as raised:
+            read_frame(schema, BytesIO(b"\x00\x00"))
+        self.assertEqual(str(raised.exception), "test stream is incomplete")
+        with self.assertRaises(ValueError) as raised:
+            encode_frame(schema, {"version": 1, "name": "x" * 64})
+        self.assertEqual(str(raised.exception), "test request is too large")
+
+
 if __name__ == "__main__":
     unittest.main()
