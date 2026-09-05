@@ -290,7 +290,11 @@ class SocketBrokerRuntime:
         with self.worker_lock:
             workers = tuple(self.workers)
         for worker in workers:
-            worker.join(timeout=max(0, deadline - time.monotonic()))
+            # Registration precedes start(), which the accept thread may still
+            # be entering after its join times out. Keep pending workers tracked
+            # for the retry instead of joining a thread that has not started.
+            if worker.is_alive():
+                worker.join(timeout=max(0, deadline - time.monotonic()))
         with self.worker_lock:
             return bool(self.workers)
 
