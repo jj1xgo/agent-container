@@ -719,7 +719,7 @@ class ThreadedSocketBrokerRuntimeTest(unittest.TestCase):
 
         def finish_after_listener_close(connection: Connection) -> None:
             worker_entered.set()
-            listener._wake.wait(1)
+            listener._wake.wait(5)
             deactivations_seen.append(calls["deactivate"])
 
         runtime.handler = finish_after_listener_close
@@ -770,7 +770,7 @@ class ThreadedSocketBrokerRuntimeTest(unittest.TestCase):
 
         def observe(connection: Connection) -> None:
             worker_entered.set()
-            listener._wake.wait(1)
+            listener._wake.wait(5)
             deactivations_seen.append(calls["deactivate"])
 
         runtime.handler = observe

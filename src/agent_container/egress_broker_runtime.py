@@ -128,6 +128,10 @@ class EgressBrokerRuntime(AbstractContextManager[EgressRuntimeMount]):
     def _thread(self) -> Any | None:
         return self._runtime.thread
 
+    @property
+    def _listener(self) -> Any | None:
+        return self._runtime.listener
+
     def __enter__(self) -> EgressRuntimeMount:
         self._runtime.start()
         return EgressRuntimeMount(
