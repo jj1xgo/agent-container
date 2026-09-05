@@ -69,6 +69,33 @@ stage 1 の完了は、各 broker の仕様に記録した共通部品と互換 
 
 調査: `docs/superpowers/plans/2026-09-05-broker-kernel-6-4-investigation.md`。実装計画: `docs/superpowers/plans/2026-09-05-broker-kernel-6-4-github.md`。golden 基準は `a69bb780dc61f3f0f50c92f668f8686837280f12`。
 
+### 6-5 Familyの互換性範囲（2026-09-05）
+
+基準は`39fbc5e997946cc915013190b78139eb09c94d48`。6-4で定めた
+「各brokerの仕様に記録した共通部品と互換adapter」というstage 1契約に従う。
+当初のFamily readiness全面乗せ替え案は実装と一致しないため、本節を優先する。
+Familyは登録前にもacceptし、transportがrequest毎にPID/uidを検査して拒否する。
+PID登録をaccept前の待機へ変えるのは保証・拒否timingの変更でありstage 2へ送る。
+
+| 6-5で共通化 | Family側に保持 |
+| --- | --- |
+| request/responseのJSON encode、header/body size、decode field集合検査を既存`FrameSchema`/`encode_frame`/`decode_frame`で処理 | total-frame上限からheader 4 bytesを引くschema、exact `bytes`入口、`_decode_json` callback、typed validation、既存private helper名 |
+| `_serve`のaccept/timeout/stop時OSErrorを既存`accept_clients`で処理 | accept後stop再検査、client lock/ownership/context manager、PID/uid検証、failed/consumed処理、start/close/check全体 |
+
+kernelの新API・保証変更は追加しない。Familyのstream readはexact bytes、writeは
+exact intとOSError/TypeError/ValueErrorの変換を要求するため、`_read_exact`、
+`_read_frame`、`_write_all`は保持する。clientはcapabilityを環境で受け取るため、
+capability file readerへ置き換えない。run directoryとsocketはdir_fd/inodeに
+結びつくため共通path helperへ置き換えない。監査はlock、既存内容検証、size上限、
+identity再検査、file/parent fsync、失敗時rollbackを持つため`family_pending.py`の
+transaction全体を保持する。`FamilyRuntimeMount`とPodman関連も変更しない。
+
+既存test不変と基準encoderから生成したstatic wire/audit goldenで保存を検査する。
+exact bytes/subclass、JSON拒否・size境界・例外、短いread/write、accept中のstopと
+failed/consumed、client回収を追加characterizationで固定する。新kernel APIがないため
+新しい汎用部品testを水増しせず、Family adapterと既存kernel境界の回帰検査を行う。
+6-5の実測結果は計画とCHANGELOGへ記録する。6-6実host smokeとstage 2は未実施である。
+
 ### stage 1で変えないもの
 
 - **`StateLayout`**。broker毎の`*_root`／`*_run_root`／`*_audit_file`は残す。pathを変えるとstate migrationが要り、振る舞い保存でなくなる。stage 2で`broker_root(name)`のような1関数へ畳むかを検討する。
@@ -91,7 +118,7 @@ kernelを消費者なしで先に作ると机上のAPIになるため、最初�
 | 6-2 | `broker/runtime.py`、`broker/audit.py`、`broker/readiness.py`（`AlwaysReady`のみ）を抽出し、handover runtimeを乗せ替え | runtime（inline）、audit、readiness | handoverは`SO_PEERCRED`を使うので、kernelは最初からpeer credentialを持つ |
 | 6-3 | egressを乗せ替え | `FrameSchema.frame_label`、`create_private_file(mode)`、`open_connection`、runtimeの`concurrency="thread"`・worker回収・`wait_failed`・`raw_client`・`deactivate_after_join` | thread方式とtunnel予約という「broker固有の追加状態」をkernelがどう受けるかを、最大のgithubより前に小さいbrokerで決める |
 | 6-4 | githubの互換性を保つ部分的乗せ替え | request framing/schema の JSON callback、chunk stream、accept iterator、TextIO audit write。既存 run directory helper を利用 | handler と JSON／lifecycle／cleanup／capability／audit opener の互換処理は残す。全面統一は stage 2（「6-4 の承認済み互換性範囲」参照） |
-| 6-5 | familyを乗せ替え | 追加なし。familyの既存PID登録logicはfamily側module（`family_intake_runtime.py`）に`ReadinessGate`の実装として残し、kernel runtimeへ渡す。kernelへは移さない。fail-closed cleanupもfamily側に残す | readiness seamがstage 1で実際の消費者を持つ。「全brokerへ昇格」はstage 2 |
+| 6-5 | familyの互換性を保つ部分的乗せ替え | 既存frame encode/decodeとaccept iterator。新kernel APIなし | PID検証、stream、lifecycle、capability、descriptor cleanup、audit transactionは保持。readiness適用と完全統一はstage 2（6-5互換性範囲参照） |
 | 6-6 | roadmapの現在地更新、`CHANGELOG.md` Validation、stage 1実host smoke | — | 節「振る舞い保存の証明」の実host gate |
 
 各PRの受け入れ条件は同じである。
@@ -119,7 +146,7 @@ kernel固有のunit testは、既存brokerがばらばらに持っていた境�
 
 stage 2を後から入れてもstage 1の設計を壊さないよう、kernelの内側に閉じた3つの継ぎ目を用意する。stage 1ではどれも既定値で動く。
 
-1. **readiness gate。** `SocketBrokerRuntime`は`ReadinessGate`を受け取り、`wait`が返るまでacceptしない。既定は`AlwaysReady`。stage 1ではfamilyだけが自分のPID登録実装を渡す。stage 2で「container側runtimeが登録するまで受けない」を全brokerへ広げる。
+1. **readiness gate。** `SocketBrokerRuntime`は`ReadinessGate`を受け取り、`wait`が返るまでacceptしない。既定は`AlwaysReady`。FamilyのPID登録はrequest毎の検証なのでstage 1ではこのseamに載せない。stage 2で拒否timingと停止中の扱いを設計し、「container側runtimeが登録するまで受けない」保証の適用範囲を決める。
 2. **fail-closed cleanup。** runtimeの`__exit__`と失敗時のcleanupは「socket → capability → run directory」の固定順序で実装し、順序と冪等性をtestで固定する。stage 2でfamilyの`_cleanup_artifacts`（失敗時にも確実に消す、部分残骸の検出）をこの1か所へ持ち込む。
 3. **audit envelope。** `AuditLog.append(record)`はstage 1ではrecordをそのまま書く。stage 2で共通key（`timestamp`、`project`、`run`、`operation`、`status`）を必須にし、broker固有keyを`details`へ寄せるか、timestamp形式を統一するかを決める。stage 1では4系統のkey差分を本文書（前節）に一覧化してある。
 
