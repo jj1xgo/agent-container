@@ -43,6 +43,8 @@ Phase 6-5はFamilyのframe codecとaccept iterationを既存kernelへ共通化�
 
 続いて同日、同じproduction／image入力から専用imageをbuildし、実Podman suite 14件がskipなしで成功しました（文書更新commit `9d8f5b3`、詳細はCHANGELOG）。次は対象を明示した個別承認後の認証済みGitHub／egress／Family／handover smokeです。自動検証成功をこれらの実host観測へ読み替えません。
 
+2026-09-05のGitHub read-only実host smokeでは、承認された専用projectでfetch、既存Issue list／view、GitHub credentialの環境・mount検査、停止後拒否とcleanupを確認しました。通常runtimeのmountを使った固定probeであり、認証済みagent本体の操作とは区別します。audit確認の検証script誤判定とローカル再検証、未観測項目はCHANGELOGに記録しました。GitHub全体はPARTIALで、push／PR作成および他brokerの実host gateは残っています。
+
 実施順はPhase番号と一致する。
 
 1. Phase 6で、後続機能が共有するbroker kernelを固定する。
