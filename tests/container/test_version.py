@@ -34,16 +34,16 @@ class DevelopmentVersionTest(unittest.TestCase):
         self._git(root, "commit", "-m", message)
 
     def test_release_metadata_is_internally_consistent(self) -> None:
-        self.assertEqual(RELEASE_TAG, "v0.4.1")
-        self.assertEqual(RELEASE_VERSION, "0.4.1")
+        self.assertEqual(RELEASE_TAG, "v0.5.0")
+        self.assertEqual(RELEASE_VERSION, "0.5.0")
         self.assertEqual(DEVELOPMENT_BASE_TAG, "v0.4.0")
-        self.assertEqual(DEVELOPMENT_VERSION, "0.5.0-dev")
-        self.assertEqual(FALLBACK_VERSION, "0.5.0-dev.0")
+        self.assertEqual(DEVELOPMENT_VERSION, "0.6.0-dev")
+        self.assertEqual(FALLBACK_VERSION, "0.6.0-dev.0")
 
     def test_exact_release_tag_returns_release_version(self) -> None:
         for tag_arguments in (
-            ("v0.4.1",),
-            ("-a", "v0.4.1", "-m", "release"),
+            ("v0.5.0",),
+            ("-a", "v0.5.0", "-m", "release"),
         ):
             with self.subTest(tag_arguments=tag_arguments), TemporaryDirectory() as temp:
                 root = Path(temp)
@@ -55,7 +55,7 @@ class DevelopmentVersionTest(unittest.TestCase):
                 self._commit(root, "candidate", "candidate\n")
                 self._git(root, "tag", *tag_arguments)
 
-                self.assertEqual(resolve_version(root), "0.4.1")
+                self.assertEqual(resolve_version(root), "0.5.0")
 
     def test_post_release_commit_uses_next_development_version(self) -> None:
         with TemporaryDirectory() as temp:
@@ -68,7 +68,7 @@ class DevelopmentVersionTest(unittest.TestCase):
             self._commit(root, "next", "next\n")
             sha = self._git(root, "rev-parse", "--short=7", "HEAD")
 
-            self.assertEqual(resolve_version(root), f"0.5.0-dev.1+g{sha}")
+            self.assertEqual(resolve_version(root), f"0.6.0-dev.1+g{sha}")
 
     def test_resolves_first_parent_distance_and_commit_identity(self) -> None:
         with TemporaryDirectory() as temp:
@@ -86,7 +86,7 @@ class DevelopmentVersionTest(unittest.TestCase):
                     root,
                     {"AGENT_CONTAINER_VERSION": "9.9.9"},
                 ),
-                f"0.5.0-dev.1+g{sha}",
+                f"0.6.0-dev.1+g{sha}",
             )
 
     def test_first_parent_distance_excludes_merged_branch_commits(self) -> None:
@@ -106,7 +106,7 @@ class DevelopmentVersionTest(unittest.TestCase):
             self._git(root, "merge", "--no-ff", "feature", "-m", "merge feature")
             sha = self._git(root, "rev-parse", "--short=7", "HEAD")
 
-            self.assertEqual(resolve_version(root), f"0.5.0-dev.2+g{sha}")
+            self.assertEqual(resolve_version(root), f"0.6.0-dev.2+g{sha}")
 
     def test_marks_tracked_changes_dirty_but_ignores_untracked_files(self) -> None:
         with TemporaryDirectory() as temp:
@@ -117,18 +117,18 @@ class DevelopmentVersionTest(unittest.TestCase):
             self._commit(root, "release", "release\n")
             self._git(root, "tag", "v0.4.0")
             self._commit(root, "candidate", "candidate\n")
-            self._git(root, "tag", "v0.4.1")
+            self._git(root, "tag", "v0.5.0")
             sha = self._git(root, "rev-parse", "--short=7", "HEAD")
             (root / "untracked.txt").write_text("ignored\n", encoding="utf-8")
 
-            self.assertEqual(resolve_version(root), "0.4.1")
+            self.assertEqual(resolve_version(root), "0.5.0")
 
             (root / "tracked.txt").write_text("dirty\n", encoding="utf-8")
-            self.assertEqual(resolve_version(root), f"0.5.0-dev.1+g{sha}.dirty")
+            self.assertEqual(resolve_version(root), f"0.6.0-dev.1+g{sha}.dirty")
 
     def test_falls_back_when_git_release_metadata_is_unavailable(self) -> None:
         with TemporaryDirectory() as temp:
-            self.assertEqual(resolve_version(Path(temp), {}), "0.5.0-dev.0")
+            self.assertEqual(resolve_version(Path(temp), {}), "0.6.0-dev.0")
 
     def test_git_checkout_without_release_tag_still_uses_commit_identity(self) -> None:
         with TemporaryDirectory() as temp:
@@ -139,7 +139,7 @@ class DevelopmentVersionTest(unittest.TestCase):
             self._commit(root, "shallow-style checkout", "checkout\n")
             sha = self._git(root, "rev-parse", "--short=7", "HEAD")
 
-            self.assertEqual(resolve_version(root), f"0.5.0-dev.0+g{sha}")
+            self.assertEqual(resolve_version(root), f"0.6.0-dev.0+g{sha}")
 
     def test_genuinely_shallow_checkout_keeps_commit_identity_at_zero_distance(self) -> None:
         with TemporaryDirectory() as temp:
@@ -156,7 +156,7 @@ class DevelopmentVersionTest(unittest.TestCase):
             sha = self._git(shallow, "rev-parse", "--short=7", "HEAD")
 
             self.assertEqual(self._git(shallow, "rev-parse", "--is-shallow-repository"), "true")
-            self.assertEqual(resolve_version(shallow), f"0.5.0-dev.0+g{sha}")
+            self.assertEqual(resolve_version(shallow), f"0.6.0-dev.0+g{sha}")
 
     def test_unrelated_development_base_tag_keeps_commit_identity_at_zero_distance(self) -> None:
         with TemporaryDirectory() as temp:
@@ -181,7 +181,7 @@ class DevelopmentVersionTest(unittest.TestCase):
             )
             sha = self._git(root, "rev-parse", "--short=7", "HEAD")
 
-            self.assertEqual(resolve_version(root), f"0.5.0-dev.0+g{sha}")
+            self.assertEqual(resolve_version(root), f"0.6.0-dev.0+g{sha}")
 
     def test_prefers_version_embedded_in_built_image(self) -> None:
         with TemporaryDirectory() as temp:
@@ -200,7 +200,7 @@ class DevelopmentVersionTest(unittest.TestCase):
                     Path(temp),
                     {"AGENT_CONTAINER_VERSION": ""},
                 ),
-                "0.5.0-dev.0",
+                "0.6.0-dev.0",
             )
 
     def test_rejects_embedded_versions_with_numeric_leading_zeroes(self) -> None:
@@ -212,7 +212,7 @@ class DevelopmentVersionTest(unittest.TestCase):
                             Path(temp),
                             {"AGENT_CONTAINER_VERSION": invalid},
                         ),
-                        "0.5.0-dev.0",
+                        "0.6.0-dev.0",
                     )
 
     def test_package_version_uses_checkout_metadata(self) -> None:
