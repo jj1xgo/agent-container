@@ -25,6 +25,10 @@
 
 ### Validation
 
+- Phase 6-6 GitHubの既存branch更新拒否を2026-09-05、基準`a7ec228`（productionは`e2ce4a9`と同一）で確認しました。smoke PR #4の専用branchだけへ、local commit objectを使ったfast-forwardとnon-fast-forward更新を試し、両方がbroker内で拒否されました。検証用のreceive RPC停止guardへの到達は0回、auditはreceive-pack denied 2件、前後の専用branch／mainのremote OIDは一致しました。guardは到達時に実書き込みを防ぐためのもので、guardによる拒否をbrokerの成功には数えていません。container／broker thread／run directoryの回収とaudit非露出も成功しました。shared branchへのpush、ref削除、tag pushは行っていません。
+
+- Phase 6-6 egressのlocal preflightとして、2026-09-05に専用project `agent-container-smoke`の制限を有効化し、追加domainを`pypi.org`だけに設定しました。専用image `129ea06302ee`を指定したdoctorはnetwork-policyを含む必須checkがPASSしました。既定のmanaged domainsはCodex／Claudeとも空であり、agentの接続先discoveryと実サービス操作は`not run — 次のblockの個別承認前`です。制限は有効なまま保持し、無断disable／domain追加／runtime起動はしていません。
+
 - Phase 6-6 GitHubの書き込みsmokeを2026-09-05に個別承認後、基準`8c9af92`（productionは`e2ce4a9`と同一）と専用image `129ea06302ee`で実施しました。既存workspaceと別の一時checkoutで準備した1行のfixture commit `d89877b84397ad019de876f7d7bafd4fafb3a9da`について、remoteのbranch未存在・base一致をbroker経由で確認後、新規branch `test/github-broker-smoke-20260905-phase66`へのpushが成功し、remote head一致を読み戻しました。提示済みtitle/bodyで[smoke PR #4](https://github.com/jj1xgo/agent-container-smoke/pull/4)を1件作成し、固定summaryのviewとchecksが成功しました。checksは0件（候補treeにworkflowなし）で、CI成功とは扱いません。auditはreceive-pack 1／upload-pack 2／pr-create 1／pr-view 1／pr-checks 1件、全てokで、固定fieldと実capability・PR title/bodyの非露出を確認しました。終了後にbroker thread／run directory／検証containerを回収しました。merge・branch削除・PR close・Issue作成・既存branch更新のnegative pushは実施していません。PRとbranchは検証成果として保持し、GitHub smoke全体は残存gateがあるためPARTIALです。
 
 - Phase 6-6のFamily前提確認として、2026-09-05に既存bindingのlocal doctor（state／binding／pending／audit／App metadata permissions）が成功しました。続けて既存の`LiveFamilyInventory.resolve`で実installationを読み取り、selected repositoryがexactly 1件で既存bindingと一致することを確認しました。credential、repository名／ID、pending本文は記録せず、binding変更・Issue作成はしていません。実agentからのintakeと承認付きIssue作成は未実施で、Family smoke全体はPARTIALです。

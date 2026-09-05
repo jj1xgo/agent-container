@@ -49,6 +49,8 @@ Familyの既存bindingはlocal doctorとlive installation inventoryの読み取�
 
 その後の個別承認により、GitHub broker経由の新規branch pushとsmoke PR #4のcreate／view／checksも成功しました。checks 0件をCI成功には数えず、PR／branchはmerge・削除せず保持します。既存branch更新等のnegative gate、他brokerの実agent操作は残っており、6-6は未完了です。
 
+2026-09-05にGitHubの専用branchでfast-forward／non-fast-forward更新のbroker拒否を確認し、remote OID不変とcleanupまで成功しました。egressは専用smoke projectを有効化し、`pypi.org`だけを追加してlocal doctorまで成功しました。agent接続先discoveryと実サービス操作は個別承認前のため未実施で、他のnegative gate・他brokerの実agent操作も残っています。
+
 実施順はPhase番号と一致する。
 
 1. Phase 6で、後続機能が共有するbroker kernelを固定する。
