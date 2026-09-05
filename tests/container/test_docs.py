@@ -1164,7 +1164,7 @@ class Phase4DocumentationTest(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("Latest stable: `v0.4.1`", readme)
+        self.assertIn("Latest stable: `v0.5.0`", readme)
         self.assertIn("## [Unreleased]", changelog)
         self.assertIn("## [0.4.0] - 2026-08-29", changelog)
         self.assertIn(
@@ -1255,10 +1255,11 @@ class Phase4DocumentationTest(unittest.TestCase):
         smoke = (ROOT / "docs/phase4-stabilization-smoke-test.md").read_text(
             encoding="utf-8"
         )
-        for body in (initial, readme, operator):
+        for body in (initial, operator):
             self.assertIn("family Issue create/comment", body)
             self.assertIn("将来Phase", body)
             self.assertIn("domain allowlist", body)
+        self.assertIn("専用App／host承認付きbroker", readme)
         for required in (
             "jj1xgo/agent-container-smoke",
             "private repository",
@@ -1968,7 +1969,7 @@ class ReleaseVersionContractTest(unittest.TestCase):
         )
         self.assertIn(f"git clone --branch {RELEASE_TAG} --depth 1", readme)
         self.assertIn("git clone https://github.com/jj1xgo/agent-container.git", readme)
-        self.assertIn(f"## [{RELEASE_VERSION}] - 2026-09-01", changelog)
+        self.assertIn(f"## [{RELEASE_VERSION}] - 2026-09-05", changelog)
 
     def test_ci_records_resolved_version_in_job_summary(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

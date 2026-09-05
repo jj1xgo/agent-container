@@ -2,14 +2,14 @@
 
 AI coding agentsをホスト環境から分離して動かす、Linux・rootless Podman向けの開発環境です。CodexとClaude Codeを、projectごとに分けたworkspace・設定・cache・handoverとともに実行します。
 
-Latest stable: `v0.4.1`
+Latest stable: `v0.5.0`
 
-Development branch: `main` (`0.5.0-dev`)
+Development branch: `main` (`0.6.0-dev`)
 
 安定版を利用する場合はrelease tagを指定します。
 
 ```bash
-git clone --branch v0.4.1 --depth 1 \
+git clone --branch v0.5.0 --depth 1 \
   https://github.com/jj1xgo/agent-container.git
 ```
 
@@ -246,7 +246,7 @@ bin/agentctl superpowers update --all-projects
 
 ## GitHub App brokerを使う
 
-Phase 3のbroker modeでは、GitHub App private keyとinstallation tokenをhost側だけに置き、containerへはproject別Unix socketと一時的なcapabilityだけを渡します。exact repositoryのclone/fetch、新しい作業branchの作成push、`agent-github pr create/view/checks`、選択中repositoryの`agent-github issue list/view`だけを提供し、merge、release、generic API、Issueの作成・編集・comment・closeは提供しません。Issue readは固定schemaのbounded JSONだけを返し、credentialやGitHub raw responseを返しません。family Issue create/commentはこのshipped interfaceに含めず、開発repository brokerと権限を共有しない将来Phaseのfamily専用設計へ延期します。
+Phase 3のbroker modeでは、GitHub App private keyとinstallation tokenをhost側だけに置き、containerへはproject別Unix socketと一時的なcapabilityだけを渡します。exact repositoryのclone/fetch、新しい作業branchの作成push、`agent-github pr create/view/checks`、選択中repositoryの`agent-github issue list/view`だけを提供し、merge、release、generic API、Issueの作成・編集・comment・closeは提供しません。Issue readは固定schemaのbounded JSONだけを返し、credentialやGitHub raw responseを返しません。Family Issue作成は、開発repository brokerと権限を共有しない専用App／host承認付きbrokerとして別途提供します。
 
 pushはcreate-onlyです。GitHubのadvertisementに存在しないunprotectedな`refs/heads/*`をold OIDがzeroの場合だけ作成でき、既存branchへのupdateを拒否します。これはfast-forwardとnon-fast-forwardの両方を含みます。追加作業は新しいbranchを作り、必要なら新しいPRを作成してください。
 
@@ -349,7 +349,7 @@ project固有のDebian packageやNode.js versionは、対象repositoryの`.agent
 
 ## Security boundary
 
-runtimeはrootless Podman、read-only root filesystem、capability削除、`no-new-privileges`、限定したmountを使用します。一方、外向きnetworkはdomain allowlistされていません。containerは被害範囲を狭める境界であり、agentへ渡したcredentialの完全な秘密保持を保証するものではありません。
+runtimeはrootless Podman、read-only root filesystem、capability削除、`no-new-privileges`、限定したmountを使用します。外向きnetworkは既定ではdomain allowlistされていません。project単位のopt-inでexact-domain allowlistを有効にできます。containerは被害範囲を狭める境界であり、agentへ渡したcredentialの完全な秘密保持を保証するものではありません。
 
 `main`への直接push、既存branchの更新、merge、release、repository削除は標準操作に含みません。変更ごとに新しい作業branchを作り、必要なら新しいPRでreviewしてください。
 
