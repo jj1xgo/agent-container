@@ -27,6 +27,8 @@
 
 ### Validation
 
+- 2026-09-05、基準`f1afd82`で承認済みFamily Codex診断を同一設定で1回実行しました。runtime exit 0、JSON event 5件、agent message 2件、turn completed 1件で、command／MCP等のtool itemは0件でした。pending／audit追加も0件でintake gateはFAILのままです。本文の固定語句分類では否定表現候補のみを検出しましたが、原因や実際のtool提供状況は確定できません。timeoutとcapture上限超過はなく、container／Family runtime回収、既存audit／workspace status不変を確認しました。ローカルconfigにtool無効化の明示設定は見つからず、credentialをmountしない`--network=none`の別containerによる`codex features list`では`shell_tool`／`unified_exec`ともtrueでした。これは実認証runのtool提供を証明しません。[公式JSON event仕様](https://learn.chatgpt.com/docs/non-interactive-mode)と[feature仕様](https://learn.chatgpt.com/docs/config-file/config-reference)も照合しました。次はFamily提出を伴わない固定`printf`のtool実行を切り分ける診断で、準備済み・`not run — 個別実行前`です。認証・model・sandbox・policyは変更していません。
+
 - 2026-09-05、基準`3f5a859`と専用image `c0607c9fa48b`で、個別承認された`findsummits`の通常Codexを1回起動し、固定fixtureの受付と同runの2回目拒否を指示しました。通常のFamily supervisor／PID登録を保ち、Codex execは非対話・ephemeral・workspace-writeで実行しました。runtime exit 0でしたが、新規pending 0件／audit追加0件で受付は未達、intake gateはFAILです。検証scriptが識別したintake tool callも0件でした。raw runtime出力はメモリ内で検査後に破棄しており、未提出の原因は特定できません。family runtime cleanup、container回収、既存auditとworkspace Git statusの不変を確認しました。GitHub Issue作成、policy変更、自動再実行はしていません。次回診断用に本文を出さないevent件数・message分類の記録を準備し、実行は`not run — 再実行前`です。
 
 - 2026-09-05、基準`2fed914`でFamily実intakeの準備を行いました。`findsummits`のFamily local doctorはstate／binding／pending／audit／App metadata permissionsがPASS、live inventoryはこの確認では`not run`です。専用image `c0607c9fa48b`を指定した通常Codex doctorも必須項目PASSで、外向きdomain制限なしのWARNを確認しました。追加調査した任意の`--github-broker` doctorはproject policy未配置でFAILでした。このoptionを有効化したり、policy／binding／認証設定を変更したりしていません。固定fixtureを既存schemaで検証し、1回目pending／同runの2回目拒否を指示するprivate promptを準備しました。実Codex intake、pending新規作成、実Issue作成は`not run — 対象runtimeの実行前`です。
