@@ -5,6 +5,10 @@ import json
 import struct
 from typing import Any, BinaryIO
 
+from agent_container.broker.frame import FrameSchema
+from agent_container.broker.frame import JsonOptions
+from agent_container.broker.frame import decode_frame
+from agent_container.broker.frame import encode_frame
 from agent_container.family_issue import parse_family_issue_draft
 
 
@@ -100,20 +104,25 @@ def _validate_response(response: object) -> FamilyIntakeResponse:
     return FamilyIntakeResponse(version, status, request_id, response.expires_at)
 
 
-def _encode(values: dict[str, Any], *, maximum: int, kind: str) -> bytes:
-    try:
-        body = json.dumps(
-            values,
+def _frame_schema(
+    *, maximum: int, kind: str, fields: frozenset[str] = frozenset(),
+) -> FrameSchema:
+    return FrameSchema(
+        label=f"family intake {kind}",
+        stream_label="family intake stream",
+        fields=fields,
+        max_bytes=maximum - _HEADER_BYTES,
+        json=JsonOptions(
             ensure_ascii=False,
             allow_nan=False,
             separators=(",", ":"),
             sort_keys=True,
-        ).encode("utf-8")
-    except (TypeError, UnicodeEncodeError, ValueError):
-        raise ValueError(f"family intake {kind} is invalid") from None
-    if not body or len(body) > maximum - _HEADER_BYTES:
-        raise ValueError(f"family intake {kind} is too large")
-    return struct.pack(">I", len(body)) + body
+        ),
+    )
+
+
+def _encode(values: dict[str, Any], *, maximum: int, kind: str) -> bytes:
+    return encode_frame(_frame_schema(maximum=maximum, kind=kind), values)
 
 
 def encode_request_frame(request: FamilyIntakeRequest) -> bytes:
@@ -170,11 +179,23 @@ def _decode_json(body: bytes, kind: str) -> dict[str, Any]:
     return decoded
 
 
+def _decode_frame(
+    data: bytes, *, maximum: int, kind: str, fields: frozenset[str],
+) -> tuple[dict[str, Any], int]:
+    # Family rejects bytes subclasses; the generic kernel accepts them.
+    if type(data) is not bytes:
+        raise ValueError(f"family intake {kind} frame is incomplete")
+    return decode_frame(
+        _frame_schema(maximum=maximum, kind=kind, fields=fields),
+        data,
+        json_decoder=lambda body: _decode_json(body, kind),
+    )
+
+
 def decode_request_frame(data: bytes) -> tuple[FamilyIntakeRequest, int]:
-    body, consumed = _frame_body(data, maximum=MAX_REQUEST_BYTES, kind="request")
-    decoded = _decode_json(body, "request")
-    if set(decoded) != _REQUEST_FIELDS:
-        raise ValueError("family intake request schema is invalid")
+    decoded, consumed = _decode_frame(
+        data, maximum=MAX_REQUEST_BYTES, kind="request", fields=_REQUEST_FIELDS,
+    )
     request = FamilyIntakeRequest(
         version=decoded["version"],
         operation=decoded["operation"],
@@ -185,10 +206,9 @@ def decode_request_frame(data: bytes) -> tuple[FamilyIntakeRequest, int]:
 
 
 def decode_response_frame(data: bytes) -> tuple[FamilyIntakeResponse, int]:
-    body, consumed = _frame_body(data, maximum=MAX_RESPONSE_BYTES, kind="response")
-    decoded = _decode_json(body, "response")
-    if set(decoded) != _RESPONSE_FIELDS:
-        raise ValueError("family intake response schema is invalid")
+    decoded, consumed = _decode_frame(
+        data, maximum=MAX_RESPONSE_BYTES, kind="response", fields=_RESPONSE_FIELDS,
+    )
     response = FamilyIntakeResponse(
         version=decoded["version"],
         status=decoded["status"],
