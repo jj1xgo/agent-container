@@ -4,8 +4,47 @@ import threading
 import unittest
 from unittest import mock
 
+from agent_container.broker import audit as audit_kernel
 from agent_container.broker import frame as kernel
 from agent_container.broker import runtime as runtime_kernel
+
+
+class TextAuditTest(unittest.TestCase):
+    def test_text_writer_preserves_chunks_flush_and_fsync(self):
+        events = []
+
+        class Stream:
+            def write(self, value):
+                events.append(("write", value))
+
+            def flush(self):
+                events.append(("flush",))
+
+            def fileno(self):
+                events.append(("fileno",))
+                return 91
+
+        with mock.patch.object(
+            audit_kernel.os,
+            "fsync",
+            side_effect=lambda fd: events.append(("fsync", fd)),
+        ):
+            audit_kernel.append_text_record(Stream(), {"x": "日本語"})
+        self.assertEqual(
+            "".join(event[1] for event in events if event[0] == "write"),
+            '{"x":"\\u65e5\\u672c\\u8a9e"}\n',
+        )
+        self.assertEqual(events[-3:], [("flush",), ("fileno",), ("fsync", 91)])
+
+    def test_flush_error_prevents_fsync_and_escapes(self):
+        stream = mock.Mock()
+        error = OSError("synthetic-audit-flush")
+        stream.flush.side_effect = error
+        with mock.patch.object(audit_kernel.os, "fsync") as fsync:
+            with self.assertRaises(OSError) as caught:
+                audit_kernel.append_text_record(stream, {"x": 1})
+        self.assertIs(caught.exception, error)
+        fsync.assert_not_called()
 
 
 class GitHubPrimitiveFrameTest(unittest.TestCase):

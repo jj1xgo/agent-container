@@ -5,10 +5,18 @@ import os
 from pathlib import Path
 import stat
 from typing import Mapping
+from typing import TextIO
 
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+
+def append_text_record(stream: TextIO, record: dict[str, object]) -> None:
+    json.dump(record, stream, ensure_ascii=True, separators=(",", ":"))
+    stream.write("\n")
+    stream.flush()
+    os.fsync(stream.fileno())
 
 
 class AuditLog:

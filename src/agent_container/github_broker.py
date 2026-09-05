@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
-import json
 import os
 from pathlib import Path
 import re
@@ -11,6 +10,8 @@ import socket
 import stat
 from typing import Any, TextIO
 
+from agent_container.broker.audit import append_text_record
+from agent_container.broker.runtime import allocate_run_dir
 from agent_container.github_broker_error import BROKER_FAILURE_STAGES
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_policy import validate_issue_number
@@ -84,16 +85,7 @@ class BrokerSession:
         project_root = ensure_private_directory(
             run_root / project_label, create=True
         )
-        for _ in range(8):
-            run_id = secrets.token_hex(8)
-            run_dir = project_root / run_id
-            try:
-                run_dir.mkdir(mode=0o700)
-                break
-            except FileExistsError:
-                continue
-        else:
-            raise FileExistsError("could not allocate broker runtime")
+        run_id, run_dir = allocate_run_dir(project_root, label="broker")
         capability = secrets.token_urlsafe(32)
         if _CAPABILITY.fullmatch(capability) is None:
             shutil.rmtree(run_dir)
@@ -211,10 +203,7 @@ class BrokerSession:
         if stage is not None:
             record["stage"] = stage
         with _open_audit_file(self.audit_file) as stream:
-            json.dump(record, stream, ensure_ascii=True, separators=(",", ":"))
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
+            append_text_record(stream, record)
 
     def close(self) -> None:
         if self._closed:
