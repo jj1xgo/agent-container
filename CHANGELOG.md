@@ -25,6 +25,8 @@
 
 ### Validation
 
+- Phase 6-6 egressの承認済みdiscoveryを2026-09-05、基準`bdb238c`（productionは`e2ce4a9`と同一）と専用image `129ea06302ee`で1回実施しました。`agent-container-smoke`の追加許可は`pypi.org`だけに保ち、通常のCodex runtime mount／`--network=none`／managed adapterで実Codex 0.153.4の非対話・ephemeral・read-only最小応答要求を起動しました。認証・schema検証後のpolicy拒否で観測したexact domain候補は`chatgpt.com`です。最初の拒否後に停止し、runtime exit 1、作成tunnel 0件、audit policy denial 1件、container／broker thread／run directory回収を確認しました。policyはbyte不変です。通信本文・credential・raw agent出力は保持せず、domainはdiscovery候補としてだけ記録し、production auditへのdomain追加はしていません。推論成功は`not run — discoveryで停止`で、候補domainの許可追加と次の実runtime操作は個別承認待ちです。
+
 - Phase 6-6 GitHubの既存branch更新拒否を2026-09-05、基準`a7ec228`（productionは`e2ce4a9`と同一）で確認しました。smoke PR #4の専用branchだけへ、local commit objectを使ったfast-forwardとnon-fast-forward更新を試し、両方がbroker内で拒否されました。検証用のreceive RPC停止guardへの到達は0回、auditはreceive-pack denied 2件、前後の専用branch／mainのremote OIDは一致しました。guardは到達時に実書き込みを防ぐためのもので、guardによる拒否をbrokerの成功には数えていません。container／broker thread／run directoryの回収とaudit非露出も成功しました。shared branchへのpush、ref削除、tag pushは行っていません。
 
 - Phase 6-6 egressのlocal preflightとして、2026-09-05に専用project `agent-container-smoke`の制限を有効化し、追加domainを`pypi.org`だけに設定しました。専用image `129ea06302ee`を指定したdoctorはnetwork-policyを含む必須checkがPASSしました。既定のmanaged domainsはCodex／Claudeとも空であり、agentの接続先discoveryと実サービス操作は`not run — 次のblockの個別承認前`です。制限は有効なまま保持し、無断disable／domain追加／runtime起動はしていません。

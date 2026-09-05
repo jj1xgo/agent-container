@@ -51,6 +51,8 @@ Familyの既存bindingはlocal doctorとlive installation inventoryの読み取�
 
 2026-09-05にGitHubの専用branchでfast-forward／non-fast-forward更新のbroker拒否を確認し、remote OID不変とcleanupまで成功しました。egressは専用smoke projectを有効化し、`pypi.org`だけを追加してlocal doctorまで成功しました。agent接続先discoveryと実サービス操作は個別承認前のため未実施で、他のnegative gate・他brokerの実agent操作も残っています。
 
+egress discoveryの個別承認後、Codexを1回起動し、policyが拒否した接続先候補`chatgpt.com`を観測しました。外向きtunnelは0件、最初の拒否後に停止・cleanupし、許可先は`pypi.org`だけのまま保持しています。domain追加と実runtime gateは次の個別承認待ちで、推論成功やegress全体のPASSには数えていません。
+
 実施順はPhase番号と一致する。
 
 1. Phase 6で、後続機能が共有するbroker kernelを固定する。
