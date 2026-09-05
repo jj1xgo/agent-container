@@ -25,6 +25,8 @@
 
 ### Validation
 
+- Phase 6-6 egressの実runtime gateは2026-09-05、個別承認により専用projectへ`chatgpt.com`だけを追加し、`pypi.org`と合わせた2 domainでCodexを1回起動しました（基準`4eaf808`、専用image `129ea06302ee`）。実行中に未許可`github.com`の要求を観測したため停止し、最小応答成功は未確認でgateはFAILです。停止後のprocess exit 0を推論成功には数えません。作成tunnel 1件、auditはok 1／policy denial 1／authentication denial 7件で、認証拒否の原因は未確定です。container／broker thread／run directoryを回収し、追加後のpolicyはbyte不変です。ローカル設定にGitHub上の既知superpowers marketplace URLがあることは確認しましたが、今回の接続元処理との対応は未確定です。audit検証scriptのbyte-count field名誤りは既存の`bytes_from_client`／`bytes_from_upstream`に合わせて保存済みauditをローカル再検証し、固定fieldを確認しました。通信本文・raw agent出力は保存せず、自動再実行・`github.com`追加・policy解除はしていません。
+
 - Phase 6-6 egressの承認済みdiscoveryを2026-09-05、基準`bdb238c`（productionは`e2ce4a9`と同一）と専用image `129ea06302ee`で1回実施しました。`agent-container-smoke`の追加許可は`pypi.org`だけに保ち、通常のCodex runtime mount／`--network=none`／managed adapterで実Codex 0.153.4の非対話・ephemeral・read-only最小応答要求を起動しました。認証・schema検証後のpolicy拒否で観測したexact domain候補は`chatgpt.com`です。最初の拒否後に停止し、runtime exit 1、作成tunnel 0件、audit policy denial 1件、container／broker thread／run directory回収を確認しました。policyはbyte不変です。通信本文・credential・raw agent出力は保持せず、domainはdiscovery候補としてだけ記録し、production auditへのdomain追加はしていません。推論成功は`not run — discoveryで停止`で、候補domainの許可追加と次の実runtime操作は個別承認待ちです。
 
 - Phase 6-6 GitHubの既存branch更新拒否を2026-09-05、基準`a7ec228`（productionは`e2ce4a9`と同一）で確認しました。smoke PR #4の専用branchだけへ、local commit objectを使ったfast-forwardとnon-fast-forward更新を試し、両方がbroker内で拒否されました。検証用のreceive RPC停止guardへの到達は0回、auditはreceive-pack denied 2件、前後の専用branch／mainのremote OIDは一致しました。guardは到達時に実書き込みを防ぐためのもので、guardによる拒否をbrokerの成功には数えていません。container／broker thread／run directoryの回収とaudit非露出も成功しました。shared branchへのpush、ref削除、tag pushは行っていません。

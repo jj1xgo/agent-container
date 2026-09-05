@@ -53,6 +53,8 @@ Familyの既存bindingはlocal doctorとlive installation inventoryの読み取�
 
 egress discoveryの個別承認後、Codexを1回起動し、policyが拒否した接続先候補`chatgpt.com`を観測しました。外向きtunnelは0件、最初の拒否後に停止・cleanupし、許可先は`pypi.org`だけのまま保持しています。domain追加と実runtime gateは次の個別承認待ちで、推論成功やegress全体のPASSには数えていません。
 
+次の個別承認で`chatgpt.com`を追加してCodexを1回実行したところ、未許可`github.com`要求を検出して停止しました。最小応答成功は未確認で実runtime gateはFAIL、接続元処理とauditのauthentication denial 7件の原因は調査中です。cleanupは成功し、許可先は`chatgpt.com`／`pypi.org`の2件を維持しています。失敗を回避するdomain追加や再実行は承認なしに行いません。
+
 実施順はPhase番号と一致する。
 
 1. Phase 6で、後続機能が共有するbroker kernelを固定する。
