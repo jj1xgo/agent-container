@@ -12,6 +12,7 @@ import threading
 import time
 from typing import Callable
 
+from agent_container.broker.runtime import accept_clients
 from agent_container.family_intake_broker import FamilyIntakeSession
 from agent_container.family_intake_transport import handle_family_intake_connection
 from agent_container.family_pending import initialize_pending_store
@@ -295,15 +296,7 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
 
     def _serve(self, listener: socket.socket) -> None:
         try:
-            while not self._stop.is_set():
-                try:
-                    client, _address = listener.accept()
-                except TimeoutError:
-                    continue
-                except OSError:
-                    if self._stop.is_set():
-                        break
-                    raise
+            for client in accept_clients(listener, stop_event=self._stop):
                 with self._client_lock:
                     if self._stop.is_set():
                         client.close()

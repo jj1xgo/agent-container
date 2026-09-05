@@ -41,7 +41,7 @@ agent-containerは、containerの中のagentがhost側の資源へ到達する�
 | `broker/runtime.py` | 2層で構成する。**資源 helper**: `create_private_file(path, body, *, label, mode=0o600)`（`O_CREAT|O_EXCL|O_NOFOLLOW`、`mode`で`open`と`fchmod`、ascii、fsync。egressのcapabilityは`0400`）、`allocate_run_dir(project_root, *, label, attempts=8)`（`token_hex(8)`、mode `0700`、衝突は再試行）、`generate_capability(*, label)`（`token_urlsafe(32)`、`CAPABILITY_PATTERN`検証）、`bind_private_listener(socket_path, *, backlog, label)`（path長107 byte以下、既存path／symlink拒否、bind、`chmod 0600`、listen、失敗時はsocketだけunlink）、`remove_runtime_artifacts(*, capability_path, socket_path, run_dir) -> bool`（capability(S_ISREG)→socket(S_ISSOCK)→rmdirの固定順序、型不一致は残して失敗を返す）。**lifecycle**: `SocketBrokerRuntime(label, thread_name, open_listener, handler, deactivate, close, error_type, readiness=AlwaysReady(), backlog, listener_timeout, client_timeout, concurrency="inline", worker_thread_name="", raw_client=False, deactivate_after_join=False)`。`start()`はlistenerを開きdaemon threadでaccept loopを回す。loopは`stop_event`を見ながら`readiness.wait(listener_timeout)`をpollし、真が返るまでacceptしない。接続毎に公開helper `open_connection(client, *, timeout)`で`settimeout`、`SO_PEERCRED`でpeer uidを取り、`handler(Connection(client, stream, peer_uid))`を呼ぶ（`Connection`はfrozen dataclass）。`raw_client=True`ではConnectionを開かず`handler(client)`にsocket本体を渡し、brokerが自分で`open_connection`を呼ぶ（egress）。`stop(join_timeout=...)`は`stop_event.set → deactivate → listener close → accept thread join → worker join → close`の順（`deactivate_after_join=True`ならdeactivateをworker joinの後、`did not stop`の判定前に呼ぶ）で、`did not stop`（closeせず再試行可能）、`cleanup failed`、handler例外の`failed`を`error_type`で報告する。`deactivate`自体が投げた例外は`error_type`に包まず素通しする（handover 6-2と同じ）。brokerはsession（authorize・audit record・lock）を保持し、`open_listener`／`deactivate`／`close`をcallableで渡す。各brokerは`run_dir`から自分のMount型を作る。`concurrency="thread"`（6-3で追加）は接続毎にdaemon worker thread（`worker_thread_name`、既定は`{thread_name}-worker`）を起こし、workerの`OSError`は接続単位の失敗として握り潰し、それ以外の例外は`error`／`failed`を立てて`stop_event`をsetする。`wait_failed(timeout)`は`failed` eventを待つ（accept loopの失敗でもsetされる）。inline方式のclientは`with client:`、thread方式のclientは`finally: client.close()`で閉じる（それぞれhandover／egressの乗せ替え前の閉じ方）。 | 4 runtime module |
 | `broker/audit.py` | `AuditLog(path, *, label)`。`open_descriptor()`は`O_WRONLY|O_APPEND|O_CREAT|O_NOFOLLOW|O_NONBLOCK`で開き、通常file・mode `0600`・実行user所有・`os.stat(follow_symlinks=False)`とのdev／ino一致を検証する（失敗はdescriptorを閉じてから`ValueError`／`PermissionError`）。`validate()`は開いて閉じるだけ、`append(record)`は`json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n"`をasciiで追記しfsyncする。stage 1ではrecordのkeyもtimestampの形式も呼び出し側が決める。handoverとegressの実装はlabel以外同一だったので、両方をこの1つで賄う。 | handover／egress／githubの`_open_audit_file`＋`_write_audit_record` |
 | `broker/capability.py` | container側。`validate_exact_path(path, *, label)`（絶対path、`resolve(strict=True)`と一致）、`read_capability(path, *, label)`（`O_RDONLY|O_NOFOLLOW|O_NONBLOCK`、通常file、mode `0600`、実行user所有、**size完全一致（44 byte = 43文字 + 改行）**、open後に`resolve`と`lstat`のdev／inoを再検証、ascii、1行）、`validate_socket(path, *, label)`（`S_ISSOCK`、mode `0600`、実行user所有。pathのresolveは呼び出し側が先に行う）、`connect_unix(path, *, timeout, socket_factory)`（接続失敗時はsocketを閉じて再送出）。失敗は全て`ValueError(f"{label} is invalid")`。githubの`read_broker_capability`は`st_size > 45`の上限判定と「statしてからopen」の順序で、kernelより緩い。6-4の承認済み方針では旧readerを残し、厳格化や統一はstage 2で設計する。egressの`egress_adapter._read_capability`も同種で、mode `0400`／`0444`を受理し、owner・size検査と`O_NONBLOCK`を持たず、既存testは`0600`を拒否することを固定している。`open_gateway_tunnel`はtimeoutを設定しないため`connect_unix`にも乗らない。6-3ではadapterを据え置き、6-4ではgithubとともに旧readerを残すと決め、厳格化や統一はstage 2へ送る。 | 4 client module |
-| `broker/readiness.py` | `ReadinessGate` protocol（`wait(timeout) -> bool`のみ。Trueで準備完了、Falseで未完了、失敗はraise）と既定実装`AlwaysReady`。runtimeは`stop_event`を見ながら`listener_timeout`間隔で`wait`をpollし、準備完了までacceptしない。stopが先に来れば何もせずに終了する。6-1で想定した`register`／`is_ready`は消費者が無く、familyのPID登録はaccept前のgateではなくrequest毎の`validate_peer`による拒否だと判明したため削除した。familyを乗せ替える6-5では、この差を踏まえてreadiness seamの適用可否を再設計する。 | familyのPID登録gate（移動のみ） |
+| `broker/readiness.py` | `ReadinessGate` protocol（`wait(timeout) -> bool`のみ。Trueで準備完了、Falseで未完了、失敗はraise）と既定実装`AlwaysReady`。runtimeは`stop_event`を見ながら`listener_timeout`間隔で`wait`をpollし、準備完了までacceptしない。stopが先に来れば何もせずに終了する。6-1で想定した`register`／`is_ready`は消費者が無く、familyのPID登録はaccept前のgateではなくrequest毎の`validate_peer`による拒否だと判明したため削除した。6-5ではrequest毎検証を保持しreadiness seamに載せない。保証の統一はstage 2で設計する。 | stage 2での適用検討。現在はAlwaysReady |
 
 ### stage 1 から分離した停止処理の修正・課題
 
@@ -69,6 +69,33 @@ stage 1 の完了は、各 broker の仕様に記録した共通部品と互換 
 
 調査: `docs/superpowers/plans/2026-09-05-broker-kernel-6-4-investigation.md`。実装計画: `docs/superpowers/plans/2026-09-05-broker-kernel-6-4-github.md`。golden 基準は `a69bb780dc61f3f0f50c92f668f8686837280f12`。
 
+### 6-5 Familyの互換性範囲（2026-09-05）
+
+基準は`39fbc5e997946cc915013190b78139eb09c94d48`。6-4で定めた
+「各brokerの仕様に記録した共通部品と互換adapter」というstage 1契約に従う。
+当初のFamily readiness全面乗せ替え案は実装と一致しないため、本節を優先する。
+Familyは登録前にもacceptし、transportがrequest毎にPID/uidを検査して拒否する。
+PID登録をaccept前の待機へ変えるのは保証・拒否timingの変更でありstage 2へ送る。
+
+| 6-5で共通化 | Family側に保持 |
+| --- | --- |
+| request/responseのJSON encode、header/body size、decode field集合検査を既存`FrameSchema`/`encode_frame`/`decode_frame`で処理 | total-frame上限からheader 4 bytesを引くschema、exact `bytes`入口、`_decode_json` callback、typed validation、既存private helper名 |
+| `_serve`のaccept/timeout/stop時OSErrorを既存`accept_clients`で処理 | accept後stop再検査、client lock/ownership/context manager、PID/uid検証、failed/consumed処理、start/close/check全体 |
+
+kernelの新API・保証変更は追加しない。Familyのstream readはexact bytes、writeは
+exact intとOSError/TypeError/ValueErrorの変換を要求するため、`_read_exact`、
+`_read_frame`、`_write_all`は保持する。clientはcapabilityを環境で受け取るため、
+capability file readerへ置き換えない。run directoryとsocketはdir_fd/inodeに
+結びつくため共通path helperへ置き換えない。監査はlock、既存内容検証、size上限、
+identity再検査、file/parent fsync、失敗時rollbackを持つため`family_pending.py`の
+transaction全体を保持する。`FamilyRuntimeMount`とPodman関連も変更しない。
+
+既存test不変と基準encoderから生成したstatic wire/audit goldenで保存を検査する。
+exact bytes/subclass、JSON拒否・size境界・例外、短いread/write、accept中のstopと
+failed/consumed、client回収を追加characterizationで固定する。新kernel APIがないため
+新しい汎用部品testを水増しせず、Family adapterと既存kernel境界の回帰検査を行う。
+6-5の実測結果は計画とCHANGELOGへ記録する。6-6実host smokeとstage 2は未実施である。
+
 ### stage 1で変えないもの
 
 - **`StateLayout`**。broker毎の`*_root`／`*_run_root`／`*_audit_file`は残す。pathを変えるとstate migrationが要り、振る舞い保存でなくなる。stage 2で`broker_root(name)`のような1関数へ畳むかを検討する。
@@ -91,7 +118,7 @@ kernelを消費者なしで先に作ると机上のAPIになるため、最初�
 | 6-2 | `broker/runtime.py`、`broker/audit.py`、`broker/readiness.py`（`AlwaysReady`のみ）を抽出し、handover runtimeを乗せ替え | runtime（inline）、audit、readiness | handoverは`SO_PEERCRED`を使うので、kernelは最初からpeer credentialを持つ |
 | 6-3 | egressを乗せ替え | `FrameSchema.frame_label`、`create_private_file(mode)`、`open_connection`、runtimeの`concurrency="thread"`・worker回収・`wait_failed`・`raw_client`・`deactivate_after_join` | thread方式とtunnel予約という「broker固有の追加状態」をkernelがどう受けるかを、最大のgithubより前に小さいbrokerで決める |
 | 6-4 | githubの互換性を保つ部分的乗せ替え | request framing/schema の JSON callback、chunk stream、accept iterator、TextIO audit write。既存 run directory helper を利用 | handler と JSON／lifecycle／cleanup／capability／audit opener の互換処理は残す。全面統一は stage 2（「6-4 の承認済み互換性範囲」参照） |
-| 6-5 | familyを乗せ替え | 追加なし。familyの既存PID登録logicはfamily側module（`family_intake_runtime.py`）に`ReadinessGate`の実装として残し、kernel runtimeへ渡す。kernelへは移さない。fail-closed cleanupもfamily側に残す | readiness seamがstage 1で実際の消費者を持つ。「全brokerへ昇格」はstage 2 |
+| 6-5 | familyの互換性を保つ部分的乗せ替え | 既存frame encode/decodeとaccept iterator。新kernel APIなし | PID検証、stream、lifecycle、capability、descriptor cleanup、audit transactionは保持。readiness適用と完全統一はstage 2（6-5互換性範囲参照） |
 | 6-6 | roadmapの現在地更新、`CHANGELOG.md` Validation、stage 1実host smoke | — | 節「振る舞い保存の証明」の実host gate |
 
 各PRの受け入れ条件は同じである。
@@ -119,7 +146,7 @@ kernel固有のunit testは、既存brokerがばらばらに持っていた境�
 
 stage 2を後から入れてもstage 1の設計を壊さないよう、kernelの内側に閉じた3つの継ぎ目を用意する。stage 1ではどれも既定値で動く。
 
-1. **readiness gate。** `SocketBrokerRuntime`は`ReadinessGate`を受け取り、`wait`が返るまでacceptしない。既定は`AlwaysReady`。stage 1ではfamilyだけが自分のPID登録実装を渡す。stage 2で「container側runtimeが登録するまで受けない」を全brokerへ広げる。
+1. **readiness gate。** `SocketBrokerRuntime`は`ReadinessGate`を受け取り、`wait`が返るまでacceptしない。既定は`AlwaysReady`。FamilyのPID登録はrequest毎の検証なのでstage 1ではこのseamに載せない。stage 2で拒否timingと停止中の扱いを設計し、「container側runtimeが登録するまで受けない」保証の適用範囲を決める。
 2. **fail-closed cleanup。** runtimeの`__exit__`と失敗時のcleanupは「socket → capability → run directory」の固定順序で実装し、順序と冪等性をtestで固定する。stage 2でfamilyの`_cleanup_artifacts`（失敗時にも確実に消す、部分残骸の検出）をこの1か所へ持ち込む。
 3. **audit envelope。** `AuditLog.append(record)`はstage 1ではrecordをそのまま書く。stage 2で共通key（`timestamp`、`project`、`run`、`operation`、`status`）を必須にし、broker固有keyを`details`へ寄せるか、timestamp形式を統一するかを決める。stage 1では4系統のkey差分を本文書（前節）に一覧化してある。
 
