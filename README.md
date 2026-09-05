@@ -148,6 +148,15 @@ install -m 755 "$build_dir/agent-handover-host" \
 
 `profiles/host-codex/skills/handover/SKILL.md`をhostのhandover skillへ配置し、installed executableの`publish` prefixだけを恒久許可します。commandは現在のGit originとprivateなproject登録を照合して保存先を内部決定し、projectや保存先を引数・環境変数から上書きできません。
 
+ホストCodexでも最新handoverを通知するには、`discover`対応のinstalled executableを用意し、hookを配置します。
+
+```bash
+install -m 644 profiles/host-codex/hooks/handover-discover \
+  "$HOME/.local/libexec/agent-container/codex-handover-discover"
+```
+
+`profiles/host-codex/hooks.json`の`SessionStart`設定を`~/.codex/hooks.json`へ追加します。既存fileがある場合は既存hookを残して統合してください。配布設定の`/home/tsu`は実際のhomeに合わせます。startup、resume、compact時に現在のworkspaceから`agent-handover-host discover`を呼び、登録projectの最新パスと、必要な場合に本文を読んでGit状態と照合する指示だけを通知します。本文は注入せず、handoverなし・未登録project・探索失敗・timeout時は通知せず終了します。作成には既存のhandover skillを使います。配置後はCodexを再起動して設定を読み込ませます。
+
 ホストのClaude Codeでも同じinstalled executableを使います。`profiles/host-claude/hooks/handover-discover`を`~/.claude/hooks/`へ、`profiles/host-claude/skills/handover/SKILL.md`を`~/.claude/skills/handover/`へ配置し、`~/.claude/settings.json`へ次のSessionStart hookを追加します。hookはstartup、resume、compact時に`agent-handover-host discover`で登録projectの最新handover pathだけを通知し、本文は注入しません。Claudeのsession IDは`CLAUDE_SESSION_ID`として同じsession内のBash commandへ引き継がれ、publisherはこれをhandoverのSession欄へ記録します。
 
 ```json

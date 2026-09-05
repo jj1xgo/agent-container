@@ -1,0 +1,19 @@
+{
+  "description": "Discover host project handovers without injecting their body.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 /home/tsu/.local/libexec/agent-container/codex-handover-discover",
+            "statusMessage": "Checking project handover",
+            "additionalContextLimit": 1000,
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}
