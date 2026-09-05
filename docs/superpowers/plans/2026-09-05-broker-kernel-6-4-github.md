@@ -668,7 +668,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest tests.container.tes
 
 **Interfaces:** consumes Tasks 1–4。produces 検証記録と reviewable PR。6-4 完了はこの限定範囲の完了であり、Phase 6 全体の完了ではない。
 
-- [ ] **Step 1: source/test 境界を検証する。**
+- [x] **Step 1: source/test 境界を検証する。**
 
 ```sh
 git diff --check
@@ -686,7 +686,7 @@ changed = set(subprocess.check_output(["git", "diff", "--name-only", base, "--",
 assert not old & changed, sorted(old & changed)
 ```
 
-- [ ] **Step 2: 必須 local validation。** 最終 tree に対して一度実行し、成功後は変更や懸念がなければ繰り返さない。
+- [x] **Step 2: 必須 local validation。** 最終 tree に対して一度実行し、成功後は変更や懸念がなければ繰り返さない。
 
 ```sh
 bin/lint
@@ -712,7 +712,7 @@ test "$socket_status" -eq 0
 
 既知の環境依存: handover wrapper test は session broker env の継承で失敗し得る。単独 Podman test は tempfile 初回探索と os.write mock が干渉する。Family Podman の fault injection race は既存で、再実行成功を修正完了とは扱わない。詳細は investigation。これらを修正するために既存 test/production を本 PR で編集しない。
 
-- [ ] **Step 3: docs を実装の事実に合わせる。** CHANGELOG の Unreleased に次を入れ、Validation には実測件数・commit・not run の理由を書く。
+- [x] **Step 3: docs を実装の事実に合わせる。** CHANGELOG の Unreleased に次を入れ、Validation には実測件数・commit・not run の理由を書く。
 
 > GitHub broker の frame/chunk、accept iteration、run directory 確保、audit write を共通 broker kernel へ移動。既存の JSON 例外、lifecycle、cleanup、capability 検証と audit opener は互換性のため維持し、完全統一を stage 2 に残す。
 
@@ -720,6 +720,13 @@ spec と roadmap は本計画作成時点で承認範囲へ更新済み。実装
 
 - [ ] **Step 4: 全差分を review する。** 特に callback exception identity、generator の遅延評価、OSError after stop、client/stream ownership、audit open/write/fsync/close の順序、short-write の意図しない修正、残した capability 検証の権限拡大がないこと。review 所見は file/再現/仕様根拠を付ける。
 - [ ] **Step 5: docs と検証結果を commit し PR を作る。** タイトル: `refactor: share compatible GitHub broker primitives (Phase 6-4)`。本文は抽出/残置を列挙し、既存 tests 不変の証拠、golden 基準 commit、実行結果、既存 Family race を区別する。必須 CI 成功前に merge しない。外部へのコメント/通知は既存の依頼・承認範囲を確認する。
+
+Task 5 local記録（production／test tree `4e330826f3c04d5058ea54d7d65866945ebd8ca7`）:
+
+- `git diff --check`、scope外production 7 filesの`git diff --exit-code`、基準commitに存在したtest 82 filesの不変性check: PASS。差分は予定したproduction 6 filesと新規test/support/fixture 5 paths。
+- `bin/lint`: PASS。container unit: 1,097件PASS。Codex unit: 48件PASS。docs unit: 67件PASS。GitHub／handover／egress socket integration: 8件PASS、`ResourceWarning` 0件。
+- local Podman 14-test gate: `not run — podman unavailable`。実host smoke: `not run — 6-6`。required CI: `not run — PR作成後にcontrollerが実行`。
+- 実装者self-reviewでは、callback exception identity、generator遅延評価、停止後の`OSError`、client／stream ownership、audit open／write／flush／fsync／close順序、既存short-write、capability検証の残置を確認し、所見なし。Step 4は独立whole-branch review前のため未完了、Step 5はPR／required CI未実施のため未完了とする。
 
 ## Self-review（計画作成時）
 
