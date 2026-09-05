@@ -45,6 +45,8 @@ Phase 6-5はFamilyのframe codecとaccept iterationを既存kernelへ共通化�
 
 2026-09-05のGitHub read-only実host smokeでは、承認された専用projectでfetch、既存Issue list／view、GitHub credentialの環境・mount検査、停止後拒否とcleanupを確認しました。通常runtimeのmountを使った固定probeであり、認証済みagent本体の操作とは区別します。audit確認の検証script誤判定とローカル再検証、未観測項目はCHANGELOGに記録しました。GitHub全体はPARTIALで、push／PR作成および他brokerの実host gateは残っています。
 
+Familyの既存bindingはlocal doctorとlive installation inventoryの読み取り照合まで成功しました（selected repository exactly 1件、binding一致）。実intake／承認付きIssue作成は未実施です。GitHubのpush／PR検証用には既存workspaceと別のlocal checkoutで1行のfixture候補を準備しましたが、remoteへの書き込みはまだ行っていません。
+
 実施順はPhase番号と一致する。
 
 1. Phase 6で、後続機能が共有するbroker kernelを固定する。
