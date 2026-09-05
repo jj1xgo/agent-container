@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 import struct
 from typing import Any
-from typing import BinaryIO
+from typing import BinaryIO, Callable, Iterable
 
 
 HEADER_BYTES = 4
@@ -63,7 +63,12 @@ def encode_frame(schema: FrameSchema, values: dict[str, Any]) -> bytes:
     return struct.pack(">I", len(body)) + body
 
 
-def decode_frame(schema: FrameSchema, data: bytes) -> tuple[dict[str, Any], int]:
+def decode_frame(
+    schema: FrameSchema,
+    data: bytes,
+    *,
+    json_decoder: Callable[[bytes], Any] | None = None,
+) -> tuple[dict[str, Any], int]:
     if not isinstance(data, bytes) or len(data) < HEADER_BYTES:
         raise ValueError(f"{schema.frame_prefix} frame is incomplete")
     length = struct.unpack(">I", data[:HEADER_BYTES])[0]
@@ -72,15 +77,18 @@ def decode_frame(schema: FrameSchema, data: bytes) -> tuple[dict[str, Any], int]
     consumed = HEADER_BYTES + length
     if len(data) < consumed:
         raise ValueError(f"{schema.frame_prefix} frame is incomplete")
-    try:
-        text = data[HEADER_BYTES:consumed].decode(schema.json.encoding)
-        decoded = json.loads(
-            text,
-            object_pairs_hook=_object_without_duplicates,
-            parse_constant=_reject_constant,
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-        raise ValueError(f"{schema.frame_prefix} JSON is invalid") from None
+    if json_decoder is not None:
+        decoded = json_decoder(data[HEADER_BYTES:consumed])
+    else:
+        try:
+            text = data[HEADER_BYTES:consumed].decode(schema.json.encoding)
+            decoded = json.loads(
+                text,
+                object_pairs_hook=_object_without_duplicates,
+                parse_constant=_reject_constant,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            raise ValueError(f"{schema.frame_prefix} JSON is invalid") from None
     if not isinstance(decoded, dict) or set(decoded) != schema.fields:
         raise ValueError(f"{schema.label} schema is invalid")
     return decoded, consumed
@@ -124,3 +132,45 @@ def write_all(stream: BinaryIO, frame: bytes, *, label: str) -> None:
             raise ValueError(f"{label} write failed")
         offset += written
     stream.flush()
+
+
+
+def write_chunk_stream(
+    stream: BinaryIO, chunks: Iterable[bytes], *, maximum_chunk: int, label: str
+) -> int:
+    transferred = 0
+    for chunk in chunks:
+        if not isinstance(chunk, bytes) or not chunk or len(chunk) > maximum_chunk:
+            raise ValueError(f"{label} chunk is invalid")
+        stream.write(struct.pack(">I", len(chunk)))
+        stream.write(chunk)
+        transferred += len(chunk)
+    stream.write(b"\x00\x00\x00\x00")
+    stream.flush()
+    return transferred
+
+
+def iter_chunk_stream(
+    *,
+    read_bytes: Callable[[int, bool], bytes],
+    maximum_total: int,
+    maximum_chunk: int,
+    label: str,
+    allow_initial_eof: bool = False,
+) -> Iterable[bytes]:
+    if maximum_total < 0:
+        raise ValueError(f"{label} limit is invalid")
+    transferred = 0
+    while True:
+        header = read_bytes(HEADER_BYTES, allow_initial_eof and transferred == 0)
+        if header == b"":
+            return
+        length = struct.unpack(">I", header)[0]
+        if length == 0:
+            return
+        if length > maximum_chunk:
+            raise ValueError(f"{label} chunk is invalid")
+        transferred += length
+        if transferred > maximum_total:
+            raise ValueError(f"{label} is too large")
+        yield read_bytes(length, False)

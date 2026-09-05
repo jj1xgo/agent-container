@@ -22,7 +22,7 @@ Phase 1〜5は完了した。現在地は**Phase 6**である。Phase 5は、202
 | Phase 3 | GitHub App broker | 完了 | credentialをcontainerへ渡さず、exact repositoryのclone／fetch、create-only push、PR、Issue readを提供する。 |
 | Phase 4 | scope整合・安全性安定化・`v0.4.0` | 完了 | private fixture gate、create-only強制、Issue read、cleanup、releaseを完了する。 |
 | Phase 5 | Family機能の運用完成 | 完了 | 専用App、binding、Codex／Claude intake、non-exposure、duplicate、承認付き実Issue、unknown reconciliation、cleanupの実host smokeがPASSする。 |
-| Phase 6 | 共通broker kernel | 進行中 | GitHub／handover／egress／Familyの4 brokerが`agent_container/broker/`のframe・runtime・audit・capability・readiness上で動き（stage 1）、kernelがreadiness gate・fail-closed cleanup・統一auditを全brokerへ提供し（stage 2）、既存の実host smoke手順が変更なしでPASSする。設計は[`docs/superpowers/specs/2026-09-04-broker-kernel-design.md`](superpowers/specs/2026-09-04-broker-kernel-design.md)。 |
+| Phase 6 | 共通broker kernel | 進行中 | GitHub／handover／egress／Familyの4 brokerが仕様に記録した共通kernel部品と互換adapter上で動き（stage 1）、残したlifecycle・capability・audit opener等を統一し、kernelがreadiness gate・fail-closed cleanup・統一auditを全brokerへ提供し（stage 2）、既存の実host smoke手順が変更なしでPASSする。設計は[`docs/superpowers/specs/2026-09-04-broker-kernel-design.md`](superpowers/specs/2026-09-04-broker-kernel-design.md)。 |
 | Phase 7 | Obsidian Vault config sync | 未着手 | review可能なschemaをVault原本から検査済みprivate stateへ同期し、credential、session、cacheを除外する。 |
 | Phase 8 | Worktree・task lease | 未着手 | task・event・agentのhost側contractをleaseの最初の消費者として定義し、agent別worktree、exclusive claim、期限、回収、stale writer拒否を提供する。 |
 | Phase 9 | Conversation room | 未着手 | Codex／Claudeがtask単位のroomへ対等なparticipantとしてbounded read/postできる。 |

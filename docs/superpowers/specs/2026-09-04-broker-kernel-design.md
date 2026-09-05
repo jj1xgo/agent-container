@@ -40,8 +40,28 @@ agent-containerは、containerの中のagentがhost側の資源へ到達する�
 | `broker/frame.py` | 4byte big-endian length + JSON objectのcodec。`FrameSchema(label, stream_label, fields, max_bytes, json, frame_label=None)`を受け取り、`encode_frame`／`decode_frame`／`read_frame`／`read_exact`／`write_all`を提供する。`label`はschema／encode error messageの接頭辞、`frame_label`はframing／JSON error messageの接頭辞（`None`なら`label`。egressのように両者の接頭辞が違うbrokerのために6-3で追加）、`stream_label`はstream読み書き失敗時の接頭辞、`fields`はdecode後のkey集合との完全一致要件、`max_bytes`はbody上限、`json`は`JsonOptions(ensure_ascii, allow_nan, sort_keys, separators, encoding)`である。重複key拒否、`NaN`／`Infinity`拒否、非object拒否、size上限、bounded read、partial write retryを1実装にする。protocol version、status集合、code集合、fieldの型検証はbroker毎のpolicyであり、意図的にkernelへ入れず各protocol moduleに残す。githubのchunk stream（`write_chunk_stream`／`iter_chunk_stream`）は6-4でここに置く。 | 4 protocol module |
 | `broker/runtime.py` | 2層で構成する。**資源 helper**: `create_private_file(path, body, *, label, mode=0o600)`（`O_CREAT|O_EXCL|O_NOFOLLOW`、`mode`で`open`と`fchmod`、ascii、fsync。egressのcapabilityは`0400`）、`allocate_run_dir(project_root, *, label, attempts=8)`（`token_hex(8)`、mode `0700`、衝突は再試行）、`generate_capability(*, label)`（`token_urlsafe(32)`、`CAPABILITY_PATTERN`検証）、`bind_private_listener(socket_path, *, backlog, label)`（path長107 byte以下、既存path／symlink拒否、bind、`chmod 0600`、listen、失敗時はsocketだけunlink）、`remove_runtime_artifacts(*, capability_path, socket_path, run_dir) -> bool`（capability(S_ISREG)→socket(S_ISSOCK)→rmdirの固定順序、型不一致は残して失敗を返す）。**lifecycle**: `SocketBrokerRuntime(label, thread_name, open_listener, handler, deactivate, close, error_type, readiness=AlwaysReady(), backlog, listener_timeout, client_timeout, concurrency="inline", worker_thread_name="", raw_client=False, deactivate_after_join=False)`。`start()`はlistenerを開きdaemon threadでaccept loopを回す。loopは`stop_event`を見ながら`readiness.wait(listener_timeout)`をpollし、真が返るまでacceptしない。接続毎に公開helper `open_connection(client, *, timeout)`で`settimeout`、`SO_PEERCRED`でpeer uidを取り、`handler(Connection(client, stream, peer_uid))`を呼ぶ（`Connection`はfrozen dataclass）。`raw_client=True`ではConnectionを開かず`handler(client)`にsocket本体を渡し、brokerが自分で`open_connection`を呼ぶ（egress）。`stop(join_timeout=...)`は`stop_event.set → deactivate → listener close → accept thread join → worker join → close`の順（`deactivate_after_join=True`ならdeactivateをworker joinの後、`did not stop`の判定前に呼ぶ）で、`did not stop`（closeせず再試行可能）、`cleanup failed`、handler例外の`failed`を`error_type`で報告する。`deactivate`自体が投げた例外は`error_type`に包まず素通しする（handover 6-2と同じ）。brokerはsession（authorize・audit record・lock）を保持し、`open_listener`／`deactivate`／`close`をcallableで渡す。各brokerは`run_dir`から自分のMount型を作る。`concurrency="thread"`（6-3で追加）は接続毎にdaemon worker thread（`worker_thread_name`、既定は`{thread_name}-worker`）を起こし、workerの`OSError`は接続単位の失敗として握り潰し、それ以外の例外は`error`／`failed`を立てて`stop_event`をsetする。`wait_failed(timeout)`は`failed` eventを待つ（accept loopの失敗でもsetされる）。inline方式のclientは`with client:`、thread方式のclientは`finally: client.close()`で閉じる（それぞれhandover／egressの乗せ替え前の閉じ方）。 | 4 runtime module |
 | `broker/audit.py` | `AuditLog(path, *, label)`。`open_descriptor()`は`O_WRONLY|O_APPEND|O_CREAT|O_NOFOLLOW|O_NONBLOCK`で開き、通常file・mode `0600`・実行user所有・`os.stat(follow_symlinks=False)`とのdev／ino一致を検証する（失敗はdescriptorを閉じてから`ValueError`／`PermissionError`）。`validate()`は開いて閉じるだけ、`append(record)`は`json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n"`をasciiで追記しfsyncする。stage 1ではrecordのkeyもtimestampの形式も呼び出し側が決める。handoverとegressの実装はlabel以外同一だったので、両方をこの1つで賄う。 | handover／egress／githubの`_open_audit_file`＋`_write_audit_record` |
-| `broker/capability.py` | container側。`validate_exact_path(path, *, label)`（絶対path、`resolve(strict=True)`と一致）、`read_capability(path, *, label)`（`O_RDONLY|O_NOFOLLOW|O_NONBLOCK`、通常file、mode `0600`、実行user所有、**size完全一致（44 byte = 43文字 + 改行）**、open後に`resolve`と`lstat`のdev／inoを再検証、ascii、1行）、`validate_socket(path, *, label)`（`S_ISSOCK`、mode `0600`、実行user所有。pathのresolveは呼び出し側が先に行う）、`connect_unix(path, *, timeout, socket_factory)`（接続失敗時はsocketを閉じて再送出）。失敗は全て`ValueError(f"{label} is invalid")`。githubの`read_broker_capability`は`st_size > 45`の上限判定と「statしてからopen」の順序で、kernelより緩い。6-4で乗せ替える際に、この厳格化を受け入れるかparameter化するかを明示的に決める。egressの`egress_adapter._read_capability`も同種で、mode `0400`／`0444`を受理し、owner・size検査と`O_NONBLOCK`を持たず、既存testは`0600`を拒否することを固定している。`open_gateway_tunnel`はtimeoutを設定しないため`connect_unix`にも乗らない。6-3ではadapterを据え置き、厳格化の受け入れかparameter化かは6-4でgithubと一緒に決める。 | 4 client module |
+| `broker/capability.py` | container側。`validate_exact_path(path, *, label)`（絶対path、`resolve(strict=True)`と一致）、`read_capability(path, *, label)`（`O_RDONLY|O_NOFOLLOW|O_NONBLOCK`、通常file、mode `0600`、実行user所有、**size完全一致（44 byte = 43文字 + 改行）**、open後に`resolve`と`lstat`のdev／inoを再検証、ascii、1行）、`validate_socket(path, *, label)`（`S_ISSOCK`、mode `0600`、実行user所有。pathのresolveは呼び出し側が先に行う）、`connect_unix(path, *, timeout, socket_factory)`（接続失敗時はsocketを閉じて再送出）。失敗は全て`ValueError(f"{label} is invalid")`。githubの`read_broker_capability`は`st_size > 45`の上限判定と「statしてからopen」の順序で、kernelより緩い。6-4の承認済み方針では旧readerを残し、厳格化や統一はstage 2で設計する。egressの`egress_adapter._read_capability`も同種で、mode `0400`／`0444`を受理し、owner・size検査と`O_NONBLOCK`を持たず、既存testは`0600`を拒否することを固定している。`open_gateway_tunnel`はtimeoutを設定しないため`connect_unix`にも乗らない。6-3ではadapterを据え置き、6-4ではgithubとともに旧readerを残すと決め、厳格化や統一はstage 2へ送る。 | 4 client module |
 | `broker/readiness.py` | `ReadinessGate` protocol（`wait(timeout) -> bool`のみ。Trueで準備完了、Falseで未完了、失敗はraise）と既定実装`AlwaysReady`。runtimeは`stop_event`を見ながら`listener_timeout`間隔で`wait`をpollし、準備完了までacceptしない。stopが先に来れば何もせずに終了する。6-1で想定した`register`／`is_ready`は消費者が無く、familyのPID登録はaccept前のgateではなくrequest毎の`validate_peer`による拒否だと判明したため削除した。familyを乗せ替える6-5では、この差を踏まえてreadiness seamの適用可否を再設計する。 | familyのPID登録gate（移動のみ） |
+
+### 6-4 の承認済み互換性範囲
+
+前述の6-1／6-3の設計入力は当時の記録であり、GitHubの例外保存、clean EOF、capability検証についての現在の決定は本節を優先する。
+
+2026-09-05 のコード調査と利用者承認により、6-4 は互換処理を GitHub 側に残し、完全統一を stage 2 に送る。単純な kernel 置換では JSON の例外型・message、stream の OSError、起動・終了・cleanup の順序、capability と audit opener の検査が変わる。stage 1 の振る舞い保存を優先し、下表の限定範囲を 6-4 の完了条件とする。これは計画上の決定であり、6-4 の実装完了を示さない。
+
+| 6-4 で共通化するもの | GitHub 側に残すもの |
+| --- | --- |
+| request の header/size/schema 検査。`decode_frame(..., json_decoder=...)` に互換 JSON decoder を渡す | request JSON callback と typed validation、request encoder、response codec。巨大整数など json.loads 自体の ValueError も保存 |
+| chunk framing。kernel の `iter_chunk_stream` は `read_bytes(size, initial_eof)` callback を受ける | `_read_exact`、metadata stream readers、raw OSError、clean EOF の扱い。short write の既存挙動を修正しない |
+| `accept_clients(listener, *, stop_event)` を kernel と GitHub の loop で利用 | GitHub の start/stop、error 保存、client/stream ownership。timeout や SO_PEERCRED を追加しない |
+| 既存 `allocate_run_dir(..., label="broker")` | capability 生成・file作成、listener bind、socket→capability→rmdir の fail-fast cleanup |
+| `append_text_record(stream, record)` の JSON→newline→flush→fsync | record policy、旧 TextIO opener と close。既存 `AuditLog` の保証・既定動作は変更しない |
+
+`github_broker_transport.py` と `egress_adapter.py` の capability 検証は据え置く。kernel に緩い検証を既定値として追加しない。stage 2 で完全統一を設計する際に、descriptor identity/owner/size/mode、JSON/stream 例外、partial write、起動失敗・再試行・停止・cleanup、audit opener を明示的な変更項目として比較する。これらの強化や既存 bug の修正は 6-4 の通常 refactor に含めない。
+
+stage 1 の完了は、各 broker の仕様に記録した共通部品と互換 adapter が既存 test/golden/実 host smoke を満たすこととする。「全 broker が同じ lifecycle/capability/audit opener を使う」という当初の全面統一は stage 2 の完了条件へ移す。Phase 6 全体には引き続き両 stage が必要である。
+
+調査: `docs/superpowers/plans/2026-09-05-broker-kernel-6-4-investigation.md`。実装計画: `docs/superpowers/plans/2026-09-05-broker-kernel-6-4-github.md`。golden 基準は `a69bb780dc61f3f0f50c92f668f8686837280f12`。
 
 ### stage 1で変えないもの
 
@@ -64,7 +84,7 @@ kernelを消費者なしで先に作ると机上のAPIになるため、最初�
 | 6-1 | `broker/frame.py`と`broker/capability.py`を抽出し、handoverのprotocolとclientをkernel上へ | frame、capability | handoverはoperationが`create`1つで検証しやすい。守るべき追加保証がなく、auditも最も単純 |
 | 6-2 | `broker/runtime.py`、`broker/audit.py`、`broker/readiness.py`（`AlwaysReady`のみ）を抽出し、handover runtimeを乗せ替え | runtime（inline）、audit、readiness | handoverは`SO_PEERCRED`を使うので、kernelは最初からpeer credentialを持つ |
 | 6-3 | egressを乗せ替え | `FrameSchema.frame_label`、`create_private_file(mode)`、`open_connection`、runtimeの`concurrency="thread"`・worker回収・`wait_failed`・`raw_client`・`deactivate_after_join` | thread方式とtunnel予約という「broker固有の追加状態」をkernelがどう受けるかを、最大のgithubより前に小さいbrokerで決める |
-| 6-4 | githubを乗せ替え | frameのchunk stream、audit | 最大のbroker。upload-pack／receive-pack／PR／Issueの4 handlerはbroker側に残し、runtime／frame／auditだけ置き換える |
+| 6-4 | githubの互換性を保つ部分的乗せ替え | request framing/schema の JSON callback、chunk stream、accept iterator、TextIO audit write。既存 run directory helper を利用 | handler と JSON／lifecycle／cleanup／capability／audit opener の互換処理は残す。全面統一は stage 2（「6-4 の承認済み互換性範囲」参照） |
 | 6-5 | familyを乗せ替え | 追加なし。familyの既存PID登録logicはfamily側module（`family_intake_runtime.py`）に`ReadinessGate`の実装として残し、kernel runtimeへ渡す。kernelへは移さない。fail-closed cleanupもfamily側に残す | readiness seamがstage 1で実際の消費者を持つ。「全brokerへ昇格」はstage 2 |
 | 6-6 | roadmapの現在地更新、`CHANGELOG.md` Validation、stage 1実host smoke | — | 節「振る舞い保存の証明」の実host gate |
 
@@ -97,13 +117,13 @@ stage 2を後から入れてもstage 1の設計を壊さないよう、kernelの
 2. **fail-closed cleanup。** runtimeの`__exit__`と失敗時のcleanupは「socket → capability → run directory」の固定順序で実装し、順序と冪等性をtestで固定する。stage 2でfamilyの`_cleanup_artifacts`（失敗時にも確実に消す、部分残骸の検出）をこの1か所へ持ち込む。
 3. **audit envelope。** `AuditLog.append(record)`はstage 1ではrecordをそのまま書く。stage 2で共通key（`timestamp`、`project`、`run`、`operation`、`status`）を必須にし、broker固有keyを`details`へ寄せるか、timestamp形式を統一するかを決める。stage 1では4系統のkey差分を本文書（前節）に一覧化してある。
 
-stage 2で決めること（本文書では決めない）: `PROTOCOL_VERSION`を2へ上げるか、`StateLayout`のbroker毎3点セットを畳むか（state migrationが要る）、Mount型と`podman.py`の統一、統一auditをPhase 10のObsidian UIがどう読むか。
+stage 2で決めること（本文書では決めない）: 6-4で残したJSON／stream例外、lifecycle／cleanup、capability／audit openerの完全統一と保証変更、`PROTOCOL_VERSION`を2へ上げるか、`StateLayout`のbroker毎3点セットを畳むか（state migrationが要る）、Mount型と`podman.py`の統一、統一auditをPhase 10のObsidian UIがどう読むか。
 
 ## docsとroadmapの更新
 
 roadmapの更新規則「Phaseを分割、統合、延期、置換するときは同じPRでこの文書を更新する」に従い、本文書と同じPRで`docs/development-roadmap.md`を次のように変える。
 
-- Phase 6の行: 内容を「共通broker kernel」、完了条件を「GitHub／handover／egress／Familyの4 brokerが`agent_container/broker/`のframe・runtime・audit・capability・readiness上で動き（stage 1）、kernelがreadiness gate・fail-closed cleanup・統一auditを全brokerへ提供し（stage 2）、既存の実host smoke手順が変更なしでPASSする」とする。
+- Phase 6の行: 内容を「共通broker kernel」、完了条件を「GitHub／handover／egress／Familyの4 brokerが仕様に記録した共通kernel部品と互換adapter上で動き（stage 1）、残したlifecycle・capability・audit opener等を統一し、kernelがreadiness gate・fail-closed cleanup・統一auditを全brokerへ提供し（stage 2）、既存の実host smoke手順が変更なしでPASSする」とする。
 - Phase 8の行: 完了条件へ「task・event・agentのhost側contractをleaseの最初の消費者として定義する」を追加する。
 - 「Phase 6〜9の依存理由」節へ、2026-09-04のbrainstormingで「agent別worktreeの前倒しはしない（leaseと不可分）」「task／event contractはPhase 8へ移す」と決めた旨を追記し、「検討する余地は残る」の記述を閉じる。
 
