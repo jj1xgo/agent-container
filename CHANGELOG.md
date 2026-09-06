@@ -29,6 +29,10 @@
 - broker workerの登録後・開始前にstopが重なると、未開始threadのjoinが`RuntimeError`を出し、egressの失効処理にも到達していませんでした。未開始workerを管理対象に残し、停止未完了を所定の例外で報告して、開始後の再試行で回収できるようにしました（[#97](https://github.com/jj1xgo/agent-container/issues/97)）。
 - Claude launcherが設定する`IS_DEMO=1`はtoken onboardingだけでなくworkspace trust dialogも省略するため、project configの`.claude.json`に`hasTrustDialogAccepted`が残らず、managed status lineを含むtrust前提の機能が黙って動いていませんでした。launcherは起動直前に現在のworkspaceの該当keyだけをseedし、fileが無ければmode `0600`で作り、通常fileでない・実行user所有でない・JSON objectとして読めない場合は本文を出さずに起動を停止します。permission bypass optionやproject側hooks／MCPの扱いは変わりませんが、trust承認と同じくworkspace内`.claude/settings*.json`の`permissions.allow`と`additionalDirectories`は有効になります。
 
+### Changed
+
+- Claude runtimeのnested sandboxをstrong mode（`sandbox.enableWeakerNestedSandbox=false`）に切り替え、launcherが`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`を設定するようにしました。PR #108の`/proc` unmaskによりstrong modeが必要とする新しい`/proc`のuser namespace内mountが可能になったため、2026-08-24設計がglobal scrub採用を見送った前提が解消しました（[設計](superpowers/specs/2026-09-06-claude-strong-nested-sandbox-design.md)）。fallbackは設けず、`failIfUnavailable: true`は維持します。
+
 ### Security boundaries
 
 - Codex sandbox（workspace-write）内のtool commandは、Codex本体processと同じnetwork到達性を持つようになります。network境界はPodman側（`--network=none`＋egress adapterのexact-domain allowlist、または制限なしprojectの通常network）で与えるため、containerの外へ新しい経路は増えません。sandbox内command同士やcontainer内loopbackへのTCP／Unix socket接続は可能になり、Unix socketのpath単位allowlistは、Codexの`network_proxy`機能が直接`connect`する現在のbroker clientと両立しないため採用していません。read-only sandboxのnetwork無効は変わりません。
@@ -36,6 +40,8 @@
 - agent runtimeの`/proc` unmaskにより、container内uid 1000（keep-id、全capability削除）は`/proc/keys`と`/proc/interrupts`を読め、`/proc/acpi`と`/proc/scsi`を一覧できるようになります。`/proc/kcore`と`/proc/timer_list`は引き続き読めず、`/proc/sys/*`と`/proc/sysrq-trigger`への書き込みはroot所有fileに対するDACとcap-dropで拒否されます。`/proc/sys`の書き込み禁止はmount flagではなく非root uidとcapability削除に依存する形へ変わります。`/sys/firmware`、`/sys/fs/selinux`、`/sys/fs/cgroup`等のmaskと、probe／setup containerの既定maskは維持します。
 
 - Claude managed policyに`allowManagedPermissionRulesOnly`をpinしない判断を記録しました。Claude Code 2.1.260ではこの設定がpermission promptの「don't ask again」も無効にするため、利用者自身のrepositoryだけを動かす現状では、workspaceの`.claude/settings*.json`のallow ruleをtrust承認と同じく受け入れます。managed `deny`、sandbox、bypass禁止、brokerのhost承認は変わりません。中身を確認していない第三者repositoryを動かす際に見直します。
+
+- Claude sandbox内から見える`/proc`が、strong modeの新しいPID namespaceにより構造的にsandbox内processだけへ縮小されます。従来のweaker modeでは親Claude processを含むcontainer内の他processが構造的には見えており、防御は専用probeの`parent_token_via_proc_readable=false`という観測だけに依存していました。global scrubにより、Bash toolを含む全subprocessからcredential環境変数が除去されます。既存のcredential deny list、token file deny、built-in Read deny、`allowAllUnixSockets`、`failIfUnavailable`、unsandboxed command禁止、hooks／MCPのmanaged限定は変更しません。
 
 ### Validation
 
