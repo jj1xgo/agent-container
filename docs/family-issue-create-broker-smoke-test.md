@@ -26,7 +26,7 @@ git diff --check
 
 固定期待値はCodex suiteは`Ran 49 tests ... OK`、container suiteは`Ran 1125 tests ... OK`、socket suiteは`Ran 18 tests ... OK`、forced-unknown fixtureは`Ran 4 tests ... OK`です。すべてのcommandでunexpected skipは0件を要求し、件数不一致または1件でも想定外skipがあればPASSにしません。host生成署名、duplicate denial、content-free audit、credential non-exposure、terminal cleanup、forced unknownとcreated / not-created reconciliationがunit／socket testで通ったことをtest名と件数で記録します。秘密値やcanonical本文を記録しません。
 
-2026-09-05、利用者承認によりPhase 6-6の基準`e2ce4a9`に合わせ、期待件数だけを44／976から48／1111へ更新しました。実行command、検証項目、skip禁止と件数一致の条件は維持します。過去の観測表の件数は当時の実測として保持します。 続いてPR #107の独立修正を取り込んだ基準`7a9e927`では回帰test 8件を追加したため、container期待件数のみ1119へ更新しました。 さらにPR #108の独立修正（agent runtimeの`/proc` unmask）を取り込んだ基準`425e944`では、unit test 1件とreal Podman test 1件を追加したため、container期待件数を1120、Podman suite期待件数を15へ更新しました。 PR #109の独立修正（Codex sandbox内commandのnetwork保持）ではCodex unit test 1件とreal Podman test 1件を追加したため、Codex期待件数を49、Podman suite期待件数を16へ更新し、Podman suiteのcommandに追加moduleを含めました。 PR #110の独立修正（既存projectへのsandbox network設定の配布）ではcontainer unit test 3件を追加したため、container期待件数を1123へ更新しました。 managed profile version 1のprojectで`update-profile`が失敗する独立修正ではcontainer unit test 2件を追加したため、container期待件数を1125へ更新しました。
+2026-09-05、利用者承認によりPhase 6-6の基準`e2ce4a9`に合わせ、期待件数だけを44／976から48／1111へ更新しました。実行command、検証項目、skip禁止と件数一致の条件は維持します。過去の観測表の件数は当時の実測として保持します。 続いてPR #107の独立修正を取り込んだ基準`7a9e927`では回帰test 8件を追加したため、container期待件数のみ1119へ更新しました。 さらにPR #108の独立修正（agent runtimeの`/proc` unmask）を取り込んだ基準`425e944`では、unit test 1件とreal Podman test 1件を追加したため、container期待件数を1120、Podman suite期待件数を15へ更新しました。 PR #109の独立修正（Codex sandbox内commandのnetwork保持）ではCodex unit test 1件とreal Podman test 1件を追加したため、Codex期待件数を49、Podman suite期待件数を16へ更新し、Podman suiteのcommandに追加moduleを含めました。 PR #110の独立修正（既存projectへのsandbox network設定の配布）ではcontainer unit test 3件を追加したため、container期待件数を1123へ更新しました。 managed profile version 1のprojectで`update-profile`が失敗する独立修正ではcontainer unit test 2件を追加したため、container期待件数を1125へ更新しました。 Claude strong nested sandboxの独立修正（real Podman test 1件を追加）を取り込んだ基準では、Podman suite期待件数を17へ更新しました。
 
 ## 2. Real Podman gate
 
@@ -37,7 +37,7 @@ bin/agentctl --image localhost/agent-family-test:local build
 AGENT_CONTAINER_RUN_SOCKET_INTEGRATION=1 AGENT_CONTAINER_RUN_PODMAN_INTEGRATION=1 AGENT_FAMILY_TEST_IMAGE=localhost/agent-family-test:local PYTHONPATH=src python3 -m unittest tests.integration.test_project_image_podman tests.integration.test_egress_podman tests.integration.test_family_intake_podman tests.integration.test_agent_sandbox_podman tests.integration.test_codex_sandbox_network_podman -v
 ```
 
-最初のcommandは必ず検証対象のcheckout直下で実行します。`localhost/agent-family-test:local`はそのcheckoutから構築し、probe commandを実行できる使い捨てinstrumented imageだけに付けるlocal tagです。通常のproduction imageやremote registry imageへ置き換えません。固定期待値はPodman suiteは`Ran 16 tests ... OK`かつunexpected skip 0件です。件数不一致または1件でもskipがあればPASSにせず、Podman、socket許可、crun、imageのmissing prerequisiteごとにnot runと理由を個別記録します。
+最初のcommandは必ず検証対象のcheckout直下で実行します。`localhost/agent-family-test:local`はそのcheckoutから構築し、probe commandを実行できる使い捨てinstrumented imageだけに付けるlocal tagです。通常のproduction imageやremote registry imageへ置き換えません。固定期待値はPodman suiteは`Ran 17 tests ... OK`かつunexpected skip 0件です。件数不一致または1件でもskipがあればPASSにせず、Podman、socket許可、crun、imageのmissing prerequisiteごとにnot runと理由を個別記録します。
 
 Family gateではCodex pathとClaude pathの両方について、次を実観測します。
 

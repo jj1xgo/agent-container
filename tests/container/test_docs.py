@@ -312,7 +312,7 @@ class EgressDocumentationTest(unittest.TestCase):
             "tests.integration.test_agent_sandbox_podman",
             "tests.integration.test_codex_sandbox_network_podman",
             'test "$podman_status" -eq 0',
-            'grep -F "Ran 16 tests" "$podman_log"',
+            'grep -F "Ran 17 tests" "$podman_log"',
             'if grep -F "skipped" "$podman_log"',
             "AGENT_FAMILY_TEST_IMAGE: ${{ env.BASE_IMAGE }}",
         )
@@ -885,7 +885,7 @@ class FamilyIssueBrokerDocumentationTest(unittest.TestCase):
             "container suiteは`Ran 1125 tests ... OK`",
             "socket suiteは`Ran 18 tests ... OK`",
             "forced-unknown fixtureは`Ran 4 tests ... OK`",
-            "Podman suiteは`Ran 16 tests ... OK`",
+            "Podman suiteは`Ran 17 tests ... OK`",
             "unexpected skipは0件",
         ):
             self.assertIn(expected, self.smoke)
