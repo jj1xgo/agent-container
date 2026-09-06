@@ -108,6 +108,11 @@ def _runtime_prefix(uid: int, gid: int) -> list[str]:
     ]
 
 
+# Podman's default /proc masks become locked child mounts that make the kernel
+# reject a fresh proc mount from the agent's bwrap user namespace (EPERM).
+_AGENT_SANDBOX_ARGS = ["--security-opt=unmask=/proc/*"]
+
+
 def _noninteractive_prefix(uid: int, gid: int) -> list[str]:
     argv = _runtime_prefix(uid, gid)
     argv.remove("--interactive")
@@ -677,7 +682,7 @@ def run_codex_spec(
 ) -> CommandSpec:
     if uid != os.getuid() or gid != os.getgid():
         raise ValueError("runtime uid and gid must match the current user")
-    argv = _runtime_prefix(uid, gid)
+    argv = _runtime_prefix(uid, gid) + _AGENT_SANDBOX_ARGS
     argv += _runtime_monitor_args(layout, "codex")
     argv += _git_environment_args() if broker is None else _broker_git_args(layout, broker)
     argv += ["--env", "AGENT_HANDOVER_ROOT=/handovers"]
@@ -728,7 +733,7 @@ def run_claude_spec(
         raise ValueError("runtime uid and gid must match the current user")
     validate_claude_handover_project(layout, handover_project)
     gh_config_dir = "/home/agent/gh-config"
-    argv = _runtime_prefix(uid, gid)
+    argv = _runtime_prefix(uid, gid) + _AGENT_SANDBOX_ARGS
     argv += _runtime_monitor_args(layout, "claude")
     argv += ["--mount", _CLAUDE_RUNTIME_HOME_TMPFS_MOUNT]
     argv += (

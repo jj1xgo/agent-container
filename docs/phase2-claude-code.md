@@ -204,9 +204,9 @@ auditは時刻、project、operation、固定stage、status、成功pathだけ�
 | 選択projectのhandover directory | `/handovers/PROJECT` | read-only |
 | runtime限定handover broker socket/capability | `/run/agent-handover` | read-only |
 
-containerは`--read-only`、`--cap-drop=all`、`no-new-privileges`、host userと一致するkeep-id namespace、bounded `/tmp` tmpfs、Linuxのcontainer PID namespaceを使います。Claude向けpermission bypass optionは渡しません。`CLAUDE_CONFIG_DIR=/home/agent/.claude`、`AGENT_PROJECT_ID`、`AGENT_HANDOVER_ROOT=/handovers`を設定します。
+containerは`--read-only`、`--cap-drop=all`、`no-new-privileges`、host userと一致するkeep-id namespace、bounded `/tmp` tmpfs、Linuxのcontainer PID namespaceを使います。agent runtimeだけは`--security-opt=unmask=/proc/*`でPodman既定の`/proc` masked／read-only submountを外します。これらのsubmountはagentのbubblewrap sandboxがuser namespace内で新しい`/proc`をmountする際にkernelに拒否される原因で、`/sys`側のmaskとprobe／setup containerの既定maskは維持します。Claude向けpermission bypass optionは渡しません。`CLAUDE_CONFIG_DIR=/home/agent/.claude`、`AGENT_PROJECT_ID`、`AGENT_HANDOVER_ROOT=/handovers`を設定します。
 
-専用launcherだけがsecret fileを`O_NOFOLLOW`で開いてtokenをClaude親processへ渡します。tokenはPodman argvにもhost環境にも入りません。現在のClaude Codeでは`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`がrootless Podman内で利用できない強いsandboxを強制し、新しい`/proc`のmountに失敗するため、global scrubは意図的に設定しません。
+専用launcherだけがsecret fileを`O_NOFOLLOW`で開いてtokenをClaude親processへ渡します。tokenはPodman argvにもhost環境にも入りません。現在のClaude Codeでは`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`がrootless Podman内で利用できない強いsandboxを強制し、新しい`/proc`のmountに失敗するため、global scrubは意図的に設定しません。この失敗はagent runtimeの`/proc` unmaskと同じ原因の可能性がありますが、強いsandboxとglobal scrubの再評価は未実施で、本書の設定は変えていません。
 
 launcherはtoken onboardingを抑止する`IS_DEMO=1`も設定します。この設定はClaude Codeのworkspace trust dialogも省略するため、launcherは起動直前にproject configの`.claude.json`へ現在のworkspaceに対する`hasTrustDialogAccepted: true`だけをseedします。これがないとmanaged status lineなどtrustを前提にする機能が黙って動きません。seedはworkspace trustだけを与え、permission bypass optionは渡さず、project側のhooksとMCPはmanaged policyで引き続き遮断されます。ただし、trust承認によりworkspace内の`.claude/settings.json`と`.claude/settings.local.json`の`permissions.allow`と`permissions.additionalDirectories`は有効になります。これはtrust dialogを手動で承認した場合と同じ挙動で、遮断したい場合はmanaged policyの`allowManagedPermissionRulesOnly`で制御します。`.claude.json`が通常fileでない、実行user所有でない、16 MiBを超える、またはJSON objectとして読めない場合は、本文を出さずに起動を停止します。
 

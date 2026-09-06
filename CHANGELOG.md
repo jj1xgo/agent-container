@@ -16,6 +16,8 @@
 
 ### Fixed
 
+- `run`のCodex／Claude runtime containerで、Codexのbubblewrap sandboxが`bwrap: Can't mount proc on /proc: Operation not permitted`で失敗し、sandbox内のcommand実行が全て失敗していました。Podmanが既定で付ける`/proc`のmasked（`/proc/kcore`等6件）とread-only（`/proc/sys`等6件）のsubmountが、bwrapのuser namespace作成時にlocked child mountとなり、kernelの`mount_too_revealing`／`mnt_already_visible`（`fs/namespace.c`）が「空でないdirectoryやfileを覆うlocked child mountがある」として新しいproc mountを拒否していました。masked側だけ、read-only側だけの解除では解消しません。agent runtime specに`--security-opt=unmask=/proc/*`を追加し、doctor probe・setup・build用containerには付けません。`--read-only`、`--cap-drop=all`、`no-new-privileges`、keep-id、tmpfs、mount構成、`/sys`側のmaskは変更していません。
+
 - egressで未許可CONNECTを拒否すると、adapterだけがsequenceを進めて後続の許可済み通信も拒否されていました。並行requestの到着順逆転も同じ不整合を起こしました。brokerは認証済みrequestの直近4,096番号を固定bitmapで追跡し、到着順が逆でも未使用番号を受け付け、policy拒否の番号も消費します。再送・範囲より古い番号は拒否し、未認証requestは追跡状態を変えません。これは`v0.5.0`でも再現した既存不具合の独立修正で、wire・許可domain・audit schemaは変更していません。
 
 - broker workerの登録後・開始前にstopが重なると、未開始threadのjoinが`RuntimeError`を出し、egressの失効処理にも到達していませんでした。未開始workerを管理対象に残し、停止未完了を所定の例外で報告して、開始後の再試行で回収できるようにしました（[#97](https://github.com/jj1xgo/agent-container/issues/97)）。
@@ -23,9 +25,13 @@
 
 ### Security boundaries
 
+- agent runtimeの`/proc` unmaskにより、container内uid 1000（keep-id、全capability削除）は`/proc/keys`と`/proc/interrupts`を読め、`/proc/acpi`と`/proc/scsi`を一覧できるようになります。`/proc/kcore`と`/proc/timer_list`は引き続き読めず、`/proc/sys/*`と`/proc/sysrq-trigger`への書き込みはroot所有fileに対するDACとcap-dropで拒否されます。`/proc/sys`の書き込み禁止はmount flagではなく非root uidとcapability削除に依存する形へ変わります。`/sys/firmware`、`/sys/fs/selinux`、`/sys/fs/cgroup`等のmaskと、probe／setup containerの既定maskは維持します。
+
 - Claude managed policyに`allowManagedPermissionRulesOnly`をpinしない判断を記録しました。Claude Code 2.1.260ではこの設定がpermission promptの「don't ask again」も無効にするため、利用者自身のrepositoryだけを動かす現状では、workspaceの`.claude/settings*.json`のallow ruleをtrust承認と同じく受け入れます。managed `deny`、sandbox、bypass禁止、brokerのhost承認は変わりません。中身を確認していない第三者repositoryを動かす際に見直します。
 
 ### Validation
+
+- 2026-09-06、基準main `7a9e927`からの`/proc` unmask修正を、host kernel 7.2.3、rootless Podman 5.8.6、crun 1.28、専用image `c0607c9fa48b`（bubblewrap 0.12.0、Codex 0.153.4）で確認しました。修正前は`run_codex_spec`の実argv（`--interactive`／`--tty`除去、agent commandを`codex --sandbox workspace-write sandbox -- /usr/bin/printf`へ置換）で`bwrap: Can't mount proc on /proc: Operation not permitted`のexit 1、修正後はexit 0と出力一致を新規`tests/integration/test_agent_sandbox_podman.py`で観測しました。切り分けでは、基本OCI制限下のbwrapで`--ro-bind / /`と`--unshare-user --unshare-pid`はexit 0、`--proc /proc`追加でexit 1、masked 6件のみまたはread-only 6件のみのunmaskでは失敗、両方で成功でした。修正後のunit test（runtime specへの付与とprobe specへの非付与）を含むcontainer 1,120件、Codex 48件、broker socket 8件、Family socket／forced-unknown 14件、lint、whitespace検査、同imageを指定したlocal実Podman 15件（103.035秒、skip 0）が成功し、検証containerは回収済みです。CIのPodman gateは`tests.integration.test_agent_sandbox_podman`を追加して固定件数を15件へ更新しました。Claude runtimeへの付与はunit testとargv検査だけで、実hostでのClaude sandboxと`parent_token_via_proc_readable=false`の再確認は`not run — 6-6のhandover blockで扱う`、実認証のFamily Codex intake再実行は`not run — 利用者の停止指示を維持`です。
 
 - Phase 6-5のproduction／test commit `a65704b1c64681064d2602e0a31e57c52da3ba3b`で、container 1,111件、Codex 48件、broker socket 18件、forced-unknown 4件、lintとwhitespace検査がPASSしました。ResourceWarningは0件、既存test/support/fixture 88 filesと対象外source 62 filesは基準`39fbc5e`から不変、保持33関数とserve内側処理のAST一致、256 codec casesの値・例外一致、旧encoder/auditからのstatic golden再生成一致を確認しました。local Podmanは`not run — podman unavailable`、required CIはPRで実行、認証済み実host smokeは`not run — 6-6`です。
 

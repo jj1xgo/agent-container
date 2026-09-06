@@ -188,6 +188,7 @@ jobs:
               tests.integration.test_project_image_podman \
               tests.integration.test_egress_podman \
               tests.integration.test_family_intake_podman \
+              tests.integration.test_agent_sandbox_podman \
               -v 2>"$podman_log"; then
             podman_status=0
           else
@@ -195,7 +196,7 @@ jobs:
           fi
           cat "$podman_log" >&2
           test "$podman_status" -eq 0
-          grep -F "Ran 14 tests" "$podman_log"
+          grep -F "Ran 15 tests" "$podman_log"
           if grep -F "skipped" "$podman_log"; then
             exit 1
           fi
