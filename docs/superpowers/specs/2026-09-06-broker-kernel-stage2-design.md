@@ -61,8 +61,9 @@ test: `deactivate` に例外を注入する4条件（early／late × inline／th
 
 - `RuntimeArtifacts.open(run_dir, *, label)`: run directoryを `O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC` で開いてfdを保持し、`fstat` で directory・mode `0700`・実行user所有を要求し、dev／inoを捕捉する。
 - `track_file(name)`／`track_socket(name)`: 作成直後にdir_fd経由で `stat(follow_symlinks=False)` し、型（S_ISREG／S_ISSOCK）とdev／inoを捕捉する。Familyのようにcapability fileを持たない構成は `track_file` を呼ばない。
-- `remove() -> bool`（Trueで失敗）: 順序は **file → socket → run directory** とする。各名前をdir_fd経由でstatし、`FileNotFoundError` は成功扱い、それ以外の `OSError` は失敗、型またはdev／inoが捕捉値と異なれば **残して失敗**、一致すれば `unlink(name, dir_fd=...)`。run directoryはpathで `lstat` し、dev／inoが捕捉値と一致するときだけ `rmdir`。`FileNotFoundError` は成功扱い、その他の `OSError`（差し替えを残した結果の `ENOTEMPTY` を含む）は失敗。`finally` でfdを閉じる。
-- 2回目以降の `remove()` は何もせず前回の結果を返す（冪等）。`close()` はfdだけ閉じる。
+- `track_*` の時点で名前が存在しない場合（bindをmockしたtestなど）はidentity無しとして記録し、`remove()` 時にその名前へ何かが現れていればkernelが作ったものではないので残して失敗とする。
+- `remove() -> bool`（Trueで失敗）: 順序は **file → socket → run directory** とする。各名前をdir_fd経由でstatし、`FileNotFoundError` は成功扱い、それ以外の `OSError` は失敗、型またはdev／inoが捕捉値と異なれば **残して失敗**、一致すれば `unlink(name, dir_fd=...)`。run directoryはpathで `lstat` し、dev／inoが捕捉値と一致するときだけ `rmdir`。`FileNotFoundError` は成功扱い、その他の `OSError`（差し替えを残した結果の `ENOTEMPTY` を含む）は失敗。
+- 成功した `remove()` はfdを閉じ、以後の `remove()` は何もせず `False` を返す（冪等）。失敗した `remove()` はfdを保持し、次の `remove()` は再試行する（handover／egressの「差し替えを取り除いてからcloseし直す」既存契約を保つ）。`close()` はfdだけ閉じる。
 
 stage 1設計の「socket → capability → run directory」という記述は本節の順序に訂正する（実装と6-2計画は当初からcapability → socketであり、handover／egress testが固定している）。
 
@@ -94,7 +95,7 @@ test: 順序、冪等性、各段階の差し替え（regular fileをsocketに�
 | # | 変更 | 観測挙動 | 更新するtest |
 | --- | --- | --- | --- |
 | H1 | `handover_broker_transport.py` の `_read_exact`／`_read_one_request` をkernel `read_frame` に置き換え、`FrameSizeError` → `size`、その他の `FrameError`／`StreamError` → `schema` に写像 | なし（response codeとaudit stageは保存） | `test_handover_broker_transport.py` のstream fake契約が変わる場合のみ、同じ入力で同じcode／stageを検証する形に書き換える |
-| H2 | session `close` を `RuntimeArtifacts` に移す | 差し替えられたsocketがS_ISSOCKでも別inodeなら残して失敗する（K2） | `test_handover_broker.py` L176-219 の差し替えcase |
+| H2 | session `close` を `RuntimeArtifacts` に移す | 差し替えられたsocketがS_ISSOCKでも別inodeなら残して失敗する（K2） | `test_handover_broker.py` L176-219 の既存caseは満たす。別inodeのsocket差し替えcaseを追加 |
 | H3 | K1の失効失敗契約に乗る | `deactivate` 失敗時に `did not stop`／`deactivate failed` を報告し再試行可能 | 追加のみ |
 | H4 | `AuditLog.append` のenvelope検証（K5） | なし | 追加のみ |
 
@@ -108,7 +109,7 @@ handoverの `authorize` によるuid検査とaudit、`peer_policy=None` は現�
 | E2 | `egress_adapter._read_capability` をkernel `read_capability` に、path検証を `validate_exact_path`、socket検証を `validate_socket` に置き換え | `0400`／`0444` を拒否し `0600` のみ受理、実行user所有とsize 44完全一致と `O_NONBLOCK` が加わる、失敗messageは `<label> is invalid` | `test_egress_adapter.py` L131、L157、L165 |
 | E3 | `open_gateway_tunnel` を `connect_unix(timeout=30)` に置き換え、接続後に `settimeout(None)` でrelay用blockingへ戻す | 接続待ちが30秒で失敗する | 追加のみ |
 | E4 | adapterとruntimeのliteral `1` を `PROTOCOL_VERSION` に置き換え | なし | なし |
-| E5 | session `close` を `RuntimeArtifacts` に移す（H2と同じ） | H2と同じ | `test_egress_broker.py` の差し替えcase |
+| E5 | session `close` を `RuntimeArtifacts` に移す（H2と同じ） | H2と同じ | `test_egress_broker.py` の既存caseは満たす。別inodeのsocket差し替えcaseを追加 |
 | E6 | K1／K5に乗る（H3／H4と同じ） | H3と同じ | 追加のみ |
 
 egressの `_handle_client`（`raw_client=True`、tunnel予約、audit stage）は現状維持。
