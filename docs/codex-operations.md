@@ -28,6 +28,12 @@ Codexやskillの更新時は、停止理由が権限・不足情報・skillの�
 
 配布元は`profiles/codex/config.toml`。model+reasoning、context残量、primary/secondary limit、Git branch、project名の順に表示する。API情報やGit情報がない項目は表示されない場合がある。対話的な変更は`/statusline`で行う。
 
+## sandbox内commandのnetwork
+
+`profiles/codex/config.toml`は`[sandbox_workspace_write] network_access = true`を固定する。Codex 0.153系のLinux sandbox（bubblewrap＋seccomp）は既定でtool commandのnetworkを切り、`socket`／`connect`をEPERMで拒否するため、`agent-family issue create`、`--github-broker`のgit操作、egress proxy経由のcommandがsandbox内から失敗する。network境界はPodman側（`--network=none`＋egress adapter、または制限なしprojectの通常network）で与えており、この設定はsandbox内commandにCodex本体processと同じ到達性を与えるだけで、新しい外向き経路を増やさない。`sandbox_mode`、`default_permissions`、`features.network_proxy`は設定しない。read-only sandboxではnetworkは引き続き無効である。
+
+project別`CODEX_HOME`の`config.toml`は初回`project add`時に配布したままで、`run`は上書きしない。この設定より前に作ったprojectでは`bin/agentctl project update-profile PROJECT`を実行する。update-profileは既存`config.toml`のmodelやstatus lineなど他のkeyを保持したまま`[sandbox_workspace_write]`の`network_access = true`だけを保証し、`managed-profile.version`を`4`にする。version `1`のprojectのように`rules/`が無い場合は、profileの`rules/`を`project add`と同じ方法で配布してから更新する（`rules/`がsymlinkなら拒否）。
+
 ## Image再buildとCLI version
 
 通常の`bin/agentctl build`はCodexとClaude Codeのversion既定値を両方`latest`としてnpmへ解決し、毎回変わるcachebusterでCLI install layerをinvalidateする。そのため、通常buildはその時点で公開されている両CLIの最新versionを取得し、終了時に解決した公開versionを表示する。runtimeのself-updateは無効であり、version変更はimage再build時だけに起きる。

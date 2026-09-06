@@ -162,7 +162,7 @@ class ContainerImageContractTest(unittest.TestCase):
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
 
         self.assertTrue(settings["sandbox"]["enabled"])
-        self.assertTrue(settings["sandbox"]["enableWeakerNestedSandbox"])
+        self.assertFalse(settings["sandbox"]["enableWeakerNestedSandbox"])
         self.assertEqual(
             settings["sandbox"].get("network"), {"allowAllUnixSockets": True}
         )

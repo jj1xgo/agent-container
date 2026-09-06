@@ -9,7 +9,7 @@ from typing import TextIO
 EXPECTED_SETTINGS = {
     "sandbox": {
         "enabled": True,
-        "enableWeakerNestedSandbox": True,
+        "enableWeakerNestedSandbox": False,
         "allowUnsandboxedCommands": False,
         "failIfUnavailable": True,
         "network": {"allowAllUnixSockets": True},

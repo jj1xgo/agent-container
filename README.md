@@ -130,7 +130,7 @@ bin/agentctl project add OWNER/REPOSITORY \
 
 新規projectのCodex stateには、`gh pr view/list/checks/status`、`gh issue view/list`、`gh run view/list`、`gh repo view`だけを読み取り用の初期approval rulesとして配置します。既存projectのrulesは暗黙に追加・上書きしません。
 
-handover作成には保存先を環境から固定する専用`agent-handover create`を使い、このcommandだけを初期approval rulesで事前許可します。これによりhandoverごとの承認は不要です。既存projectではimage更新後、次のcommandでcustom rulesを残したまま専用ruleを追加し、managed handover skillを更新します。
+handover作成には保存先を環境から固定する専用`agent-handover create`を使い、このcommandだけを初期approval rulesで事前許可します。これによりhandoverごとの承認は不要です。既存projectではimage更新後、次のcommandでcustom rulesを残したまま専用ruleを追加し、managed handover skillを更新し、`config.toml`の他のkeyを保持したままCodex sandbox内commandのnetwork設定（`[sandbox_workspace_write] network_access = true`）を保証します。managed profile version `1`で作られ`rules/`が無いprojectでは、profileの`rules/`を配布してから同じ更新を行います。
 
 ```bash
 bin/agentctl project update-profile PROJECT
@@ -329,7 +329,7 @@ project固有のDebian packageやNode.js versionは、対象repositoryの`.agent
 | `bin/agentctl auth codex` | Codex専用認証を作成・更新 |
 | `bin/agentctl auth claude` | Claude専用認証を作成・更新 |
 | `bin/agentctl project add OWNER/REPOSITORY --handover-root PATH` | projectを専用workspaceへ登録 |
-| `bin/agentctl project update-profile PROJECT` | 既存projectのmanaged handover skillと専用approval ruleを更新 |
+| `bin/agentctl project update-profile PROJECT` | 既存projectのmanaged handover skill、専用approval rule、Codex sandbox network設定を更新 |
 | `bin/agentctl superpowers update PROJECT` | 対象projectのSuperpowersを明示的に最新版へ更新 |
 | `bin/agentctl superpowers update --all-projects` | 登録済み全projectのSuperpowersを最新版へ更新 |
 | `bin/agentctl doctor PROJECT [--agent codex\|claude\|all]` | 起動前の状態をread-onlyで診断 |
@@ -349,7 +349,7 @@ project固有のDebian packageやNode.js versionは、対象repositoryの`.agent
 
 ## Security boundary
 
-runtimeはrootless Podman、read-only root filesystem、capability削除、`no-new-privileges`、限定したmountを使用します。外向きnetworkは既定ではdomain allowlistされていません。project単位のopt-inでexact-domain allowlistを有効にできます。containerは被害範囲を狭める境界であり、agentへ渡したcredentialの完全な秘密保持を保証するものではありません。
+runtimeはrootless Podman、read-only root filesystem、capability削除、`no-new-privileges`、限定したmountを使用します。agent runtimeはagentのnested sandboxが`/proc`をmountできるようPodman既定の`/proc` maskだけを外し、`/sys`のmaskは維持します。Codex sandbox内のtool commandはcontainerと同じnetwork到達性を持ち、network境界はPodman側で与えます。外向きnetworkは既定ではdomain allowlistされていません。project単位のopt-inでexact-domain allowlistを有効にできます。containerは被害範囲を狭める境界であり、agentへ渡したcredentialの完全な秘密保持を保証するものではありません。Claudeのnested sandboxはstrong mode（`enableWeakerNestedSandbox=false`）で動き、launcherが`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`を設定して全subprocessからcredentialを除去します。
 
 `main`への直接push、既存branchの更新、merge、release、repository削除は標準操作に含みません。変更ごとに新しい作業branchを作り、必要なら新しいPRでreviewしてください。
 

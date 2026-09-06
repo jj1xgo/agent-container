@@ -90,7 +90,7 @@ setup command、hidden prompt、token format、staged `claude auth status`、act
 
    doctorの必須checkがPASSであることを確認する。local statusだけでは不十分なので、launcher経由のClaudeでcredential値を含まない最小promptを送り、実API responseが成功することを必須とする。HTTP 401を含むinference失敗は停止条件とする。clean projectを用意できない場合は回復を先行せず停止する。
 
-3. Claude内で`/status`を確認した後、`/sandbox`の`Config`を開く。managed settingsが読み込まれ、sandboxが有効、`enableWeakerNestedSandbox`が有効、unsandboxed fallbackが禁止されていることを確認する。続けて`/hooks`と`/mcp`を開き、hookとMCP serverがどちらも空であることを確認する。managed policyを確認できない、sandboxが無効、fallback可能、hookまたはMCPが1件でも読み込まれている場合は即座に停止し、sandboxを無効化して再試行しない。
+3. Claude内で`/status`を確認した後、`/sandbox`の`Config`を開く。managed settingsが読み込まれ、sandboxが有効、`enableWeakerNestedSandbox`が無効（strong nested sandbox）、unsandboxed fallbackが禁止されていることを確認する。続けて`/hooks`と`/mcp`を開き、hookとMCP serverがどちらも空であることを確認する。managed policyを確認できない、sandboxが無効、fallback可能、hookまたはMCPが1件でも読み込まれている場合は即座に停止し、sandboxを無効化して再試行しない。
 
 4. 同じclean projectで、ClaudeへBash toolを使って次のcommandだけを実行するよう依頼する。
 
@@ -106,7 +106,7 @@ setup command、hidden prompt、token format、staged `claude auth status`、act
    parent_token_via_proc_readable=false
    ```
 
-   いずれかが`true`、commandがsandbox内で実行不能、または3行以外のcredential由来情報が出た場合は即座に停止する。特に`parent_token_via_proc_readable=true`ならこの方式を不採用とし、Phase 2完了を宣言しない。確認時はcredentialの値、長さ、prefix、hash、環境一覧、環境entry、process environment、`/proc/*/environ`の内容、`/run/secrets/claude-oauth-token`本文を表示・記録しない。containerの`--read-only`、`--cap-drop=all`、`no-new-privileges`、keep-id、tmpfsも弱めない。
+   いずれかが`true`、commandがsandbox内で実行不能、または3行以外のcredential由来情報が出た場合は即座に停止する。特に`parent_token_via_proc_readable=true`ならこの方式を不採用とし、Phase 2完了を宣言しない。続けて同じBash toolで`ls /proc | grep -c '^[0-9]\+$'`を実行し、出力がsandbox内process（probeと実行中shellなど）の数と一致し、container内の他process（親Claude processを含む）のPIDを含まないことを確認する。数が合わない、または親Claude processのPIDが見える場合は停止し、sandboxを無効化して再試行しない。確認時はcredentialの値、長さ、prefix、hash、環境一覧、環境entry、process environment、`/proc/*/environ`の内容、`/run/secrets/claude-oauth-token`本文を表示・記録しない。containerの`--read-only`、`--cap-drop=all`、`no-new-privileges`、keep-id、tmpfsも弱めない。
 
 5. 新auth、clean-project status、最小inference、managed sandbox確認、security probeがすべて成功した後だけ、failed smokeで生成されたexact artifact `<state-root>/projects/agent-container/claude-config/.credentials.json`を回復する。sourceと新しいtarget `<state-root>/quarantine/claude-project/<run-id>/.credentials.json`の全ancestorを`lstat`相当で確認し、sourceが通常fileでない場合、またはsource/target/ancestorがsymlinkなら停止する。新しい`<state-root>/quarantine/claude-project/<run-id>/`をmode `0700`で作り、この1 fileだけを本文を読まずに移し、mode `0600`にする。project `.claude.json`、project backups、project cache、sessions、plugins、memoryは移動しない。quarantineは削除しない。
 
@@ -161,6 +161,9 @@ unit suiteの結果を実host観測として扱いません。実行後は、実
 
 | command/check | expected result | observed result | date |
 | --- | --- | --- | --- |
+| post-`/proc`-unmask Claude handover create | broker create from the sandboxed Bash tool on a disposable smoke project; path-only stdout; canonical metadata and seven sections; fixed-metadata audit | `agent-container-claude-smoke` from the user's private terminal; fixed seven-section body prepared as a mode 600 workspace file and sent once via stdin; stdout path only; host regular file mode 600 owner 1000:1000 with `Project`/`Created`/`Session` metadata and seven sections matching the fixed body byte-for-byte; broker audit one `create` ok `write` event with fixed fields only; runtime socket and capability removed after exit; no remaining project container | 2026-09-06 |
+| post-`/proc`-unmask Codex handover create | non-interactive `agent-handover create --title` on a disposable smoke project; path-only stdout; canonical metadata and seven sections | `agent-container-smoke` via the normal `agentctl run` path with only the agent command replaced by `codex --approve-for-me … exec --ephemeral --json`; one `command_execution` exit 0; stdout path only; host regular file mode 644 owner 1000:1000 with `Project`/`Created`/`Session` metadata and seven sections; existing file unchanged; egress audit `connect` ok 17 and `policy` denied 1; runtime exit 0; no remaining project container | 2026-09-06 |
+| post-`/proc`-unmask Claude sandbox and security gate | managed sandbox/hook/MCP checks; three security booleans false | `/sandbox` locally immutable by higher-priority configuration; `/hooks` reported 1 configured hook restricted by policy (user-scope plugin `superpowers@claude-plugins-official` 6.3.0 `SessionStart`, blocked by managed `allowManagedHooksOnly`, 0 hook events in all 7 container session records versus many in a plugin-enabled host session); `/mcp` 0 configured; dedicated probe from the sandboxed Bash tool exit 0 with `oauth_token_visible=false`, `token_file_readable=false`, and `parent_token_via_proc_readable=false` without an explicit `PYTHONPATH`; Claude Code `2.1.261`; dedicated image `edd9916b52f3`; TUI exit 0 and no remaining project container | 2026-09-06 |
 | Claude handover create | create succeeds; path-only response; canonical metadata and seven sections | exit 0; path-only stdout; host regular file mode 0600 owner 1000:1000; canonical metadata and seven sections | 2026-08-27 |
 | Claude handover direct mutation denial | direct create, overwrite, rename, and delete are denied; existing files unchanged | direct create, overwrite, rename, and delete denied read-only; existing file present and content hash unchanged | 2026-08-27 |
 | Claude handover cross-project denial | other project is absent from mounts and broker rejects its project ID | other mount absent; overridden project request denied; stdout empty; fixed stderr; audit authentication | 2026-08-27 |

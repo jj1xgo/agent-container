@@ -208,7 +208,7 @@ operator向け資料へ次を明記する。
 
 `2026-08-23-phase-2-claude-setup-token-design.md`のうち、tokenのhost保存、permission検証、read-only secret mount、image-local launcher、argv/log非露出は維持する。`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`の必須化、全subprocessへのscrub保証、fresh PID namespaceの受け入れ条件は本設計で置き換える。
 
-既存のPhase 2実装計画と運用文書でglobal scrubを前提とする箇所も、本設計の実装時に更新する。既存の未コミット文書変更は保持し、内容を確認したうえで競合しない差分として修正する。
+既存のPhase 2実装計画と運用文書でglobal scrubを前提とする箇所も、本設計の実装時に更新する。既存の未コミット文書変更は保持し、内容を確認したうえで競合しない差分として修正する。2026-09-06、agent runtimeの`/proc` unmask（PR #108）によりoption 2の不採用理由が解消したため、[2026-09-06設計](2026-09-06-claude-strong-nested-sandbox-design.md)でoption 2（strong nested sandbox + global scrub）を採用した。
 
 ## Completion criteria
 

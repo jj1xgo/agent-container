@@ -23,6 +23,7 @@ from agent_container.podman import claude_token_status_spec
 from agent_container.podman import cli_version_spec
 from agent_container.podman import egress_adapter_status_spec
 from agent_container.podman import clone_project_spec
+from agent_container.podman import node_version_spec
 from agent_container.podman import codex_superpowers_install_spec
 from agent_container.podman import codex_superpowers_marketplace_spec
 from agent_container.podman import podman_architecture_spec
@@ -1458,6 +1459,26 @@ class PodmanCommandTest(unittest.TestCase):
                 '"five-hour-limit","weekly-limit","git-branch","project-name"]',
             ),
         )
+
+    def test_agent_runtimes_unmask_proc_so_bwrap_sandbox_can_mount_proc(self) -> None:
+        layout = StateLayout(Path("/state"), "agent-container")
+        handover_project = Path("/vault/handovers/agent-container")
+        unmask = "--security-opt=unmask=/proc/*"
+
+        codex = run_codex_spec(
+            layout, handover_project, IMAGE, os.getuid(), os.getgid()
+        )
+        claude = run_claude_spec(
+            layout, handover_project, IMAGE, os.getuid(), os.getgid(), HANDOVER_BROKER
+        )
+
+        for spec in (codex, claude):
+            self.assertIn(unmask, spec.argv)
+            self.assertLess(spec.argv.index(unmask), spec.argv.index(IMAGE))
+            self.assertIn("--security-opt=no-new-privileges", spec.argv)
+            self.assertNotIn("--security-opt=unmask=ALL", spec.argv)
+        for probe in (node_version_spec(IMAGE), claude_policy_status_spec(IMAGE)):
+            self.assertNotIn(unmask, probe.argv)
 
     def test_claude_relocates_gh_config_without_changing_codex(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")
