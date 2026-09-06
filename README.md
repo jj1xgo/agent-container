@@ -130,7 +130,7 @@ bin/agentctl project add OWNER/REPOSITORY \
 
 新規projectのCodex stateには、`gh pr view/list/checks/status`、`gh issue view/list`、`gh run view/list`、`gh repo view`だけを読み取り用の初期approval rulesとして配置します。既存projectのrulesは暗黙に追加・上書きしません。
 
-handover作成には保存先を環境から固定する専用`agent-handover create`を使い、このcommandだけを初期approval rulesで事前許可します。これによりhandoverごとの承認は不要です。既存projectではimage更新後、次のcommandでcustom rulesを残したまま専用ruleを追加し、managed handover skillを更新し、`config.toml`の他のkeyを保持したままCodex sandbox内commandのnetwork設定（`[sandbox_workspace_write] network_access = true`）を保証します。
+handover作成には保存先を環境から固定する専用`agent-handover create`を使い、このcommandだけを初期approval rulesで事前許可します。これによりhandoverごとの承認は不要です。既存projectではimage更新後、次のcommandでcustom rulesを残したまま専用ruleを追加し、managed handover skillを更新し、`config.toml`の他のkeyを保持したままCodex sandbox内commandのnetwork設定（`[sandbox_workspace_write] network_access = true`）を保証します。managed profile version `1`で作られ`rules/`が無いprojectでは、profileの`rules/`を配布してから同じ更新を行います。
 
 ```bash
 bin/agentctl project update-profile PROJECT

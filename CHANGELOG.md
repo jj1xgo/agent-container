@@ -16,6 +16,8 @@
 
 ### Fixed
 
+- managed profile version `1`（2026-08-22の初期profile。approval rulesはversion `2`で追加）でseedしたprojectには`CODEX_HOME/rules/`が存在せず、`bin/agentctl project update-profile PROJECT`が`rules/default.rules`の`FileNotFoundError`で失敗して、後続のprofile修正（専用handover rule、sandbox network設定）を受け取れませんでした（`agent-container-claude-smoke`で観測）。update-profileは`rules/`が無い場合だけprofileの`rules/`を`project add`と同じ方法で配布してから既存の更新を続け、`rules/`がsymlinkなら拒否します。既存の`rules/`やcustom ruleの扱い、config／skill／version fileの必須条件は変わりません。
+
 - `[sandbox_workspace_write] network_access = true`は新規projectの`CODEX_HOME`にしか配布されず、以前に作ったprojectのCodex sandbox内commandは修正後のimageでも`agent-family issue create`がEPERMで失敗していました（2026-09-06の実認証Family intake再実行で観測）。`bin/agentctl project update-profile PROJECT`が既存`config.toml`のmodelやstatus lineなど他のkeyを保持したまま同設定だけを保証するようにし（tableが無ければ追記、`network_access = false`は同じ位置で置換、symlinkは拒否）、managed profile versionを`4`にしました。
 
 - Codex sandbox内のtool commandが`agent-family issue create`でbroker socketへ接続できず、`error: family intake request failed`（exit 1）になっていました。Codex 0.153.4のLinux sandboxは既定でcommandのnetworkを切り（`CODEX_SANDBOX_NETWORK_DISABLED=1`、追加seccomp filter）、`socket(AF_INET)`と`connect(AF_UNIX)`をEPERMで拒否します。`profiles/codex/config.toml`に`[sandbox_workspace_write] network_access = true`を追加し、sandbox内commandにPodman containerと同じnetwork到達性を与えます。`--github-broker`のgit操作とegress proxy経由のcommandも同じ経路で失敗していたはずで、この設定で解消します。`sandbox_mode`、`default_permissions`、`features.network_proxy`は設定しません。

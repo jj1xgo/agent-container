@@ -77,9 +77,15 @@ def ensure_codex_sandbox_network(config_file: Path) -> None:
 
 def update_codex_handover_profile(profile_root: Path, codex_home: Path) -> None:
     config_file = codex_home / "config.toml"
-    rules_file = codex_home / "rules/default.rules"
+    rules_dir = codex_home / "rules"
+    rules_file = rules_dir / "default.rules"
     skill_file = codex_home / "skills/handover/SKILL.md"
     version_file = codex_home / "managed-profile.version"
+    if rules_dir.is_symlink():
+        raise ValueError(f"managed profile path must not be a symlink: {rules_dir}")
+    if not rules_dir.exists():
+        # Managed profile version 1 predates the approval rules directory.
+        shutil.copytree(profile_root / "rules", rules_dir, symlinks=False)
     for path in (config_file, rules_file, skill_file, version_file):
         if path.is_symlink():
             raise ValueError(f"managed profile path must not be a symlink: {path}")
