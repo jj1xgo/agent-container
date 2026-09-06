@@ -10,6 +10,30 @@ from typing import BinaryIO, Callable, Iterable
 HEADER_BYTES = 4
 
 
+class FrameError(ValueError):
+    """Every framing failure. Messages are unchanged from stage 1; only the class is specific."""
+
+
+class FrameIncomplete(FrameError):
+    """Fewer bytes than the header or the announced body."""
+
+
+class FrameSizeError(FrameError):
+    """A zero, oversized, or otherwise unacceptable length."""
+
+
+class FrameJsonError(FrameError):
+    """The body is not the accepted JSON subset."""
+
+
+class FrameSchemaError(FrameError):
+    """The decoded object or the values to encode do not match the schema."""
+
+
+class StreamError(FrameError):
+    """Reading from or writing to the underlying stream failed."""
+
+
 @dataclass(frozen=True)
 class JsonOptions:
     ensure_ascii: bool = True
@@ -57,9 +81,9 @@ def encode_frame(schema: FrameSchema, values: dict[str, Any]) -> bytes:
             separators=options.separators,
         ).encode(options.encoding)
     except (TypeError, UnicodeEncodeError, ValueError):
-        raise ValueError(f"{schema.label} is invalid") from None
+        raise FrameSchemaError(f"{schema.label} is invalid") from None
     if not body or len(body) > schema.max_bytes:
-        raise ValueError(f"{schema.label} is too large")
+        raise FrameSizeError(f"{schema.label} is too large")
     return struct.pack(">I", len(body)) + body
 
 
@@ -70,13 +94,13 @@ def decode_frame(
     json_decoder: Callable[[bytes], Any] | None = None,
 ) -> tuple[dict[str, Any], int]:
     if not isinstance(data, bytes) or len(data) < HEADER_BYTES:
-        raise ValueError(f"{schema.frame_prefix} frame is incomplete")
+        raise FrameIncomplete(f"{schema.frame_prefix} frame is incomplete")
     length = struct.unpack(">I", data[:HEADER_BYTES])[0]
     if length == 0 or length > schema.max_bytes:
-        raise ValueError(f"{schema.frame_prefix} frame size is invalid")
+        raise FrameSizeError(f"{schema.frame_prefix} frame size is invalid")
     consumed = HEADER_BYTES + length
     if len(data) < consumed:
-        raise ValueError(f"{schema.frame_prefix} frame is incomplete")
+        raise FrameIncomplete(f"{schema.frame_prefix} frame is incomplete")
     if json_decoder is not None:
         decoded = json_decoder(data[HEADER_BYTES:consumed])
     else:
@@ -88,21 +112,29 @@ def decode_frame(
                 parse_constant=_reject_constant,
             )
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-            raise ValueError(f"{schema.frame_prefix} JSON is invalid") from None
+            raise FrameJsonError(f"{schema.frame_prefix} JSON is invalid") from None
     if not isinstance(decoded, dict) or set(decoded) != schema.fields:
-        raise ValueError(f"{schema.label} schema is invalid")
+        raise FrameSchemaError(f"{schema.label} schema is invalid")
     return decoded, consumed
 
 
-def read_exact(stream: BinaryIO, size: int, *, label: str) -> bytes:
+def read_exact(
+    stream: BinaryIO, size: int, *, label: str, initial_eof: bool = False
+) -> bytes:
     output = bytearray()
     while len(output) < size:
         try:
             chunk = stream.read(size - len(output))
         except (OSError, TypeError, ValueError):
-            raise ValueError(f"{label} is invalid") from None
-        if not isinstance(chunk, bytes) or not chunk or len(chunk) > size - len(output):
-            raise ValueError(f"{label} is incomplete")
+            raise StreamError(f"{label} is invalid") from None
+        if not isinstance(chunk, bytes):
+            raise StreamError(f"{label} is incomplete")
+        if not chunk:
+            if initial_eof and not output:
+                return b""
+            raise StreamError(f"{label} is incomplete")
+        if len(chunk) > size - len(output):
+            raise StreamError(f"{label} is incomplete")
         output.extend(chunk)
     return bytes(output)
 
@@ -111,11 +143,11 @@ def read_frame(schema: FrameSchema, stream: BinaryIO) -> dict[str, Any]:
     header = read_exact(stream, HEADER_BYTES, label=schema.stream_label)
     length = struct.unpack(">I", header)[0]
     if length == 0 or length > schema.max_bytes:
-        raise ValueError(f"{schema.frame_prefix} frame size is invalid")
+        raise FrameSizeError(f"{schema.frame_prefix} frame size is invalid")
     body = read_exact(stream, length, label=schema.stream_label)
     decoded, consumed = decode_frame(schema, header + body)
     if consumed != len(header) + len(body):
-        raise ValueError(f"{schema.frame_prefix} frame is invalid")
+        raise FrameError(f"{schema.frame_prefix} frame is invalid")
     return decoded
 
 
@@ -129,7 +161,7 @@ def write_all(stream: BinaryIO, frame: bytes, *, label: str) -> None:
             or written <= 0
             or written > len(frame) - offset
         ):
-            raise ValueError(f"{label} write failed")
+            raise StreamError(f"{label} write failed")
         offset += written
     stream.flush()
 
@@ -141,7 +173,7 @@ def write_chunk_stream(
     transferred = 0
     for chunk in chunks:
         if not isinstance(chunk, bytes) or not chunk or len(chunk) > maximum_chunk:
-            raise ValueError(f"{label} chunk is invalid")
+            raise FrameSizeError(f"{label} chunk is invalid")
         stream.write(struct.pack(">I", len(chunk)))
         stream.write(chunk)
         transferred += len(chunk)
@@ -169,8 +201,8 @@ def iter_chunk_stream(
         if length == 0:
             return
         if length > maximum_chunk:
-            raise ValueError(f"{label} chunk is invalid")
+            raise FrameSizeError(f"{label} chunk is invalid")
         transferred += length
         if transferred > maximum_total:
-            raise ValueError(f"{label} is too large")
+            raise FrameSizeError(f"{label} is too large")
         yield read_bytes(length, False)
