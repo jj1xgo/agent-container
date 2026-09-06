@@ -123,22 +123,22 @@ class ClaudeLauncherTest(unittest.TestCase):
             )
             self.assertEqual(observed, (True, True, False))
 
-    def test_exec_claude_sets_parent_token_without_global_scrub(self) -> None:
+    def test_exec_claude_sets_parent_token_and_global_scrub(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             token_file = self.write_token(Path(temporary))
             observed: dict[str, object] = {}
 
             def fake_execvpe(program, argv, environment):
                 observed["has_token"] = "CLAUDE_CODE_OAUTH_TOKEN" in environment
-                observed["has_scrub"] = (
-                    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB" in environment
+                observed["scrub"] = environment.get(
+                    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
                 )
                 raise ExecObserved
 
             with patch.dict(
                 os.environ,
                 {
-                    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
+                    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "0",
                     "CLAUDE_CONFIG_DIR": temporary,
                 },
             ):
@@ -147,7 +147,7 @@ class ClaudeLauncherTest(unittest.TestCase):
 
             self.assertEqual(
                 observed,
-                {"has_token": True, "has_scrub": False},
+                {"has_token": True, "scrub": "1"},
             )
 
     def test_exec_claude_forces_demo_mode_over_caller_environment(self) -> None:

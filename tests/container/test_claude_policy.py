@@ -189,7 +189,7 @@ class ClaudeManagedPolicyTest(unittest.TestCase):
         mcp = {"mcpServers": {}}
         mutations = {
             "sandbox disabled": lambda value: value["sandbox"].update(enabled=False),
-            "strong nested": lambda value: value["sandbox"].update(enableWeakerNestedSandbox=False),
+            "weak nested": lambda value: value["sandbox"].update(enableWeakerNestedSandbox=True),
             "Unix sockets blocked": lambda value: value["sandbox"].pop("network", None),
             "unsandboxed fallback": lambda value: value["sandbox"].update(allowUnsandboxedCommands=True),
             "no fail closed": lambda value: value["sandbox"].update(failIfUnavailable=False),

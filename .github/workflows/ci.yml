@@ -197,7 +197,7 @@ jobs:
           fi
           cat "$podman_log" >&2
           test "$podman_status" -eq 0
-          grep -F "Ran 16 tests" "$podman_log"
+          grep -F "Ran 17 tests" "$podman_log"
           if grep -F "skipped" "$podman_log"; then
             exit 1
           fi

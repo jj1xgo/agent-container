@@ -349,7 +349,7 @@ project固有のDebian packageやNode.js versionは、対象repositoryの`.agent
 
 ## Security boundary
 
-runtimeはrootless Podman、read-only root filesystem、capability削除、`no-new-privileges`、限定したmountを使用します。agent runtimeはagentのnested sandboxが`/proc`をmountできるようPodman既定の`/proc` maskだけを外し、`/sys`のmaskは維持します。Codex sandbox内のtool commandはcontainerと同じnetwork到達性を持ち、network境界はPodman側で与えます。外向きnetworkは既定ではdomain allowlistされていません。project単位のopt-inでexact-domain allowlistを有効にできます。containerは被害範囲を狭める境界であり、agentへ渡したcredentialの完全な秘密保持を保証するものではありません。
+runtimeはrootless Podman、read-only root filesystem、capability削除、`no-new-privileges`、限定したmountを使用します。agent runtimeはagentのnested sandboxが`/proc`をmountできるようPodman既定の`/proc` maskだけを外し、`/sys`のmaskは維持します。Codex sandbox内のtool commandはcontainerと同じnetwork到達性を持ち、network境界はPodman側で与えます。外向きnetworkは既定ではdomain allowlistされていません。project単位のopt-inでexact-domain allowlistを有効にできます。containerは被害範囲を狭める境界であり、agentへ渡したcredentialの完全な秘密保持を保証するものではありません。Claudeのnested sandboxはstrong mode（`enableWeakerNestedSandbox=false`）で動き、launcherが`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`を設定して全subprocessからcredentialを除去します。
 
 `main`への直接push、既存branchの更新、merge、release、repository削除は標準操作に含みません。変更ごとに新しい作業branchを作り、必要なら新しいPRでreviewしてください。
 
