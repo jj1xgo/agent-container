@@ -45,7 +45,7 @@ egressの実Codex検証で見つかったsequence不整合は、stage 1のrefact
 
 実施順はPhase番号と一致する。
 
-Family実Codex intakeは新規pending／audit追加0件で未達です。診断harnessの通常spec保持・出力分離・判定を見直し、一時test 13件がPASSしました。外部接続なしの実CLI＋模擬APIでは、固定tool callがsandboxの`/proc` mount拒否で失敗しても`command_execution` eventが出ないことを再現しました。event 0件から「toolを呼ばなかった」とした解釈は撤回します。最小bwrap fixtureでuser＋PID namespace作成は成功し、`--proc /proc`追加時だけ失敗するところまで切り分けました。通常承認引数の有無でofflineの失敗は変わりません。kernel内部の拒否条件、実認証runとの因果関係、安全な修正は未確定で、実認証の追加実行は停止したままです。live stateと権限設定は変更していません。
+Family実Codex intakeは新規pending／audit追加0件で未達のままです。診断で切り分けたsandboxの`/proc` mount拒否は、Podman既定の`/proc` masked／read-only submountがbwrapのuser namespaceでlocked child mountとなり、kernelの`mount_too_revealing`（`fs/namespace.c`）が新しいproc mountを拒否するものと確定し、独立修正PR #108（main `425e944`）でCodex／Claude runtime specだけに`--security-opt=unmask=/proc/*`を追加しました。offlineの`codex --sandbox workspace-write sandbox`は実spec argvで修正前exit 1、修正後exit 0で、real Podman gateは15件へ更新しています。実認証runとの因果関係は未確認で、Family実Codex intakeの再実行は利用者の停止指示を維持したまま`not run`です。live stateと権限設定は変更していません。
 
 1. Phase 6で、後続機能が共有するbroker kernelを固定する。
 2. Phase 7で、安全なVault原本と実行用copyの同期を作る。

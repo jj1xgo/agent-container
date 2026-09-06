@@ -24,9 +24,9 @@ PYTHONPATH=src python3 -m unittest tests.integration.test_family_forced_unknown 
 git diff --check
 ```
 
-固定期待値はCodex suiteは`Ran 48 tests ... OK`、container suiteは`Ran 1119 tests ... OK`、socket suiteは`Ran 18 tests ... OK`、forced-unknown fixtureは`Ran 4 tests ... OK`です。すべてのcommandでunexpected skipは0件を要求し、件数不一致または1件でも想定外skipがあればPASSにしません。host生成署名、duplicate denial、content-free audit、credential non-exposure、terminal cleanup、forced unknownとcreated / not-created reconciliationがunit／socket testで通ったことをtest名と件数で記録します。秘密値やcanonical本文を記録しません。
+固定期待値はCodex suiteは`Ran 48 tests ... OK`、container suiteは`Ran 1120 tests ... OK`、socket suiteは`Ran 18 tests ... OK`、forced-unknown fixtureは`Ran 4 tests ... OK`です。すべてのcommandでunexpected skipは0件を要求し、件数不一致または1件でも想定外skipがあればPASSにしません。host生成署名、duplicate denial、content-free audit、credential non-exposure、terminal cleanup、forced unknownとcreated / not-created reconciliationがunit／socket testで通ったことをtest名と件数で記録します。秘密値やcanonical本文を記録しません。
 
-2026-09-05、利用者承認によりPhase 6-6の基準`e2ce4a9`に合わせ、期待件数だけを44／976から48／1111へ更新しました。実行command、検証項目、skip禁止と件数一致の条件は維持します。過去の観測表の件数は当時の実測として保持します。 続いてPR #107の独立修正を取り込んだ基準`7a9e927`では回帰test 8件を追加したため、container期待件数のみ1119へ更新しました。
+2026-09-05、利用者承認によりPhase 6-6の基準`e2ce4a9`に合わせ、期待件数だけを44／976から48／1111へ更新しました。実行command、検証項目、skip禁止と件数一致の条件は維持します。過去の観測表の件数は当時の実測として保持します。 続いてPR #107の独立修正を取り込んだ基準`7a9e927`では回帰test 8件を追加したため、container期待件数のみ1119へ更新しました。 さらにPR #108の独立修正（agent runtimeの`/proc` unmask）を取り込んだ基準`425e944`では、unit test 1件とreal Podman test 1件を追加したため、container期待件数を1120、Podman suite期待件数を15へ更新しました。
 
 ## 2. Real Podman gate
 
@@ -37,7 +37,7 @@ bin/agentctl --image localhost/agent-family-test:local build
 AGENT_CONTAINER_RUN_SOCKET_INTEGRATION=1 AGENT_CONTAINER_RUN_PODMAN_INTEGRATION=1 AGENT_FAMILY_TEST_IMAGE=localhost/agent-family-test:local PYTHONPATH=src python3 -m unittest tests.integration.test_project_image_podman tests.integration.test_egress_podman tests.integration.test_family_intake_podman -v
 ```
 
-最初のcommandは必ず検証対象のcheckout直下で実行します。`localhost/agent-family-test:local`はそのcheckoutから構築し、probe commandを実行できる使い捨てinstrumented imageだけに付けるlocal tagです。通常のproduction imageやremote registry imageへ置き換えません。固定期待値はPodman suiteは`Ran 14 tests ... OK`かつunexpected skip 0件です。件数不一致または1件でもskipがあればPASSにせず、Podman、socket許可、crun、imageのmissing prerequisiteごとにnot runと理由を個別記録します。
+最初のcommandは必ず検証対象のcheckout直下で実行します。`localhost/agent-family-test:local`はそのcheckoutから構築し、probe commandを実行できる使い捨てinstrumented imageだけに付けるlocal tagです。通常のproduction imageやremote registry imageへ置き換えません。固定期待値はPodman suiteは`Ran 15 tests ... OK`かつunexpected skip 0件です。件数不一致または1件でもskipがあればPASSにせず、Podman、socket許可、crun、imageのmissing prerequisiteごとにnot runと理由を個別記録します。
 
 Family gateではCodex pathとClaude pathの両方について、次を実観測します。
 
