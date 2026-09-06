@@ -91,37 +91,6 @@ def bind_private_listener(
     return listener
 
 
-def remove_runtime_artifacts(
-    *, capability_path: Path, socket_path: Path, run_dir: Path
-) -> bool:
-    failed = False
-    for path, expected_type in (
-        (capability_path, stat.S_ISREG),
-        (socket_path, stat.S_ISSOCK),
-    ):
-        try:
-            metadata = path.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError:
-            failed = True
-            continue
-        if not expected_type(metadata.st_mode):
-            failed = True
-            continue
-        try:
-            path.unlink()
-        except OSError:
-            failed = True
-    try:
-        run_dir.rmdir()
-    except FileNotFoundError:
-        pass
-    except OSError:
-        failed = True
-    return failed
-
-
 _PEER_CREDENTIAL_BYTES = 12
 _CONCURRENCY_MODES = frozenset({"inline", "thread"})
 

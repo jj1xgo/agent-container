@@ -18,7 +18,6 @@ from agent_container.broker.runtime import bind_private_listener
 from agent_container.broker.runtime import create_private_file
 from agent_container.broker.runtime import generate_capability
 from agent_container.broker.runtime import open_connection
-from agent_container.broker.runtime import remove_runtime_artifacts
 
 
 LABEL = "test broker"
@@ -147,63 +146,6 @@ class BindPrivateListenerTest(unittest.TestCase):
             fake.bind.assert_called_once_with(str(path))
             chmod.assert_called_once_with(path, 0o600)
             fake.listen.assert_called_once_with(7)
-
-
-class RemoveRuntimeArtifactsTest(unittest.TestCase):
-    def _layout(self, root: Path) -> tuple[Path, Path, Path]:
-        run_dir = root / "run"
-        run_dir.mkdir(mode=0o700)
-        capability = run_dir / "capability"
-        capability.write_text("c" * 43 + "\n", encoding="ascii")
-        capability.chmod(0o600)
-        return run_dir, capability, run_dir / "broker.sock"
-
-    def test_removes_capability_socket_and_directory(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ra-") as directory:
-            run_dir, capability, socket_path = self._layout(Path(directory))
-            listener = bind_private_listener(socket_path, backlog=1, label=LABEL)
-            listener.close()
-            failed = remove_runtime_artifacts(
-                capability_path=capability, socket_path=socket_path, run_dir=run_dir
-            )
-            self.assertFalse(failed)
-            self.assertFalse(run_dir.exists())
-
-    def test_missing_artifacts_are_not_failures(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ra-") as directory:
-            run_dir = Path(directory) / "run"
-            run_dir.mkdir(mode=0o700)
-            failed = remove_runtime_artifacts(
-                capability_path=run_dir / "capability",
-                socket_path=run_dir / "broker.sock",
-                run_dir=run_dir,
-            )
-            self.assertFalse(failed)
-            self.assertFalse(run_dir.exists())
-
-    def test_refuses_replaced_capability_and_keeps_directory(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ra-") as directory:
-            run_dir, capability, socket_path = self._layout(Path(directory))
-            capability.unlink()
-            capability.mkdir()
-            failed = remove_runtime_artifacts(
-                capability_path=capability, socket_path=socket_path, run_dir=run_dir
-            )
-            self.assertTrue(failed)
-            self.assertTrue(capability.is_dir())
-            self.assertTrue(run_dir.exists())
-
-    def test_refuses_replaced_socket_but_still_removes_capability(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ra-") as directory:
-            run_dir, capability, socket_path = self._layout(Path(directory))
-            socket_path.write_text("replacement", encoding="ascii")
-            failed = remove_runtime_artifacts(
-                capability_path=capability, socket_path=socket_path, run_dir=run_dir
-            )
-            self.assertTrue(failed)
-            self.assertFalse(capability.exists())
-            self.assertTrue(socket_path.is_file())
-            self.assertTrue(run_dir.exists())
 
 
 class RuntimeError_(Exception):

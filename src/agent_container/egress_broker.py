@@ -8,12 +8,12 @@ import shutil
 import socket
 import threading
 
+from agent_container.broker.artifacts import RuntimeArtifacts
 from agent_container.broker.audit import AuditLog
 from agent_container.broker.runtime import allocate_run_dir
 from agent_container.broker.runtime import bind_private_listener
 from agent_container.broker.runtime import create_private_file
 from agent_container.broker.runtime import generate_capability
-from agent_container.broker.runtime import remove_runtime_artifacts
 from agent_container.egress_broker_protocol import EgressRequest
 from agent_container.egress_broker_protocol import PROTOCOL_VERSION
 from agent_container.egress_policy import EgressPolicy
@@ -58,6 +58,7 @@ class EgressBrokerSession:
     audit_file: Path
     _allowed_domains: frozenset[str] = field(repr=False)
     _capability: str = field(repr=False)
+    _artifacts: RuntimeArtifacts = field(repr=False)
     _expected_sequence: int = field(default=1, repr=False)
     _listener: socket.socket | None = field(default=None, repr=False)
     _closed: bool = field(default=False, repr=False)
@@ -103,6 +104,17 @@ class EgressBrokerSession:
         except Exception:
             shutil.rmtree(run_dir)
             raise
+        try:
+            artifacts = RuntimeArtifacts.open(run_dir, label=_LABEL)
+        except Exception:
+            shutil.rmtree(run_dir)
+            raise
+        try:
+            artifacts.track_file("capability")
+        except Exception:
+            artifacts.close()
+            shutil.rmtree(run_dir)
+            raise
         return cls(
             project_id=layout.project_id,
             agent=selected_agent,
@@ -114,6 +126,7 @@ class EgressBrokerSession:
             audit_file=audit_file,
             _allowed_domains=allowed,
             _capability=capability,
+            _artifacts=artifacts,
         )
 
     @property
@@ -152,6 +165,11 @@ class EgressBrokerSession:
         listener = bind_private_listener(
             self.socket_path, backlog=backlog, label=_LABEL
         )
+        try:
+            self._artifacts.track_socket("broker.sock")
+        except Exception:
+            listener.close()
+            raise
         self._listener = listener
         return listener
 
@@ -210,11 +228,7 @@ class EgressBrokerSession:
                 cleanup_failed = True
             else:
                 self._listener = None
-        if remove_runtime_artifacts(
-            capability_path=self.capability_path,
-            socket_path=self.socket_path,
-            run_dir=self.run_dir,
-        ):
+        if self._artifacts.remove():
             cleanup_failed = True
         if cleanup_failed:
             raise ValueError("egress broker cleanup failed")
