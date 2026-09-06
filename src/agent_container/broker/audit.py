@@ -1,5 +1,6 @@
 """Private append-only audit log shared by every broker."""
 
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,34 @@ from typing import TextIO
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+_STATUSES = frozenset({"ok", "denied", "error"})
+_TEXT_KEYS = ("run", "project", "operation")
+
+
+def validate_envelope(record: Mapping[str, object], *, label: str) -> None:
+    """Every broker audit line carries the same five keys; broker keys pass through."""
+    error = ValueError(f"{label} record is invalid")
+    if not isinstance(record, Mapping):
+        raise error
+    timestamp = record.get("timestamp")
+    if not isinstance(timestamp, str):
+        raise error
+    try:
+        datetime.fromisoformat(timestamp)
+    except ValueError:
+        raise error from None
+    for key in _TEXT_KEYS:
+        value = record.get(key)
+        if not isinstance(value, str) or not value:
+            raise error
+    status = record.get("status")
+    if not isinstance(status, str) or status not in _STATUSES:
+        raise error
+    if "stage" in record:
+        stage = record["stage"]
+        if not isinstance(stage, str) or not stage:
+            raise error
 
 
 def append_text_record(stream: TextIO, record: dict[str, object]) -> None:
@@ -67,6 +96,7 @@ class AuditLog:
         os.close(self.open_descriptor())
 
     def append(self, record: Mapping[str, object]) -> None:
+        validate_envelope(record, label=self.label)
         body = (
             json.dumps(dict(record), ensure_ascii=True, separators=(",", ":")) + "\n"
         ).encode("ascii")
