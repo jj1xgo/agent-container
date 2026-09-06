@@ -37,7 +37,7 @@ Phase 7〜10が「Obsidianを第2の脳として使う」ための中心範囲�
 
 ## 現在の実施順
 
-Phase 6-5はFamilyのframe codecとaccept iterationを既存kernelへ共通化する。PID登録はrequest毎の検証を保持し、readiness待機・lifecycle・audit transactionの完全統一はstage 2で扱う。詳細は[6-5計画](superpowers/plans/2026-09-05-broker-kernel-6-5-family.md)を参照する。
+Phase 6 stage 1（6-1〜6-5）のcodeは`main`へmerge済みで、6-6（stage 1の実host smoke、`CHANGELOG.md` Validation）は未実施である。stage 2の設計は[stage 2設計](superpowers/specs/2026-09-06-broker-kernel-stage2-design.md)で固定した。範囲はkernel保証の強化（fail-closed lifecycle、identity付きcleanup、接続毎peer policy、frame errorの種別化、audit envelope）とhandover／egress／GitHubの完全統一で、Familyはpeer policyとcleanupの共通部品に乗せ、audit transactionとMountは保持する。stage 2の最初のcode PRをmergeする前に現行`main`で6-6を実施し、stage 1の証拠を先に固定する。stage 2完了時に既存smoke手順書を変更なしで再実行してPhase 6を閉じる。
 
 実施順はPhase番号と一致する。
 

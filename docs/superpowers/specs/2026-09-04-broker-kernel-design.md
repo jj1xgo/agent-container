@@ -19,7 +19,7 @@ agent-containerは、containerの中のagentがhost側の資源へ到達する�
 2026-09-04のbrainstormingで次を決めた。
 
 - roadmapのPhase 6定義に含まれていた「project、agent、task、eventのhost側contract」のうち、task・event・agentの新しいdomain contractはPhase 6では**設計しない**。最初の消費者はPhase 8のleaseであり、消費者不在で抽象を固定する危険が大きい。Phase 8の完了条件へ移す。Phase 6は既存4 brokerの共通kernel化に集中する。
-- kernel化は**2段階**で行う。stage 1はwire形式、audit行、既存testを変えない純粋なrefactorでkernelを抽出し、4 brokerを乗せ替える。stage 2はFamily intakeが持つ強い保証（readiness gate、fail-closed cleanup）と統一audit schemaをkernelへ入れて全brokerに適用する。Phase 6はstage 1とstage 2の両方が終わって完了とする。本文書はstage 1の設計であり、stage 2は別の設計文書で扱う。
+- kernel化は**2段階**で行う。stage 1はwire形式、audit行、既存testを変えない純粋なrefactorでkernelを抽出し、4 brokerを乗せ替える。stage 2はFamily intakeが持つ強い保証（readiness gate、fail-closed cleanup）と統一audit schemaをkernelへ入れて全brokerに適用する。Phase 6はstage 1とstage 2の両方が終わって完了とする。本文書はstage 1の設計であり、stage 2は[別の設計文書](2026-09-06-broker-kernel-stage2-design.md)で扱う。
 - Phase 8の一部（agent別worktreeの分離だけ）の前倒しは**しない**。worktree分離はlease（誰がどこを書いてよいか）と不可分で、分離だけ入れても同一branchへの競合は防げない。roadmapの「検討する余地」はこの判断で閉じる。
 - kernelの形は、project毎・broker毎の4 socketというtopologyを変えない**合成可能なpackage**とする。project毎1 socketへのmultiplex案は、mount、capabilityの粒度、container側clientが全て変わりstage 1の原則に反するうえ、1つの故障で全brokerが止まり、capabilityの最小権限が後退するため採らない。共通helperだけを1 fileに寄せる案は、重複の本体であるruntime lifecycleとauditを解決しないため採らない。
 
@@ -147,7 +147,7 @@ kernel固有のunit testは、既存brokerがばらばらに持っていた境�
 stage 2を後から入れてもstage 1の設計を壊さないよう、kernelの内側に閉じた3つの継ぎ目を用意する。stage 1ではどれも既定値で動く。
 
 1. **readiness gate。** `SocketBrokerRuntime`は`ReadinessGate`を受け取り、`wait`が返るまでacceptしない。既定は`AlwaysReady`。FamilyのPID登録はrequest毎の検証なのでstage 1ではこのseamに載せない。stage 2で拒否timingと停止中の扱いを設計し、「container側runtimeが登録するまで受けない」保証の適用範囲を決める。
-2. **fail-closed cleanup。** runtimeの`__exit__`と失敗時のcleanupは「socket → capability → run directory」の固定順序で実装し、順序と冪等性をtestで固定する。stage 2でfamilyの`_cleanup_artifacts`（失敗時にも確実に消す、部分残骸の検出）をこの1か所へ持ち込む。
+2. **fail-closed cleanup。** runtimeの`__exit__`と失敗時のcleanupは「capability → socket → run directory」の固定順序で実装し、順序と冪等性をtestで固定する（6-2の実装と計画はこの順序であり、本文書の当初記述「socket → capability」はstage 2設計K2で訂正した）。stage 2でfamilyの`_cleanup_artifacts`（失敗時にも確実に消す、部分残骸の検出）をこの1か所へ持ち込む。
 3. **audit envelope。** `AuditLog.append(record)`はstage 1ではrecordをそのまま書く。stage 2で共通key（`timestamp`、`project`、`run`、`operation`、`status`）を必須にし、broker固有keyを`details`へ寄せるか、timestamp形式を統一するかを決める。stage 1では4系統のkey差分を本文書（前節）に一覧化してある。
 
 stage 2で決めること（本文書では決めない）: 6-4で残したJSON／stream例外、lifecycle／cleanup、capability／audit openerの完全統一と保証変更、`PROTOCOL_VERSION`を2へ上げるか、`StateLayout`のbroker毎3点セットを畳むか（state migrationが要る）、Mount型と`podman.py`の統一、統一auditをPhase 10のObsidian UIがどう読むか。
