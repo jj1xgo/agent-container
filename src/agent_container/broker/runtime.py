@@ -202,6 +202,7 @@ class SocketBrokerRuntime:
     thread: Any | None = field(default=None, init=False)
     listener: Any | None = field(default=None, init=False, repr=False)
     error: BaseException | None = field(default=None, init=False, repr=False)
+    deactivate_error: BaseException | None = field(default=None, init=False, repr=False)
     exited: bool = field(default=False, init=False, repr=False)
     workers: set[Any] = field(default_factory=set, init=False, repr=False)
     worker_lock: threading.Lock = field(
@@ -325,12 +326,22 @@ class SocketBrokerRuntime:
         with self.worker_lock:
             return bool(self.workers)
 
+    def _try_deactivate(self) -> bool:
+        try:
+            self.deactivate()
+        except Exception as error:
+            self.deactivate_error = error
+            return False
+        self.deactivate_error = None
+        return True
+
     def stop(self, *, join_timeout: float) -> None:
         if self.exited:
             return
         self.stop_event.set()
+        deactivate_failed = False
         if not self.deactivate_after_join:
-            self.deactivate()
+            deactivate_failed = not self._try_deactivate()
         cleanup_failed = False
         if self.listener is not None:
             try:
@@ -347,18 +358,24 @@ class SocketBrokerRuntime:
         if self._join_workers(join_timeout):
             did_not_stop = True
         if self.deactivate_after_join:
-            self.deactivate()
+            deactivate_failed = not self._try_deactivate()
 
         if did_not_stop:
             raise self.error_type(f"{self.label} did not stop") from None
 
+        # Cleanup runs even after a failed deactivate: removing the socket and
+        # capability shrinks the exposed surface. The runtime still does not
+        # count as exited until deactivate has succeeded (fail-closed).
         try:
             self.close()
         except (OSError, ValueError):
             cleanup_failed = True
         else:
-            self.exited = True
+            if not deactivate_failed:
+                self.exited = True
 
+        if deactivate_failed:
+            raise self.error_type(f"{self.label} deactivate failed") from None
         if cleanup_failed:
             raise self.error_type(f"{self.label} cleanup failed") from None
         if self.error is not None:

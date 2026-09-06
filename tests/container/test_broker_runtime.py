@@ -294,6 +294,7 @@ def make_runtime(
     readiness=None,
     open_listener=None,
     close=None,
+    deactivate=None,
     **options,
 ) -> tuple[SocketBrokerRuntime, dict[str, int]]:
     calls = {"open": 0, "deactivate": 0, "close": 0, "backlog": 0}
@@ -303,7 +304,7 @@ def make_runtime(
         calls["backlog"] = backlog
         return listener
 
-    def deactivate() -> None:
+    def default_deactivate() -> None:
         calls["deactivate"] += 1
 
     def default_close() -> None:
@@ -316,7 +317,7 @@ def make_runtime(
         thread_name="test-broker",
         open_listener=open_listener or default_open,
         handler=handler or (lambda connection: 0),
-        deactivate=deactivate,
+        deactivate=deactivate or default_deactivate,
         close=close or default_close,
         error_type=RuntimeError_,
         backlog=4,
