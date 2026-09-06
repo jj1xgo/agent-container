@@ -181,6 +181,8 @@ class SocketBrokerRuntime:
     def __post_init__(self) -> None:
         if self.concurrency not in _CONCURRENCY_MODES:
             raise ValueError(f"{self.label} concurrency mode is invalid")
+        if self.raw_client and self.peer_policy is not None:
+            raise ValueError(f"{self.label} peer policy is unsupported")
 
     def start(self) -> None:
         if self.thread is not None or self.exited:

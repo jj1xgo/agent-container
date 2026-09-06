@@ -74,7 +74,7 @@ test: 順序、冪等性、各段階の差し替え（regular fileをsocketに�
 - `Connection` に `peer_pid` と `peer_gid` を追加し、`open_connection` は `SO_PEERCRED` の3値を全て保持する。
 - `PeerPolicy` protocol（`admit(connection) -> bool`）と既定実装 `SameUser`（`connection.peer_uid == os.getuid()`）を `broker/peer.py` に置く。
 - `admit_connection(client, *, timeout, policy) -> Connection | None` を公開helperとする。`open_connection` の後に `policy.admit` を評価し、拒否なら streamを閉じて `None` を返す（clientのcloseは呼び出し側）。拒否した接続からは1 byteも読まず、応答も書かない。`policy` が `None` なら常に許可する。policyが例外を出した場合はhandler例外と同じくruntimeの `failed` として扱う。
-- `SocketBrokerRuntime(peer_policy: PeerPolicy | None = None)` を追加し、`raw_client=False` のとき `_handle_client` が `admit_connection` を使う。既定は `None`（policy無し）で、brokerが明示的に渡す。
+- `SocketBrokerRuntime(peer_policy: PeerPolicy | None = None)` を追加し、`raw_client=False` のとき `_handle_client` が `admit_connection` を使う。既定は `None`（policy無し）で、brokerが明示的に渡す。`raw_client=True` と `peer_policy` の併用は policy が黙って無視される構成なので、`__post_init__` で `ValueError("<label> peer policy is unsupported")` として拒否する。
 
 既定を `SameUser` にしない理由: handoverとegressは `authorize` 内でuidを検査し `authentication` stageのaudit行を書く（`docs/phase2-smoke-test.md` L166がこの行を期待する）。kernelで先に落とすとこのaudit行が消える。
 

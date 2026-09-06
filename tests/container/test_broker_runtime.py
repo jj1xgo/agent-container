@@ -548,6 +548,14 @@ class SocketBrokerRuntimeTest(unittest.TestCase):
         self.assertEqual(str(raised.exception), "test broker failed")
         self.assertTrue(client.closed)
 
+    def test_raw_client_rejects_a_peer_policy(self) -> None:
+        class Deny:
+            def admit(self, connection: Connection) -> bool:
+                return False
+
+        with self.assertRaisesRegex(ValueError, "test broker peer policy is unsupported"):
+            make_runtime(FakeListener(), raw_client=True, peer_policy=Deny())
+
 
 class OpenConnectionTest(unittest.TestCase):
     def test_sets_timeout_reads_peer_uid_and_opens_an_unbuffered_stream(self) -> None:
