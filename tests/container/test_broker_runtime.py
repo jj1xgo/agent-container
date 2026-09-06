@@ -562,6 +562,49 @@ class SocketBrokerRuntimeTest(unittest.TestCase):
         self.assertNotIn("private-gate-marker", str(raised.exception))
         self.assertEqual(listener.accepts, 0)
 
+    def test_peer_policy_denial_skips_handler_and_closes_client(self) -> None:
+        denied = FakeClient(os.getuid())
+        admitted = FakeClient(os.getuid())
+        listener = FakeListener((denied, admitted))
+        seen: list[int] = []
+        handled = threading.Event()
+
+        class SecondOnly:
+            def admit(self, connection: Connection) -> bool:
+                return connection.client is admitted
+
+        def handler(connection: Connection) -> int:
+            seen.append(connection.peer_pid)
+            handled.set()
+            return 0
+
+        runtime, calls = make_runtime(listener, handler, peer_policy=SecondOnly())
+        runtime.start()
+        self.assertTrue(handled.wait(1))
+        runtime.stop(join_timeout=2)
+        self.assertEqual(seen, [1234])
+        self.assertTrue(denied.closed)
+        self.assertTrue(denied.stream.closed)
+        self.assertEqual(denied.stream.outgoing.getvalue(), b"")
+        self.assertIsNone(runtime.error)
+        self.assertEqual(calls["close"], 1)
+
+    def test_peer_policy_exception_is_a_runtime_failure(self) -> None:
+        client = FakeClient(os.getuid())
+        listener = FakeListener((client,))
+
+        class Explode:
+            def admit(self, connection: Connection) -> bool:
+                raise RuntimeError("private-policy-marker")
+
+        runtime, _ = make_runtime(listener, peer_policy=Explode())
+        runtime.start()
+        self.assertTrue(runtime.wait_failed(1))
+        with self.assertRaises(RuntimeError_) as raised:
+            runtime.stop(join_timeout=2)
+        self.assertEqual(str(raised.exception), "test broker failed")
+        self.assertTrue(client.closed)
+
 
 class OpenConnectionTest(unittest.TestCase):
     def test_sets_timeout_reads_peer_uid_and_opens_an_unbuffered_stream(self) -> None:
@@ -571,7 +614,7 @@ class OpenConnectionTest(unittest.TestCase):
         self.assertEqual(
             client.credential_calls, [(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)]
         )
-        self.assertEqual(connection, Connection(client, client.stream, 4040))
+        self.assertEqual(connection, Connection(client, client.stream, 4040, 1234, 5678))
 
 
 class ThreadedSocketBrokerRuntimeTest(unittest.TestCase):
