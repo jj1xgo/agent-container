@@ -199,6 +199,25 @@ class HandoverBrokerSessionTest(unittest.TestCase):
         self.session.close()
         self.assertFalse(run_dir.exists())
 
+    def test_close_keeps_a_replaced_socket_inode_even_when_it_is_a_socket(self) -> None:
+        run_dir = self.session.run_dir
+        listener = self.session.open_listener()
+        listener.close()
+        self.session.socket_path.unlink()
+        replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        replacement.bind(str(self.session.socket_path))
+        replacement.close()
+
+        with self.assertRaisesRegex(ValueError, "cleanup failed"):
+            self.session.close()
+        self.assertTrue(stat.S_ISSOCK(self.session.socket_path.lstat().st_mode))
+        self.assertFalse(self.session.capability_path.exists())
+        self.assertTrue(run_dir.exists())
+
+        self.session.socket_path.unlink()
+        self.session.close()
+        self.assertFalse(run_dir.exists())
+
     def test_close_refuses_replaced_capability_path(self) -> None:
         old_request = self.request()
         run_dir = self.session.run_dir
