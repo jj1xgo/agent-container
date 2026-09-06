@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 from unittest import mock
 
+from agent_container.broker.artifacts import RuntimeArtifacts
 from agent_container.github_broker import BrokerSession
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_protocol import BrokerRequest, BrokerResponse
@@ -47,6 +48,7 @@ def collect_golden() -> dict[str, object]:
             default_branch="main",
             protected_branches=("main",),
         )
+        artifacts = RuntimeArtifacts.open(root, label="broker")
         session = BrokerSession(
             policy=policy,
             run_id="0123456789abcdef",
@@ -55,6 +57,7 @@ def collect_golden() -> dict[str, object]:
             capability_path=root / "capability",
             audit_file=root / "events.jsonl",
             _capability="A" * 43,
+            _artifacts=artifacts,
         )
         with mock.patch("agent_container.github_broker.datetime") as clock:
             clock.now.return_value.isoformat.return_value = (

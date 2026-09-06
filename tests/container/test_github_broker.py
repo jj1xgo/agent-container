@@ -280,10 +280,70 @@ class BrokerSessionTest(unittest.TestCase):
             with self.subTest(values=values):
                 with self.assertRaises(ValueError):
                     self.session.audit(**values)  # type: ignore[arg-type]
-        self.assertFalse(self.session.audit_file.exists())
+        self.assertEqual(self.session.audit_file.read_bytes(), b"")
 
     def test_rejects_unsafe_state_root(self) -> None:
         self.session.close()
         os.chmod(self.root, 0o755)
         with self.assertRaises(PermissionError):
             BrokerSession.create(self.root, self.policy)
+
+    def test_create_validates_an_empty_private_audit_file(self) -> None:
+        self.assertTrue(self.session.audit_file.is_file())
+        self.assertEqual(self.session.audit_file.read_bytes(), b"")
+        self.assertEqual(stat.S_IMODE(self.session.audit_file.stat().st_mode), 0o600)
+
+    def test_deactivate_revokes_capability_without_removing_artifacts(self) -> None:
+        request = self.request()
+        self.session.deactivate()
+        self.assertEqual(self.session._capability, "")
+        self.assertTrue(self.session.capability_path.exists())
+        with self.assertRaisesRegex(ValueError, "closed"):
+            self.session.authorize(request)
+        with self.assertRaisesRegex(ValueError, "closed"):
+            self.session.audit(operation="pr-view", status="ok")
+        self.session.close()
+        self.assertFalse(self.session.run_dir.exists())
+
+    def test_close_refuses_replaced_capability_and_is_retryable(self) -> None:
+        run_dir = self.session.run_dir
+        self.session.capability_path.unlink()
+        self.session.capability_path.mkdir()
+        with self.assertRaisesRegex(ValueError, "broker cleanup failed"):
+            self.session.close()
+        self.assertTrue(self.session.capability_path.is_dir())
+        self.assertTrue(run_dir.exists())
+        self.assertEqual(self.session._capability, "")
+        self.session.capability_path.rmdir()
+        self.session.close()
+        self.assertFalse(run_dir.exists())
+        self.session.close()
+
+    def test_close_keeps_a_replaced_socket_inode_even_when_it_is_a_socket(self) -> None:
+        run_dir = self.session.run_dir
+        listener = self.session.open_listener()
+        # Keep the original inode alive while the replacement is bound: ext4
+        # reuses a freed inode number immediately.
+        self.session.socket_path.unlink()
+        replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        replacement.bind(str(self.session.socket_path))
+        replacement.close()
+        listener.close()
+
+        with self.assertRaisesRegex(ValueError, "broker cleanup failed"):
+            self.session.close()
+        self.assertTrue(stat.S_ISSOCK(self.session.socket_path.lstat().st_mode))
+        self.assertFalse(self.session.capability_path.exists())
+        self.assertTrue(run_dir.exists())
+
+        self.session.socket_path.unlink()
+        self.session.close()
+        self.assertFalse(run_dir.exists())
+
+    def test_audit_statuses_are_the_kernel_envelope_set(self) -> None:
+        for status in ("client-disconnected", "timeout"):
+            with self.subTest(status=status), self.assertRaisesRegex(
+                ValueError, "broker audit status is invalid"
+            ):
+                self.session.audit(operation="pr-view", status=status)
+        self.assertEqual(self.session.audit_file.read_bytes(), b"")
