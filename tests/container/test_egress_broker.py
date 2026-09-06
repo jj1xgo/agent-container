@@ -144,11 +144,14 @@ class EgressBrokerSessionTest(unittest.TestCase):
     def test_close_keeps_a_replaced_socket_inode_even_when_it_is_a_socket(self) -> None:
         run_dir = self.session.run_dir
         listener = self.session.open_listener()
-        listener.close()
+        # Keep the original listener's fd open while the replacement is
+        # created: ext4 immediately reuses a freed inode number, so closing
+        # it first would let the replacement land on the very same inode.
         self.session.socket_path.unlink()
         replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         replacement.bind(str(self.session.socket_path))
         replacement.close()
+        listener.close()
 
         with self.assertRaisesRegex(ValueError, "cleanup failed"):
             self.session.close()

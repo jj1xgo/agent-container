@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import socket
 import stat
 import tempfile
 import unittest
@@ -109,10 +110,18 @@ class RuntimeArtifactsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="ra-") as directory:
             run_dir = _run_dir(Path(directory))
             _capability(run_dir)
-            socket_path = _bind(run_dir)
+            socket_path = run_dir / "broker.sock"
+            original = bind_private_listener(socket_path, backlog=1, label=LABEL)
             artifacts = _tracked(run_dir)
+            # Keep the original listener's fd open while the replacement is
+            # created: ext4 immediately reuses a freed inode number, so
+            # closing it first would let the replacement land on the very
+            # same inode.
             socket_path.unlink()
-            _bind(run_dir)
+            replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            replacement.bind(str(socket_path))
+            replacement.close()
+            original.close()
             self.assertTrue(artifacts.remove())
             self.assertTrue(stat.S_ISSOCK(socket_path.lstat().st_mode))
             self.assertFalse((run_dir / "capability").exists())
