@@ -28,6 +28,8 @@ class RuntimeArtifacts:
     run_dir: Path
     label: str
     _descriptor: int = field(default=-1, repr=False)
+    _parent_descriptor: int = field(default=-1, repr=False)
+    _name: str = field(default="", repr=False)
     _directory_identity: Identity | None = field(default=None, repr=False)
     _files: list[_Tracked] = field(default_factory=list, repr=False)
     _sockets: list[_Tracked] = field(default_factory=list, repr=False)
@@ -35,7 +37,12 @@ class RuntimeArtifacts:
 
     @classmethod
     def open(cls, run_dir: Path, *, label: str) -> "RuntimeArtifacts":
-        descriptor = os.open(run_dir, _DIRECTORY_FLAGS)
+        parent = os.open(run_dir.parent, _DIRECTORY_FLAGS)
+        try:
+            descriptor = os.open(run_dir.name, _DIRECTORY_FLAGS, dir_fd=parent)
+        except BaseException:
+            os.close(parent)
+            raise
         try:
             metadata = os.fstat(descriptor)
             if (
@@ -46,11 +53,14 @@ class RuntimeArtifacts:
                 raise PermissionError(f"{label} run directory is not private")
         except BaseException:
             os.close(descriptor)
+            os.close(parent)
             raise
         return cls(
             run_dir=run_dir,
             label=label,
             _descriptor=descriptor,
+            _parent_descriptor=parent,
+            _name=run_dir.name,
             _directory_identity=(metadata.st_dev, metadata.st_ino),
         )
 
@@ -103,7 +113,9 @@ class RuntimeArtifacts:
 
     def _remove_directory(self) -> bool:
         try:
-            current = self.run_dir.lstat()
+            current = os.stat(
+                self._name, dir_fd=self._parent_descriptor, follow_symlinks=False
+            )
         except FileNotFoundError:
             return True
         except OSError:
@@ -111,10 +123,12 @@ class RuntimeArtifacts:
         if (
             not stat.S_ISDIR(current.st_mode)
             or (current.st_dev, current.st_ino) != self._directory_identity
+            or stat.S_IMODE(current.st_mode) != 0o700
+            or current.st_uid != os.getuid()
         ):
             return False
         try:
-            self.run_dir.rmdir()
+            os.rmdir(self._name, dir_fd=self._parent_descriptor)
         except FileNotFoundError:
             return True
         except OSError:
@@ -147,3 +161,7 @@ class RuntimeArtifacts:
             descriptor = self._descriptor
             self._descriptor = -1
             os.close(descriptor)
+        if self._parent_descriptor >= 0:
+            parent = self._parent_descriptor
+            self._parent_descriptor = -1
+            os.close(parent)

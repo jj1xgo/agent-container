@@ -1,11 +1,11 @@
 """Private append-only audit log shared by every broker."""
 
+from collections.abc import Mapping
 from datetime import datetime
 import json
 import os
 from pathlib import Path
 import stat
-from typing import Mapping
 from typing import TextIO
 
 

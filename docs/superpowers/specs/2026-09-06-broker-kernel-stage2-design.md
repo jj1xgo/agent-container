@@ -59,11 +59,11 @@ test: `deactivate` に例外を注入する4条件（early／late × inline／th
 
 `remove_runtime_artifacts` を `RuntimeArtifacts` に置き換える。
 
-- `RuntimeArtifacts.open(run_dir, *, label)`: run directoryを `O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC` で開いてfdを保持し、`fstat` で directory・mode `0700`・実行user所有を要求し、dev／inoを捕捉する。
+- `RuntimeArtifacts.open(run_dir, *, label)`: 親directoryを `O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC` で開いてfdを保持し、その `dir_fd` 相対でrun directoryを同じflagで開いてfdを保持する。run directoryは `fstat` で directory・mode `0700`・実行user所有を要求し、dev／inoを捕捉する。Familyの `_run_parent_descriptor`／`_run_descriptor` と同じ形で、S2-3のF2はこの2つのfdへ委譲する。
 - `track_file(name)`／`track_socket(name)`: 作成直後にdir_fd経由で `stat(follow_symlinks=False)` し、型（S_ISREG／S_ISSOCK）とdev／inoを捕捉する。Familyのようにcapability fileを持たない構成は `track_file` を呼ばない。
 - `track_*` の時点で名前が存在しない場合（bindをmockしたtestなど）はidentity無しとして記録し、`remove()` 時にその名前へ何かが現れていればkernelが作ったものではないので残して失敗とする。
-- `remove() -> bool`（Trueで失敗）: 順序は **file → socket → run directory** とする。各名前をdir_fd経由でstatし、`FileNotFoundError` は成功扱い、それ以外の `OSError` は失敗、型またはdev／inoが捕捉値と異なれば **残して失敗**、一致すれば `unlink(name, dir_fd=...)`。run directoryはpathで `lstat` し、dev／inoが捕捉値と一致するときだけ `rmdir`。`FileNotFoundError` は成功扱い、その他の `OSError`（差し替えを残した結果の `ENOTEMPTY` を含む）は失敗。
-- 成功した `remove()` はfdを閉じ、以後の `remove()` は何もせず `False` を返す（冪等）。失敗した `remove()` はfdを保持し、次の `remove()` は再試行する（handover／egressの「差し替えを取り除いてからcloseし直す」既存契約を保つ）。`close()` はfdだけ閉じる。
+- `remove() -> bool`（Trueで失敗）: 順序は **file → socket → run directory** とする。各名前をdir_fd経由でstatし、`FileNotFoundError` は成功扱い、それ以外の `OSError` は失敗、型またはdev／inoが捕捉値と異なれば **残して失敗**、一致すれば `unlink(name, dir_fd=...)`。run directoryは親の `dir_fd` 相対で `stat(follow_symlinks=False)` し、directory型・dev／ino一致・mode `0700`・実行user所有のときだけ `rmdir(name, dir_fd=...)`。`FileNotFoundError` は成功扱い、その他の `OSError`（差し替えを残した結果の `ENOTEMPTY` を含む）は失敗。
+- 成功した `remove()` は両方のfdを閉じ、以後の `remove()` は何もせず `False` を返す（冪等）。失敗した `remove()` は両方のfdを保持し、次の `remove()` は再試行する（handover／egressの「差し替えを取り除いてからcloseし直す」既存契約を保つ）。`close()` は両方のfdだけ閉じる。
 
 stage 1設計の「socket → capability → run directory」という記述は本節の順序に訂正する（実装と6-2計画は当初からcapability → socketであり、handover／egress testが固定している）。
 

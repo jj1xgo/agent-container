@@ -58,6 +58,8 @@ class RuntimeArtifactsTest(unittest.TestCase):
             self.assertFalse(run_dir.exists())
             with self.assertRaises(OSError):
                 os.fstat(artifacts._descriptor)
+            with self.assertRaises(OSError):
+                os.fstat(artifacts._parent_descriptor)
             self.assertFalse(artifacts.remove())
 
     def test_missing_artifacts_are_not_failures(self) -> None:
@@ -137,4 +139,43 @@ class RuntimeArtifactsTest(unittest.TestCase):
             self.assertTrue(artifacts.remove())
             self.assertTrue(run_dir.is_dir())
             self.assertTrue(moved.is_dir())
+            descriptor = artifacts._descriptor
+            parent_descriptor = artifacts._parent_descriptor
             artifacts.close()
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+            with self.assertRaises(OSError):
+                os.fstat(parent_descriptor)
+
+    def test_renamed_run_directory_still_has_its_contents_removed_through_the_fd(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="ra-") as directory:
+            run_dir = _run_dir(Path(directory))
+            _capability(run_dir)
+            _bind(run_dir)
+            artifacts = _tracked(run_dir)
+            moved = Path(directory) / "moved"
+            run_dir.rename(moved)
+            # The tracked name no longer resolves under the parent dir_fd, so
+            # the run-directory stat raises FileNotFoundError there: that is
+            # treated the same as "already gone" (not a failure), matching
+            # Family's `_cleanup_artifacts`. rmdir is never attempted, so the
+            # renamed directory itself survives untouched.
+            self.assertFalse(artifacts.remove())
+            self.assertFalse((moved / "capability").exists())
+            self.assertFalse((moved / "broker.sock").exists())
+            self.assertTrue(moved.is_dir())
+            artifacts.close()
+
+    def test_open_rejects_a_run_directory_with_a_symlinked_parent(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ra-") as directory:
+            root = Path(directory)
+            real_parent = root / "real_parent"
+            real_parent.mkdir(mode=0o700)
+            run_dir = real_parent / "run"
+            run_dir.mkdir(mode=0o700)
+            link = root / "link"
+            link.symlink_to(real_parent)
+            with self.assertRaises(OSError):
+                RuntimeArtifacts.open(link / "run", label=LABEL)
