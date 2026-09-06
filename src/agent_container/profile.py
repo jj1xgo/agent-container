@@ -1,11 +1,19 @@
 from pathlib import Path
+import re
 import shutil
+import tomllib
 
 
-PROFILE_VERSION = "3\n"
+PROFILE_VERSION = "4\n"
 HANDOVER_APPROVAL_RULE = (
     'prefix_rule(pattern=["agent-handover", "create"], decision="allow")\n'
 )
+SANDBOX_NETWORK_TABLE = "sandbox_workspace_write"
+SANDBOX_NETWORK_KEY = "network_access"
+_SANDBOX_NETWORK_LINE = f"{SANDBOX_NETWORK_KEY} = true\n"
+_SANDBOX_NETWORK_BLOCK = f"[{SANDBOX_NETWORK_TABLE}]\n{_SANDBOX_NETWORK_LINE}"
+_TABLE_HEADER = re.compile(r"\s*\[")
+_SANDBOX_NETWORK_ASSIGNMENT = re.compile(rf"\s*{SANDBOX_NETWORK_KEY}\s*=")
 
 
 def seed_codex_home(profile_root: Path, codex_home: Path) -> None:
@@ -28,11 +36,51 @@ def seed_codex_home(profile_root: Path, codex_home: Path) -> None:
     (codex_home / "managed-profile.version").write_text(PROFILE_VERSION, encoding="utf-8")
 
 
+def ensure_codex_sandbox_network(config_file: Path) -> None:
+    """Pin `sandbox_workspace_write.network_access = true` without touching other keys."""
+
+    text = config_file.read_text(encoding="utf-8")
+    table = tomllib.loads(text).get(SANDBOX_NETWORK_TABLE)
+    if isinstance(table, dict) and table.get(SANDBOX_NETWORK_KEY) is True:
+        return
+    if table is None:
+        separator = "" if not text or text.endswith("\n") else "\n"
+        updated = f"{text}{separator}\n{_SANDBOX_NETWORK_BLOCK}"
+    else:
+        lines = text.splitlines(keepends=True)
+        header = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if line.strip() == f"[{SANDBOX_NETWORK_TABLE}]"
+            ),
+            None,
+        )
+        if header is None:
+            raise ValueError(
+                f"managed profile cannot update {SANDBOX_NETWORK_TABLE} in {config_file}"
+            )
+        end = header + 1
+        while end < len(lines) and not _TABLE_HEADER.match(lines[end]):
+            end += 1
+        body = [
+            line
+            for line in lines[header + 1 : end]
+            if not _SANDBOX_NETWORK_ASSIGNMENT.match(line)
+        ]
+        lines[header + 1 : end] = [_SANDBOX_NETWORK_LINE, *body]
+        updated = "".join(lines)
+    if tomllib.loads(updated)[SANDBOX_NETWORK_TABLE][SANDBOX_NETWORK_KEY] is not True:
+        raise ValueError(f"managed profile update failed for {config_file}")
+    config_file.write_text(updated, encoding="utf-8")
+
+
 def update_codex_handover_profile(profile_root: Path, codex_home: Path) -> None:
+    config_file = codex_home / "config.toml"
     rules_file = codex_home / "rules/default.rules"
     skill_file = codex_home / "skills/handover/SKILL.md"
     version_file = codex_home / "managed-profile.version"
-    for path in (rules_file, skill_file, version_file):
+    for path in (config_file, rules_file, skill_file, version_file):
         if path.is_symlink():
             raise ValueError(f"managed profile path must not be a symlink: {path}")
         if not path.is_file():
@@ -46,4 +94,5 @@ def update_codex_handover_profile(profile_root: Path, codex_home: Path) -> None:
             encoding="utf-8",
         )
     shutil.copy2(profile_root / "skills/handover/SKILL.md", skill_file)
+    ensure_codex_sandbox_network(config_file)
     version_file.write_text(PROFILE_VERSION, encoding="utf-8")

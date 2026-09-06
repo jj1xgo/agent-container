@@ -1,5 +1,6 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import tomllib
 import unittest
 
 from agent_container.profile import seed_codex_home
@@ -34,7 +35,7 @@ class ProfileSeedTest(unittest.TestCase):
             self.assertTrue((codex_home / "skills/handover/SKILL.md").is_file())
             self.assertEqual(
                 (codex_home / "managed-profile.version").read_text(encoding="utf-8"),
-                "3\n",
+                "4\n",
             )
 
     def test_seed_refuses_to_overwrite_existing_rules(self) -> None:
@@ -85,8 +86,77 @@ class ProfileSeedTest(unittest.TestCase):
                 (codex_home / "managed-profile.version").read_text(
                     encoding="utf-8"
                 ),
-                "3\n",
+                "4\n",
             )
+
+    # Break caught: a project seeded before the sandbox network setting keeps
+    # running Codex tool commands without network, so agent-family and the
+    # broker git remote fail with EPERM although the shipped profile is fixed.
+    def test_update_profile_adds_managed_sandbox_network_to_old_config(self) -> None:
+        with TemporaryDirectory() as temp:
+            codex_home = Path(temp) / "codex-home"
+            seed_codex_home(ROOT / "profiles/codex", codex_home)
+            config_file = codex_home / "config.toml"
+            config_file.write_text(
+                'cli_auth_credentials_store = "file"\n'
+                'model = "custom-model"\n'
+                "\n[tui]\n"
+                'status_line = ["git-branch"]\n',
+                encoding="utf-8",
+            )
+
+            update_codex_handover_profile(ROOT / "profiles/codex", codex_home)
+            update_codex_handover_profile(ROOT / "profiles/codex", codex_home)
+
+            text = config_file.read_text(encoding="utf-8")
+            config = tomllib.loads(text)
+            self.assertIs(config["sandbox_workspace_write"]["network_access"], True)
+            self.assertEqual(config["model"], "custom-model")
+            self.assertEqual(config["tui"]["status_line"], ["git-branch"])
+            self.assertEqual(text.count("[sandbox_workspace_write]"), 1)
+            self.assertEqual(
+                (codex_home / "managed-profile.version").read_text(encoding="utf-8"),
+                "4\n",
+            )
+
+    def test_update_profile_overrides_disabled_sandbox_network_in_place(self) -> None:
+        with TemporaryDirectory() as temp:
+            codex_home = Path(temp) / "codex-home"
+            seed_codex_home(ROOT / "profiles/codex", codex_home)
+            config_file = codex_home / "config.toml"
+            config_file.write_text(
+                'model = "custom-model"\n'
+                "\n[sandbox_workspace_write]\n"
+                "network_access = false\n"
+                'writable_roots = ["/tmp/extra"]\n'
+                "\n[tui]\n"
+                'status_line = ["git-branch"]\n',
+                encoding="utf-8",
+            )
+
+            update_codex_handover_profile(ROOT / "profiles/codex", codex_home)
+
+            config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+            self.assertIs(config["sandbox_workspace_write"]["network_access"], True)
+            self.assertEqual(
+                config["sandbox_workspace_write"]["writable_roots"], ["/tmp/extra"]
+            )
+            self.assertEqual(config["tui"]["status_line"], ["git-branch"])
+
+    def test_update_profile_rejects_symlinked_config(self) -> None:
+        with TemporaryDirectory() as temp:
+            codex_home = Path(temp) / "codex-home"
+            seed_codex_home(ROOT / "profiles/codex", codex_home)
+            config_file = codex_home / "config.toml"
+            config_file.unlink()
+            outside = Path(temp) / "outside.toml"
+            outside.write_text('model = "outside"\n', encoding="utf-8")
+            config_file.symlink_to(outside)
+
+            with self.assertRaisesRegex(ValueError, "must not be a symlink"):
+                update_codex_handover_profile(ROOT / "profiles/codex", codex_home)
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), 'model = "outside"\n')
 
     def test_update_handover_profile_rejects_symlinked_rules(self) -> None:
         with TemporaryDirectory() as temp:
