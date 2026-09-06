@@ -19,7 +19,7 @@ agent-containerは、containerの中のagentがhost側の資源へ到達する�
 2026-09-04のbrainstormingで次を決めた。
 
 - roadmapのPhase 6定義に含まれていた「project、agent、task、eventのhost側contract」のうち、task・event・agentの新しいdomain contractはPhase 6では**設計しない**。最初の消費者はPhase 8のleaseであり、消費者不在で抽象を固定する危険が大きい。Phase 8の完了条件へ移す。Phase 6は既存4 brokerの共通kernel化に集中する。
-- kernel化は**2段階**で行う。stage 1はwire形式、audit行、既存testを変えない純粋なrefactorでkernelを抽出し、4 brokerを乗せ替える。stage 2はFamily intakeが持つ強い保証（readiness gate、fail-closed cleanup）と統一audit schemaをkernelへ入れて全brokerに適用する。Phase 6はstage 1とstage 2の両方が終わって完了とする。本文書はstage 1の設計であり、stage 2は別の設計文書で扱う。
+- kernel化は**2段階**で行う。stage 1はwire形式、audit行、既存testを変えない純粋なrefactorでkernelを抽出し、4 brokerを乗せ替える。stage 2はFamily intakeが持つ強い保証（readiness gate、fail-closed cleanup）と統一audit schemaをkernelへ入れて全brokerに適用する。Phase 6はstage 1とstage 2の両方が終わって完了とする。本文書はstage 1の設計であり、stage 2は[別の設計文書](2026-09-06-broker-kernel-stage2-design.md)で扱う。
 - Phase 8の一部（agent別worktreeの分離だけ）の前倒しは**しない**。worktree分離はlease（誰がどこを書いてよいか）と不可分で、分離だけ入れても同一branchへの競合は防げない。roadmapの「検討する余地」はこの判断で閉じる。
 - kernelの形は、project毎・broker毎の4 socketというtopologyを変えない**合成可能なpackage**とする。project毎1 socketへのmultiplex案は、mount、capabilityの粒度、container側clientが全て変わりstage 1の原則に反するうえ、1つの故障で全brokerが止まり、capabilityの最小権限が後退するため採らない。共通helperだけを1 fileに寄せる案は、重複の本体であるruntime lifecycleとauditを解決しないため採らない。
 
@@ -142,14 +142,14 @@ kernel固有のunit testは、既存brokerがばらばらに持っていた境�
 
 **実host smoke（stage 1完了gate）。** roadmapの規則「external-state smokeが未実施ならcodeがmerge済みでもPhaseを完了にしない」に従い、6-6で既存の手順書を**変更せずに**再実行する。`docs/phase3-github-broker-smoke-test.md`（fetch、create-only push、PR、Issue read）、`docs/egress-domain-allowlist-smoke-test.md`、`docs/family-issue-create-broker-smoke-test.md`、handoverは`docs/phase2-smoke-test.md`のCodex／Claude handover create。新しい手順書は書かない。既存手順がそのまま通ることが振る舞い保存の最終証拠であり、結果は`CHANGELOG.md`のValidationとroadmapへ記録する。
 
-2026-09-05の利用者承認により、上記「変更せずに」にはFamily手順の古い固定suite件数だけを更新する例外を設けます。基準`e2ce4a9`でCodex 44→48、container 976→1111とし、操作command、検証する保証、件数一致、unexpected skip禁止、外部操作の承認条件は変更しません。過去の観測結果は書き換えません。 PR #107の独立修正で回帰test 8件を追加した基準`7a9e927`では、同じ件数更新の扱いでcontainer期待値を1119とします。PR #108の独立修正（agent runtimeの`/proc` unmask、unit test 1件とreal Podman test 1件を追加）を取り込んだ基準`425e944`では、container期待値を1120、real Podman suite期待値を15とします。PR #109の独立修正（Codex sandbox内commandのnetwork保持、Codex unit test 1件とreal Podman test 1件を追加）を取り込んだ基準では、Codex期待値を49、real Podman suite期待値を16とし、Podman suiteのcommandに追加moduleを含めます。PR #110の独立修正（既存projectへのsandbox network設定の配布、container unit test 3件を追加）を取り込んだ基準では、container期待値を1123とします。managed profile version 1のprojectで`update-profile`が失敗する独立修正（container unit test 2件を追加）を取り込んだ基準では、container期待値を1125とします。 Claude strong nested sandboxの独立修正（real Podman test 1件を追加）を取り込んだ基準では、real Podman suite期待値を17とします。
+2026-09-05の利用者承認により、上記「変更せずに」にはFamily手順の古い固定suite件数だけを更新する例外を設けます。基準`e2ce4a9`でCodex 44→48、container 976→1111とし、操作command、検証する保証、件数一致、unexpected skip禁止、外部操作の承認条件は変更しません。過去の観測結果は書き換えません。 PR #107の独立修正で回帰test 8件を追加した基準`7a9e927`では、同じ件数更新の扱いでcontainer期待値を1119とします。PR #108の独立修正（agent runtimeの`/proc` unmask、unit test 1件とreal Podman test 1件を追加）を取り込んだ基準`425e944`では、container期待値を1120、real Podman suite期待値を15とします。PR #109の独立修正（Codex sandbox内commandのnetwork保持、Codex unit test 1件とreal Podman test 1件を追加）を取り込んだ基準では、Codex期待値を49、real Podman suite期待値を16とし、Podman suiteのcommandに追加moduleを含めます。PR #110の独立修正（既存projectへのsandbox network設定の配布、container unit test 3件を追加）を取り込んだ基準では、container期待値を1123とします。managed profile version 1のprojectで`update-profile`が失敗する独立修正（container unit test 2件を追加）を取り込んだ基準では、container期待値を1125とします。 Claude strong nested sandboxの独立修正（real Podman test 1件を追加）を取り込んだ基準では、real Podman suite期待値を17とします。 stage 2の最初のcode PR S2-1（[#117](https://github.com/jj1xgo/agent-container/pull/117)、kernel unit test追加）を取り込んだ基準では、container期待値を1152とします。
 
 ## stage 2への継ぎ目
 
 stage 2を後から入れてもstage 1の設計を壊さないよう、kernelの内側に閉じた3つの継ぎ目を用意する。stage 1ではどれも既定値で動く。
 
 1. **readiness gate。** `SocketBrokerRuntime`は`ReadinessGate`を受け取り、`wait`が返るまでacceptしない。既定は`AlwaysReady`。FamilyのPID登録はrequest毎の検証なのでstage 1ではこのseamに載せない。stage 2で拒否timingと停止中の扱いを設計し、「container側runtimeが登録するまで受けない」保証の適用範囲を決める。
-2. **fail-closed cleanup。** runtimeの`__exit__`と失敗時のcleanupは「socket → capability → run directory」の固定順序で実装し、順序と冪等性をtestで固定する。stage 2でfamilyの`_cleanup_artifacts`（失敗時にも確実に消す、部分残骸の検出）をこの1か所へ持ち込む。
+2. **fail-closed cleanup。** runtimeの`__exit__`と失敗時のcleanupは「capability → socket → run directory」の固定順序で実装し、順序と冪等性をtestで固定する（6-2の実装と計画はこの順序であり、本文書の当初記述「socket → capability」はstage 2設計K2で訂正した）。stage 2でfamilyの`_cleanup_artifacts`（失敗時にも確実に消す、部分残骸の検出）をこの1か所へ持ち込む。
 3. **audit envelope。** `AuditLog.append(record)`はstage 1ではrecordをそのまま書く。stage 2で共通key（`timestamp`、`project`、`run`、`operation`、`status`）を必須にし、broker固有keyを`details`へ寄せるか、timestamp形式を統一するかを決める。stage 1では4系統のkey差分を本文書（前節）に一覧化してある。
 
 stage 2で決めること（本文書では決めない）: 6-4で残したJSON／stream例外、lifecycle／cleanup、capability／audit openerの完全統一と保証変更、`PROTOCOL_VERSION`を2へ上げるか、`StateLayout`のbroker毎3点セットを畳むか（state migrationが要る）、Mount型と`podman.py`の統一、統一auditをPhase 10のObsidian UIがどう読むか。

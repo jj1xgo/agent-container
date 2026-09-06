@@ -6,6 +6,8 @@
 
 ### Added
 
+- Phase 6 stage 2の最初のPR（S2-1）として、共通broker kernelに保証を追加しました。frame errorを種別ごとの`FrameError` subclassにし（message不変）、`AuditLog.append`が共通key（`timestamp`／`run`／`project`／`operation`／`status`、任意の`stage`）を検証し、`Connection`がpeerのpid／gidを保持して接続毎の`PeerPolicy`（既定実装`SameUser`）で入口を絞れるようにし、run directoryのdir_fdとinode identityで差し替えを温存する`RuntimeArtifacts`を追加しました。handoverとegressのsessionは`RuntimeArtifacts`で片付け、handover transportはkernelのframe readerで`size`／`schema`のaudit stageを保存します。設計は[`docs/superpowers/specs/2026-09-06-broker-kernel-stage2-design.md`](docs/superpowers/specs/2026-09-06-broker-kernel-stage2-design.md)、意図的に変えた挙動はK1〜K5／H1〜H4／E5〜E6として同文書に列挙しています。
+
 - Phase 6 stage 1の5番目として、Family intakeのrequest／response frame codecとaccept iterationを既存の共通broker kernelへ移しました。total-frame上限、exact bytes型、JSON例外はFamily adapterで保持し、PID/uid検証、stream処理、停止・descriptor cleanup、capability、audit transactionはFamily側に残します。既存testとwire／auditは不変で、readiness gateを含む保証の統一はstage 2で扱います。
 
 - 標準agent imageに`jq`を追加しました。agentがJSON出力(`.claude.json`、CLI応答など)を扱う際、代替commandを自作せず本物の`jq`を使えます。
@@ -15,6 +17,8 @@
 - Phase 6 stage 1の4番目の乗せ替えとして、GitHub brokerのframe／chunk、accept iteration、run directory確保、audit writeを共通broker kernelへ移しました。既存のJSON例外、lifecycle、cleanup、capability検証とaudit openerは互換性のためGitHub側に維持し、完全統一をstage 2に残します。wire byte、audit行、error identity、停止順序と既存testは変更していません。
 
 ### Fixed
+
+- broker runtimeの`stop()`で`deactivate()`が例外を出すと、listener close・thread回収・cleanupへ進まずに例外が素通ししていました。失効失敗を捕捉してlistener close、accept／worker threadの回収、artifact除去まで継続し、固定文`<label> deactivate failed`で報告し、失効が成功するまで完了扱いにしないようにしました。優先順位はdid not stop → deactivate failed → cleanup failed → failedです（[#98](https://github.com/jj1xgo/agent-container/issues/98)）。
 
 - managed profile version `1`（2026-08-22の初期profile。approval rulesはversion `2`で追加）でseedしたprojectには`CODEX_HOME/rules/`が存在せず、`bin/agentctl project update-profile PROJECT`が`rules/default.rules`の`FileNotFoundError`で失敗して、後続のprofile修正（専用handover rule、sandbox network設定）を受け取れませんでした（`agent-container-claude-smoke`で観測）。update-profileは`rules/`が無い場合だけprofileの`rules/`を`project add`と同じ方法で配布してから既存の更新を続け、`rules/`がsymlinkなら拒否します。既存の`rules/`やcustom ruleの扱い、config／skill／version fileの必須条件は変わりません。
 

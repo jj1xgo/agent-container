@@ -14,6 +14,7 @@ from typing import Callable
 from typing import Iterator
 
 from agent_container.broker.capability import CAPABILITY_PATTERN
+from agent_container.broker.peer import PeerPolicy
 from agent_container.broker.readiness import AlwaysReady
 from agent_container.broker.readiness import ReadinessGate
 
@@ -90,37 +91,6 @@ def bind_private_listener(
     return listener
 
 
-def remove_runtime_artifacts(
-    *, capability_path: Path, socket_path: Path, run_dir: Path
-) -> bool:
-    failed = False
-    for path, expected_type in (
-        (capability_path, stat.S_ISREG),
-        (socket_path, stat.S_ISSOCK),
-    ):
-        try:
-            metadata = path.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError:
-            failed = True
-            continue
-        if not expected_type(metadata.st_mode):
-            failed = True
-            continue
-        try:
-            path.unlink()
-        except OSError:
-            failed = True
-    try:
-        run_dir.rmdir()
-    except FileNotFoundError:
-        pass
-    except OSError:
-        failed = True
-    return failed
-
-
 _PEER_CREDENTIAL_BYTES = 12
 _CONCURRENCY_MODES = frozenset({"inline", "thread"})
 
@@ -130,6 +100,8 @@ class Connection:
     client: Any
     stream: Any
     peer_uid: int
+    peer_pid: int
+    peer_gid: int
 
 
 def open_connection(client: Any, *, timeout: float) -> Connection:
@@ -139,8 +111,27 @@ def open_connection(client: Any, *, timeout: float) -> Connection:
         socket.SO_PEERCRED,
         _PEER_CREDENTIAL_BYTES,
     )
-    _pid, peer_uid, _gid = struct.unpack("3i", credentials)
-    return Connection(client, client.makefile("rwb", buffering=0), peer_uid)
+    peer_pid, peer_uid, peer_gid = struct.unpack("3i", credentials)
+    return Connection(
+        client, client.makefile("rwb", buffering=0), peer_uid, peer_pid, peer_gid
+    )
+
+
+def admit_connection(
+    client: Any, *, timeout: float, policy: PeerPolicy | None
+) -> Connection | None:
+    connection = open_connection(client, timeout=timeout)
+    if policy is None:
+        return connection
+    try:
+        admitted = policy.admit(connection)
+    except BaseException:
+        connection.stream.close()
+        raise
+    if not admitted:
+        connection.stream.close()
+        return None
+    return connection
 
 
 def accept_clients(listener: Any, *, stop_event: threading.Event) -> Iterator[Any]:
@@ -174,11 +165,13 @@ class SocketBrokerRuntime:
     worker_thread_name: str = ""
     raw_client: bool = False
     deactivate_after_join: bool = False
+    peer_policy: PeerPolicy | None = None
     stop_event: threading.Event = field(default_factory=threading.Event, init=False)
     failed: threading.Event = field(default_factory=threading.Event, init=False)
     thread: Any | None = field(default=None, init=False)
     listener: Any | None = field(default=None, init=False, repr=False)
     error: BaseException | None = field(default=None, init=False, repr=False)
+    deactivate_error: BaseException | None = field(default=None, init=False, repr=False)
     exited: bool = field(default=False, init=False, repr=False)
     workers: set[Any] = field(default_factory=set, init=False, repr=False)
     worker_lock: threading.Lock = field(
@@ -188,6 +181,8 @@ class SocketBrokerRuntime:
     def __post_init__(self) -> None:
         if self.concurrency not in _CONCURRENCY_MODES:
             raise ValueError(f"{self.label} concurrency mode is invalid")
+        if self.raw_client and self.peer_policy is not None:
+            raise ValueError(f"{self.label} peer policy is unsupported")
 
     def start(self) -> None:
         if self.thread is not None or self.exited:
@@ -245,7 +240,11 @@ class SocketBrokerRuntime:
         if self.raw_client:
             self.handler(client)
             return
-        connection = open_connection(client, timeout=self.client_timeout)
+        connection = admit_connection(
+            client, timeout=self.client_timeout, policy=self.peer_policy
+        )
+        if connection is None:
+            return
         try:
             self.handler(connection)
         finally:
@@ -298,12 +297,22 @@ class SocketBrokerRuntime:
         with self.worker_lock:
             return bool(self.workers)
 
+    def _try_deactivate(self) -> bool:
+        try:
+            self.deactivate()
+        except Exception as error:
+            self.deactivate_error = error
+            return False
+        self.deactivate_error = None
+        return True
+
     def stop(self, *, join_timeout: float) -> None:
         if self.exited:
             return
         self.stop_event.set()
+        deactivate_failed = False
         if not self.deactivate_after_join:
-            self.deactivate()
+            deactivate_failed = not self._try_deactivate()
         cleanup_failed = False
         if self.listener is not None:
             try:
@@ -320,18 +329,24 @@ class SocketBrokerRuntime:
         if self._join_workers(join_timeout):
             did_not_stop = True
         if self.deactivate_after_join:
-            self.deactivate()
+            deactivate_failed = not self._try_deactivate()
 
         if did_not_stop:
             raise self.error_type(f"{self.label} did not stop") from None
 
+        # Cleanup runs even after a failed deactivate: removing the socket and
+        # capability shrinks the exposed surface. The runtime still does not
+        # count as exited until deactivate has succeeded (fail-closed).
         try:
             self.close()
         except (OSError, ValueError):
             cleanup_failed = True
         else:
-            self.exited = True
+            if not deactivate_failed:
+                self.exited = True
 
+        if deactivate_failed:
+            raise self.error_type(f"{self.label} deactivate failed") from None
         if cleanup_failed:
             raise self.error_type(f"{self.label} cleanup failed") from None
         if self.error is not None:

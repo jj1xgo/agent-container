@@ -882,7 +882,7 @@ class FamilyIssueBrokerDocumentationTest(unittest.TestCase):
         )
         for expected in (
             "Codex suiteは`Ran 49 tests ... OK`",
-            "container suiteは`Ran 1125 tests ... OK`",
+            "container suiteは`Ran 1152 tests ... OK`",
             "socket suiteは`Ran 18 tests ... OK`",
             "forced-unknown fixtureは`Ran 4 tests ... OK`",
             "Podman suiteは`Ran 17 tests ... OK`",

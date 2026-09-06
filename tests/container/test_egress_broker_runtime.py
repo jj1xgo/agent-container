@@ -468,6 +468,31 @@ class EgressBrokerRuntimeTest(unittest.TestCase):
         self.assertEqual(session.deactivate_calls, 1)
         self.assertEqual(session.close_calls, 1)
 
+    def test_deactivate_failure_after_join_still_closes_and_reports_fixed_error(self) -> None:
+        class FlakySession(FakeSession):
+            def deactivate(self) -> None:
+                super().deactivate()
+                if self.deactivate_calls == 1:
+                    raise ValueError("private-deactivate-marker")
+
+        listener = FakeListener()
+        session = FlakySession(listener)
+        runtime = EgressBrokerRuntime(session)  # type: ignore[arg-type]
+        runtime.__enter__()
+        with self.assertRaises(EgressBrokerRuntimeError) as raised:
+            runtime.__exit__(None, None, None)
+        self.assertEqual(str(raised.exception), "egress broker deactivate failed")
+        self.assertNotIn("private-deactivate-marker", str(raised.exception))
+        self.assertTrue(listener.closed)
+        self.assertEqual(session.deactivate_calls, 1)
+        self.assertEqual(session.close_calls, 1)
+        self.assertFalse(runtime._runtime.exited)
+
+        runtime.__exit__(None, None, None)
+        self.assertEqual(session.deactivate_calls, 2)
+        self.assertEqual(session.close_calls, 2)
+        self.assertTrue(runtime._runtime.exited)
+
 
 if __name__ == "__main__":
     unittest.main()

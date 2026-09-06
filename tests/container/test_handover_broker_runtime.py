@@ -487,6 +487,46 @@ class HandoverBrokerRuntimeTest(unittest.TestCase):
             self.assertEqual(list(project.glob(".handover-*.tmp")), [])
             self.assertFalse(session.run_dir.exists())
 
+    def test_deactivate_failure_still_removes_runtime_and_reports_fixed_error(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hb-runtime-") as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            handovers = root / "handovers"
+            handovers.mkdir(mode=0o700)
+            project = handovers / "agent-container"
+            project.mkdir(mode=0o700)
+            session = HandoverBrokerSession.create(
+                state.resolve(),
+                "agent-container",
+                project.resolve(),
+            )
+            calls = {"deactivate": 0}
+            real_deactivate = session.deactivate
+
+            def flaky_deactivate() -> None:
+                calls["deactivate"] += 1
+                if calls["deactivate"] == 1:
+                    raise ValueError("private-deactivate-marker")
+                real_deactivate()
+
+            run_dir = session.run_dir
+            runtime = HandoverBrokerRuntime(session)
+            with mock.patch.object(session, "deactivate", flaky_deactivate):
+                runtime.__enter__()
+                with self.assertRaises(HandoverBrokerRuntimeError) as raised:
+                    runtime.__exit__(None, None, None)
+                self.assertEqual(
+                    str(raised.exception), "handover broker deactivate failed"
+                )
+                self.assertNotIn("private-deactivate-marker", str(raised.exception))
+                self.assertFalse(run_dir.exists())
+                self.assertFalse(runtime._runtime.exited)
+                runtime.__exit__(None, None, None)
+            self.assertTrue(runtime._runtime.exited)
+            self.assertEqual(calls["deactivate"], 3)
+            self.assertEqual(session._capability, "")
+
     def test_exit_invalidates_capability_and_new_runtime_does_not_reuse_it(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hb-runtime-") as temporary:
             root = Path(temporary)

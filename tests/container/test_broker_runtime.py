@@ -18,7 +18,6 @@ from agent_container.broker.runtime import bind_private_listener
 from agent_container.broker.runtime import create_private_file
 from agent_container.broker.runtime import generate_capability
 from agent_container.broker.runtime import open_connection
-from agent_container.broker.runtime import remove_runtime_artifacts
 
 
 LABEL = "test broker"
@@ -149,63 +148,6 @@ class BindPrivateListenerTest(unittest.TestCase):
             fake.listen.assert_called_once_with(7)
 
 
-class RemoveRuntimeArtifactsTest(unittest.TestCase):
-    def _layout(self, root: Path) -> tuple[Path, Path, Path]:
-        run_dir = root / "run"
-        run_dir.mkdir(mode=0o700)
-        capability = run_dir / "capability"
-        capability.write_text("c" * 43 + "\n", encoding="ascii")
-        capability.chmod(0o600)
-        return run_dir, capability, run_dir / "broker.sock"
-
-    def test_removes_capability_socket_and_directory(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ra-") as directory:
-            run_dir, capability, socket_path = self._layout(Path(directory))
-            listener = bind_private_listener(socket_path, backlog=1, label=LABEL)
-            listener.close()
-            failed = remove_runtime_artifacts(
-                capability_path=capability, socket_path=socket_path, run_dir=run_dir
-            )
-            self.assertFalse(failed)
-            self.assertFalse(run_dir.exists())
-
-    def test_missing_artifacts_are_not_failures(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ra-") as directory:
-            run_dir = Path(directory) / "run"
-            run_dir.mkdir(mode=0o700)
-            failed = remove_runtime_artifacts(
-                capability_path=run_dir / "capability",
-                socket_path=run_dir / "broker.sock",
-                run_dir=run_dir,
-            )
-            self.assertFalse(failed)
-            self.assertFalse(run_dir.exists())
-
-    def test_refuses_replaced_capability_and_keeps_directory(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ra-") as directory:
-            run_dir, capability, socket_path = self._layout(Path(directory))
-            capability.unlink()
-            capability.mkdir()
-            failed = remove_runtime_artifacts(
-                capability_path=capability, socket_path=socket_path, run_dir=run_dir
-            )
-            self.assertTrue(failed)
-            self.assertTrue(capability.is_dir())
-            self.assertTrue(run_dir.exists())
-
-    def test_refuses_replaced_socket_but_still_removes_capability(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ra-") as directory:
-            run_dir, capability, socket_path = self._layout(Path(directory))
-            socket_path.write_text("replacement", encoding="ascii")
-            failed = remove_runtime_artifacts(
-                capability_path=capability, socket_path=socket_path, run_dir=run_dir
-            )
-            self.assertTrue(failed)
-            self.assertFalse(capability.exists())
-            self.assertTrue(socket_path.is_file())
-            self.assertTrue(run_dir.exists())
-
-
 class RuntimeError_(Exception):
     pass
 
@@ -294,6 +236,7 @@ def make_runtime(
     readiness=None,
     open_listener=None,
     close=None,
+    deactivate=None,
     **options,
 ) -> tuple[SocketBrokerRuntime, dict[str, int]]:
     calls = {"open": 0, "deactivate": 0, "close": 0, "backlog": 0}
@@ -303,7 +246,7 @@ def make_runtime(
         calls["backlog"] = backlog
         return listener
 
-    def deactivate() -> None:
+    def default_deactivate() -> None:
         calls["deactivate"] += 1
 
     def default_close() -> None:
@@ -316,7 +259,7 @@ def make_runtime(
         thread_name="test-broker",
         open_listener=open_listener or default_open,
         handler=handler or (lambda connection: 0),
-        deactivate=deactivate,
+        deactivate=deactivate or default_deactivate,
         close=close or default_close,
         error_type=RuntimeError_,
         backlog=4,
@@ -562,6 +505,57 @@ class SocketBrokerRuntimeTest(unittest.TestCase):
         self.assertNotIn("private-gate-marker", str(raised.exception))
         self.assertEqual(listener.accepts, 0)
 
+    def test_peer_policy_denial_skips_handler_and_closes_client(self) -> None:
+        denied = FakeClient(os.getuid())
+        admitted = FakeClient(os.getuid())
+        listener = FakeListener((denied, admitted))
+        seen: list[int] = []
+        handled = threading.Event()
+
+        class SecondOnly:
+            def admit(self, connection: Connection) -> bool:
+                return connection.client is admitted
+
+        def handler(connection: Connection) -> int:
+            seen.append(connection.peer_pid)
+            handled.set()
+            return 0
+
+        runtime, calls = make_runtime(listener, handler, peer_policy=SecondOnly())
+        runtime.start()
+        self.assertTrue(handled.wait(1))
+        runtime.stop(join_timeout=2)
+        self.assertEqual(seen, [1234])
+        self.assertTrue(denied.closed)
+        self.assertTrue(denied.stream.closed)
+        self.assertEqual(denied.stream.outgoing.getvalue(), b"")
+        self.assertIsNone(runtime.error)
+        self.assertEqual(calls["close"], 1)
+
+    def test_peer_policy_exception_is_a_runtime_failure(self) -> None:
+        client = FakeClient(os.getuid())
+        listener = FakeListener((client,))
+
+        class Explode:
+            def admit(self, connection: Connection) -> bool:
+                raise RuntimeError("private-policy-marker")
+
+        runtime, _ = make_runtime(listener, peer_policy=Explode())
+        runtime.start()
+        self.assertTrue(runtime.wait_failed(1))
+        with self.assertRaises(RuntimeError_) as raised:
+            runtime.stop(join_timeout=2)
+        self.assertEqual(str(raised.exception), "test broker failed")
+        self.assertTrue(client.closed)
+
+    def test_raw_client_rejects_a_peer_policy(self) -> None:
+        class Deny:
+            def admit(self, connection: Connection) -> bool:
+                return False
+
+        with self.assertRaisesRegex(ValueError, "test broker peer policy is unsupported"):
+            make_runtime(FakeListener(), raw_client=True, peer_policy=Deny())
+
 
 class OpenConnectionTest(unittest.TestCase):
     def test_sets_timeout_reads_peer_uid_and_opens_an_unbuffered_stream(self) -> None:
@@ -571,7 +565,7 @@ class OpenConnectionTest(unittest.TestCase):
         self.assertEqual(
             client.credential_calls, [(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)]
         )
-        self.assertEqual(connection, Connection(client, client.stream, 4040))
+        self.assertEqual(connection, Connection(client, client.stream, 4040, 1234, 5678))
 
 
 class ThreadedSocketBrokerRuntimeTest(unittest.TestCase):

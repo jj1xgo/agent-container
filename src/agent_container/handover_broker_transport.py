@@ -1,16 +1,15 @@
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-import struct
 from typing import BinaryIO
 
+from agent_container.broker.frame import FrameSizeError
 from agent_container.handover_broker import HandoverBrokerSession
 from agent_container.handover_broker_protocol import HandoverRequest
 from agent_container.handover_broker_protocol import HandoverResponse
-from agent_container.handover_broker_protocol import MAX_REQUEST_BYTES
 from agent_container.handover_broker_protocol import PROTOCOL_VERSION
-from agent_container.handover_broker_protocol import decode_request_frame
 from agent_container.handover_broker_protocol import encode_response_frame
+from agent_container.handover_broker_protocol import read_request_frame
 from agent_container.handover_writer import create_atomic_handover
 from agent_container.handover_writer import validate_handover_content
 
@@ -38,32 +37,14 @@ class _RequestFailure(Exception):
         self.code = code
 
 
-def _read_exact(connection: BinaryIO, size: int) -> bytes:
-    output = bytearray()
-    while len(output) < size:
-        try:
-            chunk = connection.read(size - len(output))
-        except (OSError, TypeError, ValueError):
-            raise _RequestFailure("schema") from None
-        if not isinstance(chunk, bytes) or not chunk or len(chunk) > size - len(output):
-            raise _RequestFailure("schema")
-        output.extend(chunk)
-    return bytes(output)
-
 
 def _read_one_request(connection: BinaryIO) -> HandoverRequest:
-    header = _read_exact(connection, 4)
-    length = struct.unpack(">I", header)[0]
-    if length == 0 or length > MAX_REQUEST_BYTES:
-        raise _RequestFailure("size")
-    payload = _read_exact(connection, length)
     try:
-        request, consumed = decode_request_frame(header + payload)
+        return read_request_frame(connection)
+    except FrameSizeError:
+        raise _RequestFailure("size") from None
     except ValueError:
         raise _RequestFailure("schema") from None
-    if consumed != len(header) + len(payload):
-        raise _RequestFailure("schema")
-    return request
 
 
 def _write_response(

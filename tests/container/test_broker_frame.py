@@ -11,6 +11,7 @@ from agent_container.broker.frame import encode_frame
 from agent_container.broker.frame import read_exact
 from agent_container.broker.frame import read_frame
 from agent_container.broker.frame import write_all
+from agent_container.broker.frame import FrameError, FrameIncomplete, FrameJsonError, FrameSchemaError, FrameSizeError, StreamError
 
 
 COMPACT = JsonOptions(ensure_ascii=False, allow_nan=False, separators=(",", ":"))
@@ -237,6 +238,74 @@ class FrameLabelTest(unittest.TestCase):
         with self.assertRaises(ValueError) as raised:
             encode_frame(schema, {"version": 1, "name": "x" * 64})
         self.assertEqual(str(raised.exception), "test request is too large")
+
+
+class FrameErrorKindsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.schema = FrameSchema(
+            label="test request",
+            stream_label="test stream",
+            fields=frozenset({"a"}),
+            max_bytes=16,
+            json=JsonOptions(),
+        )
+
+    def test_decode_failures_use_specific_subclasses_with_unchanged_messages(self) -> None:
+        cases = (
+            (b"\x00\x00", FrameIncomplete, "test request frame is incomplete"),
+            (b"\x00\x00\x00\x00", FrameSizeError, "test request frame size is invalid"),
+            (b"\x00\x00\x00\x05abc", FrameIncomplete, "test request frame is incomplete"),
+            (b"\x00\x00\x00\x03{a}", FrameJsonError, "test request JSON is invalid"),
+            (b"\x00\x00\x00\x07{\"b\":1}", FrameSchemaError, "test request schema is invalid"),
+        )
+        for data, kind, message in cases:
+            with self.subTest(data=data), self.assertRaises(kind) as raised:
+                decode_frame(self.schema, data)
+            self.assertEqual(str(raised.exception), message)
+            self.assertIsInstance(raised.exception, FrameError)
+            self.assertIsInstance(raised.exception, ValueError)
+
+    def test_encode_failures_use_schema_and_size_subclasses(self) -> None:
+        with self.assertRaises(FrameSchemaError) as raised:
+            encode_frame(self.schema, {"a": object()})
+        self.assertEqual(str(raised.exception), "test request is invalid")
+        with self.assertRaises(FrameSizeError) as raised:
+            encode_frame(self.schema, {"a": "x" * 32})
+        self.assertEqual(str(raised.exception), "test request is too large")
+
+    def test_stream_failures_use_stream_error(self) -> None:
+        class Broken:
+            def read(self, size: int) -> bytes:
+                raise OSError("private-marker")
+
+        with self.assertRaises(StreamError) as raised:
+            read_exact(Broken(), 4, label="test stream")
+        self.assertEqual(str(raised.exception), "test stream is invalid")
+        with self.assertRaises(StreamError) as raised:
+            read_exact(BytesIO(b"ab"), 4, label="test stream")
+        self.assertEqual(str(raised.exception), "test stream is incomplete")
+        with self.assertRaises(FrameSizeError):
+            read_frame(self.schema, BytesIO(b"\x00\x00\x00\x00"))
+
+    def test_read_exact_initial_eof_returns_empty_only_before_any_byte(self) -> None:
+        self.assertEqual(read_exact(BytesIO(b""), 4, label="test stream", initial_eof=True), b"")
+        with self.assertRaises(StreamError) as raised:
+            read_exact(BytesIO(b"ab"), 4, label="test stream", initial_eof=True)
+        self.assertEqual(str(raised.exception), "test stream is incomplete")
+        with self.assertRaises(StreamError):
+            read_exact(BytesIO(b""), 4, label="test stream")
+
+    def test_write_all_failure_uses_stream_error(self) -> None:
+        class Stuck:
+            def write(self, body: bytes) -> int:
+                return 0
+
+            def flush(self) -> None:
+                pass
+
+        with self.assertRaises(StreamError) as raised:
+            write_all(Stuck(), b"abc", label="test stream")
+        self.assertEqual(str(raised.exception), "test stream write failed")
 
 
 if __name__ == "__main__":

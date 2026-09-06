@@ -10,6 +10,18 @@ from agent_container.broker.audit import AuditLog
 
 LABEL = "test audit"
 
+RECORD = {
+    "timestamp": "2026-09-06T00:00:00+00:00",
+    "run": "0123456789abcdef",
+    "project": "demo",
+    "operation": "create",
+    "status": "ok",
+}
+
+
+def record(**extra: object) -> dict[str, object]:
+    return {**RECORD, **extra}
+
 
 class AuditLogTest(unittest.TestCase):
     def test_validate_creates_a_private_empty_file_and_append_writes_ascii_lines(self) -> None:
@@ -23,20 +35,20 @@ class AuditLogTest(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             self.assertEqual(path.read_bytes(), b"")
 
-            log.append({"timestamp": "t1", "status": "ok", "path": "/x"})
-            log.append({"timestamp": "t2", "status": "denied"})
+            log.append(record(path="/x"))
+            log.append(record(status="denied", stage="schema"))
 
             self.assertEqual(
                 path.read_bytes(),
-                b'{"timestamp":"t1","status":"ok","path":"/x"}\n'
-                b'{"timestamp":"t2","status":"denied"}\n',
+                b'{"timestamp":"2026-09-06T00:00:00+00:00","run":"0123456789abcdef","project":"demo","operation":"create","status":"ok","path":"/x"}\n'
+                b'{"timestamp":"2026-09-06T00:00:00+00:00","run":"0123456789abcdef","project":"demo","operation":"create","status":"denied","stage":"schema"}\n',
             )
 
     def test_append_escapes_non_ascii_and_preserves_key_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "events.jsonl"
-            AuditLog(path, label=LABEL).append({"b": "é", "a": 1})
-            self.assertEqual(path.read_bytes(), b'{"b":"\\u00e9","a":1}\n')
+            AuditLog(path, label=LABEL).append(record(b="é", a=1))
+            self.assertEqual(path.read_bytes(), b'{"timestamp":"2026-09-06T00:00:00+00:00","run":"0123456789abcdef","project":"demo","operation":"create","status":"ok","b":"\\u00e9","a":1}\n')
 
     def test_rejects_symlink_fifo_directory_and_wrong_mode(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -139,7 +151,7 @@ class AuditLogTest(unittest.TestCase):
             with mock.patch("os.write", return_value=0), self.assertRaisesRegex(
                 OSError, "test audit write failed"
             ):
-                AuditLog(path, label=LABEL).append({"a": 1})
+                AuditLog(path, label=LABEL).append(record())
             self.assertEqual(path.read_bytes(), b"")
 
     def test_append_retries_partial_writes_and_fsyncs(self) -> None:
@@ -153,11 +165,38 @@ class AuditLogTest(unittest.TestCase):
                 return real_write(descriptor, body[:3])
 
             with mock.patch("os.write", side_effect=partial), mock.patch("os.fsync") as fsync:
-                AuditLog(path, label=LABEL).append({"a": 1})
+                AuditLog(path, label=LABEL).append(record())
 
-            self.assertEqual(path.read_bytes(), b'{"a":1}\n')
+            self.assertEqual(path.read_bytes(), b'{"timestamp":"2026-09-06T00:00:00+00:00","run":"0123456789abcdef","project":"demo","operation":"create","status":"ok"}\n')
             self.assertGreater(len(calls), 1)
             fsync.assert_called_once()
+
+
+class AuditEnvelopeTest(unittest.TestCase):
+    def test_append_requires_common_keys_and_leaves_broker_keys_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "events.jsonl"
+            log = AuditLog(path, label=LABEL)
+            log.append(record(agent="codex", bytes=5, stage="policy", status="denied"))
+            self.assertIn(b'"agent":"codex","bytes":5', path.read_bytes())
+
+            bad_records = (
+                {key: value for key, value in RECORD.items() if key != "timestamp"},
+                record(timestamp="not a time"),
+                record(timestamp=1800000000),
+                record(run=""),
+                record(project=None),
+                record(operation=3),
+                record(status="pending"),
+                record(status=True),
+                record(stage=""),
+                record(stage=7),
+            )
+            for bad in bad_records:
+                with self.subTest(record=bad), self.assertRaises(ValueError) as raised:
+                    log.append(bad)
+                self.assertEqual(str(raised.exception), "test audit record is invalid")
+            self.assertEqual(path.read_bytes().count(b"\n"), 1)
 
 
 if __name__ == "__main__":
