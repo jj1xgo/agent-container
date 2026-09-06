@@ -16,6 +16,8 @@
 
 ### Fixed
 
+- Codex sandbox内のtool commandが`agent-family issue create`でbroker socketへ接続できず、`error: family intake request failed`（exit 1）になっていました。Codex 0.153.4のLinux sandboxは既定でcommandのnetworkを切り（`CODEX_SANDBOX_NETWORK_DISABLED=1`、追加seccomp filter）、`socket(AF_INET)`と`connect(AF_UNIX)`をEPERMで拒否します。`profiles/codex/config.toml`に`[sandbox_workspace_write] network_access = true`を追加し、sandbox内commandにPodman containerと同じnetwork到達性を与えます。`--github-broker`のgit操作とegress proxy経由のcommandも同じ経路で失敗していたはずで、この設定で解消します。`sandbox_mode`、`default_permissions`、`features.network_proxy`は設定しません。
+
 - `run`のCodex／Claude runtime containerで、Codexのbubblewrap sandboxが`bwrap: Can't mount proc on /proc: Operation not permitted`で失敗し、sandbox内のcommand実行が全て失敗していました。Podmanが既定で付ける`/proc`のmasked（`/proc/kcore`等6件）とread-only（`/proc/sys`等6件）のsubmountが、bwrapのuser namespace作成時にlocked child mountとなり、kernelの`mount_too_revealing`／`mnt_already_visible`（`fs/namespace.c`）が「空でないdirectoryやfileを覆うlocked child mountがある」として新しいproc mountを拒否していました。masked側だけ、read-only側だけの解除では解消しません。agent runtime specに`--security-opt=unmask=/proc/*`を追加し、doctor probe・setup・build用containerには付けません。`--read-only`、`--cap-drop=all`、`no-new-privileges`、keep-id、tmpfs、mount構成、`/sys`側のmaskは変更していません。
 
 - egressで未許可CONNECTを拒否すると、adapterだけがsequenceを進めて後続の許可済み通信も拒否されていました。並行requestの到着順逆転も同じ不整合を起こしました。brokerは認証済みrequestの直近4,096番号を固定bitmapで追跡し、到着順が逆でも未使用番号を受け付け、policy拒否の番号も消費します。再送・範囲より古い番号は拒否し、未認証requestは追跡状態を変えません。これは`v0.5.0`でも再現した既存不具合の独立修正で、wire・許可domain・audit schemaは変更していません。
@@ -25,11 +27,15 @@
 
 ### Security boundaries
 
+- Codex sandbox（workspace-write）内のtool commandは、Codex本体processと同じnetwork到達性を持つようになります。network境界はPodman側（`--network=none`＋egress adapterのexact-domain allowlist、または制限なしprojectの通常network）で与えるため、containerの外へ新しい経路は増えません。sandbox内command同士やcontainer内loopbackへのTCP／Unix socket接続は可能になり、Unix socketのpath単位allowlistは、Codexの`network_proxy`機能が直接`connect`する現在のbroker clientと両立しないため採用していません。read-only sandboxのnetwork無効は変わりません。
+
 - agent runtimeの`/proc` unmaskにより、container内uid 1000（keep-id、全capability削除）は`/proc/keys`と`/proc/interrupts`を読め、`/proc/acpi`と`/proc/scsi`を一覧できるようになります。`/proc/kcore`と`/proc/timer_list`は引き続き読めず、`/proc/sys/*`と`/proc/sysrq-trigger`への書き込みはroot所有fileに対するDACとcap-dropで拒否されます。`/proc/sys`の書き込み禁止はmount flagではなく非root uidとcapability削除に依存する形へ変わります。`/sys/firmware`、`/sys/fs/selinux`、`/sys/fs/cgroup`等のmaskと、probe／setup containerの既定maskは維持します。
 
 - Claude managed policyに`allowManagedPermissionRulesOnly`をpinしない判断を記録しました。Claude Code 2.1.260ではこの設定がpermission promptの「don't ask again」も無効にするため、利用者自身のrepositoryだけを動かす現状では、workspaceの`.claude/settings*.json`のallow ruleをtrust承認と同じく受け入れます。managed `deny`、sandbox、bypass禁止、brokerのhost承認は変わりません。中身を確認していない第三者repositoryを動かす際に見直します。
 
 ### Validation
+
+- 2026-09-06、基準main `425e944`からのCodex sandbox network修正を、rootless Podman 5.8.6、crun 1.28、専用image `8407957081a1`（Codex 0.153.4）で確認しました。offlineのloopback模擬Responses API（`--network=none`、credentialなし）が`exec_command` 1件を返し、sandbox内の固定probeが修正前は`CODEX_SANDBOX_NETWORK_DISABLED=1`・`connect(AF_UNIX)` EPERM・`socket(AF_INET)` EPERM、修正後は両方接続成功・追加seccomp filterなしとなることを、実runtimeと同じ`codex --approve-for-me exec`（`--sandbox`flagなし）と`--sandbox workspace-write`の両方で観測しました。`--sandbox read-only`ではnetworkは無効のままです。permissions profileのUnix socket allowlist単体は効果がなく、`network_proxy`有効時は`socket(AF_UNIX)`自体がEPERMになるため採用していません。新規`tests/integration/test_codex_sandbox_network_podman.py`は旧profileでRED（`network_disabled_env='1'`、`unix_connect=failed:PermissionError:1`）、新profileでGREENでした。container 1,120件、Codex 49件、broker socket 8件＋Family socket／forced-unknown 14件、lint、whitespace検査、同imageを指定したlocal実Podman 16件（147.352秒、skip 0）が成功し、検証containerは回収済みです。CIのPodman gateはmoduleを追加して固定件数を16へ更新しました。実認証のFamily Codex intake再実行は`not run — merge後にimageを再buildして実施`です。
 
 - 2026-09-06に独立修正PR #108をmain `425e944`へmergeし、smoke branchへ`8a67095`で取り込みました。mainとsmoke branchのproduction／profile／Containerfile／CI／container scriptの一致を確認し、Family手順とkernel設計の固定期待値をcontainer 1120・real Podman 15へ更新しました（操作command、検証項目、skip禁止、外部操作の承認条件は不変）。このtreeでcontainer suite 1,120件（docs test含む）とwhitespace検査が成功しました。修正版runtimeでの実認証Family Codex intake再実行と、実hostでのClaude sandbox再確認は`not run — 利用者の停止指示を維持`です。
 
