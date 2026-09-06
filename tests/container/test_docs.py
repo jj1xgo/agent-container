@@ -310,8 +310,9 @@ class EgressDocumentationTest(unittest.TestCase):
             "tests.integration.test_egress_podman",
             "tests.integration.test_family_intake_podman",
             "tests.integration.test_agent_sandbox_podman",
+            "tests.integration.test_codex_sandbox_network_podman",
             'test "$podman_status" -eq 0',
-            'grep -F "Ran 15 tests" "$podman_log"',
+            'grep -F "Ran 16 tests" "$podman_log"',
             'if grep -F "skipped" "$podman_log"',
             "AGENT_FAMILY_TEST_IMAGE: ${{ env.BASE_IMAGE }}",
         )

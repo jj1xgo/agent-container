@@ -1,6 +1,13 @@
 cli_auth_credentials_store = "file"
 forced_login_method = "chatgpt"
 
+# The Podman container is the network boundary (--network=none plus the egress
+# adapter, or the project's unrestricted network). Keep that boundary for
+# sandboxed tool commands too, so agent-family, git-remote-agent-broker and the
+# egress proxy stay reachable from inside the Codex sandbox.
+[sandbox_workspace_write]
+network_access = true
+
 [tui]
 status_line = [
   "model-with-reasoning",
