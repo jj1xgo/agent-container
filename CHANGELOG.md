@@ -31,7 +31,7 @@
 
 ### Changed
 
-- Claude runtimeのnested sandboxをstrong mode（`sandbox.enableWeakerNestedSandbox=false`）に切り替え、launcherが`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`を設定するようにしました。PR #108の`/proc` unmaskによりstrong modeが必要とする新しい`/proc`のuser namespace内mountが可能になったため、2026-08-24設計がglobal scrub採用を見送った前提が解消しました（[設計](superpowers/specs/2026-09-06-claude-strong-nested-sandbox-design.md)）。fallbackは設けず、`failIfUnavailable: true`は維持します。
+- Claude runtimeのnested sandboxをstrong mode（`sandbox.enableWeakerNestedSandbox=false`）に切り替え、launcherが`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`を設定するようにしました。PR #108の`/proc` unmaskによりstrong modeが必要とする新しい`/proc`のuser namespace内mountが可能になったため、2026-08-24設計がglobal scrub採用を見送った前提が解消しました（[設計](superpowers/specs/2026-09-06-claude-strong-nested-sandbox-design.md)）。fallbackは設けず、`failIfUnavailable: true`は維持します。この変更は、修正を取り込んで再buildしたimageにだけ適用され、既存imageはrebuildするまで旧設定のまま動作します。
 
 ### Security boundaries
 

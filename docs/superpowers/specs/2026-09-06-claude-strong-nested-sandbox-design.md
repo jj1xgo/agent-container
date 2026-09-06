@@ -76,7 +76,7 @@ merge後、専用imageを再buildし、利用者のprivate terminalから対話T
 ## Error handling
 
 - sandboxを起動できない場合は`failIfUnavailable: true`によりBash commandが失敗し、unsandboxed fallbackは`allowUnsandboxedCommands: false`で禁止されたままである。runtime側でweaker modeへ戻す経路は設けない。
-- policy validatorが旧設定（`true`）のimageを検出した場合、`doctor`の`claude-managed-policy`と`run`前の検査が従来どおりFAILになり、imageの再buildを促す。
+- policy validatorはimage内で完結する。image自身が配布する`managed-settings.json`をimage自身が持つ`EXPECTED_SETTINGS`と比較するため、この修正を含まない古いimageは両者とも旧設定（`true`）のままで一致し、`doctor`の`claude-managed-policy`と`run`前の検査はFAILにならない。strong modeとglobal scrubを有効にするには、この修正を取り込んだ状態で`bin/agentctl build`によりimageを再buildする必要がある。validatorが検出できるのは、再buildしたimage内で`managed-settings.json`が改ざん・破損している場合だけである。
 
 ## Testing strategy
 
