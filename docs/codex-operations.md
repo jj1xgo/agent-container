@@ -32,7 +32,7 @@ Codexやskillの更新時は、停止理由が権限・不足情報・skillの�
 
 `profiles/codex/config.toml`は`[sandbox_workspace_write] network_access = true`を固定する。Codex 0.153系のLinux sandbox（bubblewrap＋seccomp）は既定でtool commandのnetworkを切り、`socket`／`connect`をEPERMで拒否するため、`agent-family issue create`、`--github-broker`のgit操作、egress proxy経由のcommandがsandbox内から失敗する。network境界はPodman側（`--network=none`＋egress adapter、または制限なしprojectの通常network）で与えており、この設定はsandbox内commandにCodex本体processと同じ到達性を与えるだけで、新しい外向き経路を増やさない。`sandbox_mode`、`default_permissions`、`features.network_proxy`は設定しない。read-only sandboxではnetworkは引き続き無効である。
 
-project別`CODEX_HOME`の`config.toml`は初回`project add`時に配布したままで、`run`は上書きしない。この設定より前に作ったprojectでは`bin/agentctl project update-profile PROJECT`を実行する。update-profileは既存`config.toml`のmodelやstatus lineなど他のkeyを保持したまま`[sandbox_workspace_write]`の`network_access = true`だけを保証し、`managed-profile.version`を`4`にする。
+project別`CODEX_HOME`の`config.toml`は初回`project add`時に配布したままで、`run`は上書きしない。この設定より前に作ったprojectでは`bin/agentctl project update-profile PROJECT`を実行する。update-profileは既存`config.toml`のmodelやstatus lineなど他のkeyを保持したまま`[sandbox_workspace_write]`の`network_access = true`だけを保証し、`managed-profile.version`を`4`にする。version `1`のprojectのように`rules/`が無い場合は、profileの`rules/`を`project add`と同じ方法で配布してから更新する（`rules/`がsymlinkなら拒否）。
 
 ## Image再buildとCLI version
 
