@@ -128,7 +128,7 @@ def exec_claude(
         raise ValueError("CLAUDE_CONFIG_DIR must be set before launching Claude")
     seed_workspace_trust(Path(config_dir), Path(os.path.realpath(os.getcwd())))
     environment = os.environ.copy()
-    environment.pop("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", None)
+    environment["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1"
     environment["IS_DEMO"] = "1"
     environment["CLAUDE_CODE_OAUTH_TOKEN"] = token
     execvpe(argv[0], argv, environment)
