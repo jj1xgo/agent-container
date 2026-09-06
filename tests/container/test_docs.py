@@ -877,11 +877,11 @@ class FamilyIssueBrokerDocumentationTest(unittest.TestCase):
             self.smoke,
         )
         for expected in (
-            "Codex suiteは`Ran 44 tests ... OK`",
-            "container suiteは`Ran 976 tests ... OK`",
+            "Codex suiteは`Ran 49 tests ... OK`",
+            "container suiteは`Ran 1123 tests ... OK`",
             "socket suiteは`Ran 18 tests ... OK`",
             "forced-unknown fixtureは`Ran 4 tests ... OK`",
-            "Podman suiteは`Ran 14 tests ... OK`",
+            "Podman suiteは`Ran 16 tests ... OK`",
             "unexpected skipは0件",
         ):
             self.assertIn(expected, self.smoke)

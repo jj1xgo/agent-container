@@ -37,9 +37,15 @@ Phase 7〜10が「Obsidianを第2の脳として使う」ための中心範囲�
 
 ## 現在の実施順
 
-Phase 6-5はFamilyのframe codecとaccept iterationを既存kernelへ共通化する。PID登録はrequest毎の検証を保持し、readiness待機・lifecycle・audit transactionの完全統一はstage 2で扱う。詳細は[6-5計画](superpowers/plans/2026-09-05-broker-kernel-6-5-family.md)を参照する。
+Phase 6-5はPR #106で完了し、6-6の実host smokeを進めています。GitHubのfetch／Issue参照／新規branch push／PR create・view・checks、専用branchの更新拒否、Familyのlocal doctor／live inventory照合まで観測済みです。実施commitと限界はCHANGELOGに記録しています。smoke PR #4と専用branchはmerge・削除せず保持しています。`/proc` unmask後のClaude sandbox、security probe、Family Claude intake、対話TUI経路は2026-09-06に実hostで再確認済みで、Codex／Claude handover createも同日に使い捨てsmoke projectで再確認済みで、残るのはrollback（binding保持のため意図的にnot run）だけです。
+
+egressの実Codex検証で見つかったsequence不整合は、stage 1のrefactorと分離したPR #107で修正し、main `7a9e927`へmergeしました。拒否後・到着順逆転の回帰testを含むcontainer1119／Codex48／local socket18件、独立review、required CIの実Podman14件が成功しています。[診断記録](superpowers/plans/2026-09-05-egress-sequence-investigation.md)は修正前の観測・再現です。
+
+修正版imageでの承認済みCodex egress runtime gateは、`ab.chatgpt.com`追加後の1回で最小応答一致と自然終了を確認しPASSしました。`github.com`の拒否を維持したまま、拒否requestより大きいsequenceの受理、authentication denial 0件、cleanup成功を観測しました。専用projectの許可先は`chatgpt.com`／`pypi.org`／`sdmntprsouthcentralus.oaiusercontent.com`／`ab.chatgpt.com`の4件を保持しています。rollback／Claude egress／Family実intake・実Issue／handoverなどの残存gateとstage 2は未完了で、Phase 6全体は進行中です。
 
 実施順はPhase番号と一致する。
+
+Family実Codex intakeは新規pending／audit追加0件で未達のままです。診断で切り分けたsandboxの`/proc` mount拒否は、Podman既定の`/proc` masked／read-only submountがbwrapのuser namespaceでlocked child mountとなり、kernelの`mount_too_revealing`（`fs/namespace.c`）が新しいproc mountを拒否するものと確定し、独立修正PR #108（main `425e944`）でCodex／Claude runtime specだけに`--security-opt=unmask=/proc/*`を追加しました。offlineの`codex --sandbox workspace-write sandbox`は実spec argvで修正前exit 1、修正後exit 0で、real Podman gateは15件へ更新しました。利用者承認により再実行した実認証Family Codex intake（2026-09-06）では、Codexが`agent-family issue create`を2回実行したものの（`command_execution` 2件、修正前は0件）、1回目から`family intake request failed`で、host auditとpendingは不変でした。offline再現で、Codex 0.153.4のsandboxが既定でtool commandのnetworkを切り`connect(AF_UNIX)`をEPERMにすること、同じcontainerでsandbox外からは`pending`を受け付けることを確認し、独立修正PR #109で`profiles/codex/config.toml`に`[sandbox_workspace_write] network_access = true`を追加しました。模擬Responses API経由のsandbox内`agent-family issue create`は修正後に`pending`を返します。PR #109のmerge後にimageを再buildして実認証intakeを再実行しましたが、同じ失敗でした。原因は`config.toml`が`project add`時にしか配布されず、2026-09-02に作った`findsummits`の`CODEX_HOME`に新設定が無いことで、独立修正PR #110で`bin/agentctl project update-profile`が他のkeyを保持したまま同設定を保証するようにしました。merge後に`update-profile`を`findsummits`へ適用し、再buildした専用image `edd9916b52f3`で実認証intakeを再実行したところ、1回目が`pending`（request `6b119494…`）、同runの2回目が拒否となり、Family Codex intake gateはPASSしました。auditは固定field 1行の追加だけでした。続けてsection 5のfresh approvalにより利用者が対話terminalでapproveし、Issue #111を1件作成、state `created`と本文消去、audit固定field 2行の追加を確認しました。残る既存project（Claude専用の`agent-container-claude-smoke`を除く）へは`update-profile`を適用済みです。残るのはClaude intake、rollback、handover等の未実施gateとstage 2です。権限設定は変更していません。
 
 1. Phase 6で、後続機能が共有するbroker kernelを固定する。
 2. Phase 7で、安全なVault原本と実行用copyの同期を作る。
