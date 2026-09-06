@@ -6,6 +6,8 @@
 
 ### Added
 
+- Phase 6 stage 2の最初のPR（S2-1）として、共通broker kernelに保証を追加しました。frame errorを種別ごとの`FrameError` subclassにし（message不変）、`AuditLog.append`が共通key（`timestamp`／`run`／`project`／`operation`／`status`、任意の`stage`）を検証し、`Connection`がpeerのpid／gidを保持して接続毎の`PeerPolicy`（既定実装`SameUser`）で入口を絞れるようにし、run directoryのdir_fdとinode identityで差し替えを温存する`RuntimeArtifacts`を追加しました。handoverとegressのsessionは`RuntimeArtifacts`で片付け、handover transportはkernelのframe readerで`size`／`schema`のaudit stageを保存します。設計は[`docs/superpowers/specs/2026-09-06-broker-kernel-stage2-design.md`](docs/superpowers/specs/2026-09-06-broker-kernel-stage2-design.md)、意図的に変えた挙動はK1〜K5／H1〜H4／E5〜E6として同文書に列挙しています。
+
 - Phase 6 stage 1の5番目として、Family intakeのrequest／response frame codecとaccept iterationを既存の共通broker kernelへ移しました。total-frame上限、exact bytes型、JSON例外はFamily adapterで保持し、PID/uid検証、stream処理、停止・descriptor cleanup、capability、audit transactionはFamily側に残します。既存testとwire／auditは不変で、readiness gateを含む保証の統一はstage 2で扱います。
 
 - 標準agent imageに`jq`を追加しました。agentがJSON出力(`.claude.json`、CLI応答など)を扱う際、代替commandを自作せず本物の`jq`を使えます。
@@ -15,6 +17,8 @@
 - Phase 6 stage 1の4番目の乗せ替えとして、GitHub brokerのframe／chunk、accept iteration、run directory確保、audit writeを共通broker kernelへ移しました。既存のJSON例外、lifecycle、cleanup、capability検証とaudit openerは互換性のためGitHub側に維持し、完全統一をstage 2に残します。wire byte、audit行、error identity、停止順序と既存testは変更していません。
 
 ### Fixed
+
+- broker runtimeの`stop()`で`deactivate()`が例外を出すと、listener close・thread回収・cleanupへ進まずに例外が素通ししていました。失効失敗を捕捉してlistener close、accept／worker threadの回収、artifact除去まで継続し、固定文`<label> deactivate failed`で報告し、失効が成功するまで完了扱いにしないようにしました。優先順位はdid not stop → deactivate failed → cleanup failed → failedです（[#98](https://github.com/jj1xgo/agent-container/issues/98)）。
 
 - broker workerの登録後・開始前にstopが重なると、未開始threadのjoinが`RuntimeError`を出し、egressの失効処理にも到達していませんでした。未開始workerを管理対象に残し、停止未完了を所定の例外で報告して、開始後の再試行で回収できるようにしました（[#97](https://github.com/jj1xgo/agent-container/issues/97)）。
 - Claude launcherが設定する`IS_DEMO=1`はtoken onboardingだけでなくworkspace trust dialogも省略するため、project configの`.claude.json`に`hasTrustDialogAccepted`が残らず、managed status lineを含むtrust前提の機能が黙って動いていませんでした。launcherは起動直前に現在のworkspaceの該当keyだけをseedし、fileが無ければmode `0600`で作り、通常fileでない・実行user所有でない・JSON objectとして読めない場合は本文を出さずに起動を停止します。permission bypass optionやproject側hooks／MCPの扱いは変わりませんが、trust承認と同じくworkspace内`.claude/settings*.json`の`permissions.allow`と`additionalDirectories`は有効になります。
