@@ -90,7 +90,7 @@ setup command、hidden prompt、token format、staged `claude auth status`、act
 
    doctorの必須checkがPASSであることを確認する。local statusだけでは不十分なので、launcher経由のClaudeでcredential値を含まない最小promptを送り、実API responseが成功することを必須とする。HTTP 401を含むinference失敗は停止条件とする。clean projectを用意できない場合は回復を先行せず停止する。
 
-3. Claude内で`/status`を確認した後、`/sandbox`の`Config`を開く。managed settingsが読み込まれ、sandboxが有効、`enableWeakerNestedSandbox`が有効、unsandboxed fallbackが禁止されていることを確認する。続けて`/hooks`と`/mcp`を開き、hookとMCP serverがどちらも空であることを確認する。managed policyを確認できない、sandboxが無効、fallback可能、hookまたはMCPが1件でも読み込まれている場合は即座に停止し、sandboxを無効化して再試行しない。
+3. Claude内で`/status`を確認した後、`/sandbox`の`Config`を開く。managed settingsが読み込まれ、sandboxが有効、`enableWeakerNestedSandbox`が無効（strong nested sandbox）、unsandboxed fallbackが禁止されていることを確認する。続けて`/hooks`と`/mcp`を開き、hookとMCP serverがどちらも空であることを確認する。managed policyを確認できない、sandboxが無効、fallback可能、hookまたはMCPが1件でも読み込まれている場合は即座に停止し、sandboxを無効化して再試行しない。
 
 4. 同じclean projectで、ClaudeへBash toolを使って次のcommandだけを実行するよう依頼する。
 
@@ -106,7 +106,7 @@ setup command、hidden prompt、token format、staged `claude auth status`、act
    parent_token_via_proc_readable=false
    ```
 
-   いずれかが`true`、commandがsandbox内で実行不能、または3行以外のcredential由来情報が出た場合は即座に停止する。特に`parent_token_via_proc_readable=true`ならこの方式を不採用とし、Phase 2完了を宣言しない。確認時はcredentialの値、長さ、prefix、hash、環境一覧、環境entry、process environment、`/proc/*/environ`の内容、`/run/secrets/claude-oauth-token`本文を表示・記録しない。containerの`--read-only`、`--cap-drop=all`、`no-new-privileges`、keep-id、tmpfsも弱めない。
+   いずれかが`true`、commandがsandbox内で実行不能、または3行以外のcredential由来情報が出た場合は即座に停止する。特に`parent_token_via_proc_readable=true`ならこの方式を不採用とし、Phase 2完了を宣言しない。続けて同じBash toolで`ls /proc | grep -c '^[0-9]\+$'`を実行し、出力がsandbox内process（probeと実行中shellなど）の数と一致し、container内の他process（親Claude processを含む）のPIDを含まないことを確認する。数が合わない、または親Claude processのPIDが見える場合は停止し、sandboxを無効化して再試行しない。確認時はcredentialの値、長さ、prefix、hash、環境一覧、環境entry、process environment、`/proc/*/environ`の内容、`/run/secrets/claude-oauth-token`本文を表示・記録しない。containerの`--read-only`、`--cap-drop=all`、`no-new-privileges`、keep-id、tmpfsも弱めない。
 
 5. 新auth、clean-project status、最小inference、managed sandbox確認、security probeがすべて成功した後だけ、failed smokeで生成されたexact artifact `<state-root>/projects/agent-container/claude-config/.credentials.json`を回復する。sourceと新しいtarget `<state-root>/quarantine/claude-project/<run-id>/.credentials.json`の全ancestorを`lstat`相当で確認し、sourceが通常fileでない場合、またはsource/target/ancestorがsymlinkなら停止する。新しい`<state-root>/quarantine/claude-project/<run-id>/`をmode `0700`で作り、この1 fileだけを本文を読まずに移し、mode `0600`にする。project `.claude.json`、project backups、project cache、sessions、plugins、memoryは移動しない。quarantineは削除しない。
 

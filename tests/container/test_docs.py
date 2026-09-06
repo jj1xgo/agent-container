@@ -563,17 +563,20 @@ class Phase2DocumentationTest(unittest.TestCase):
             "hash",
             "環境一覧",
             "/proc/*/environ",
+            "`enableWeakerNestedSandbox`が無効",
+            "親Claude processのPIDが見える",
         ):
             self.assertIn(expected, body)
 
         self.assertIn("即座に停止", body)
+        self.assertNotIn("enableWeakerNestedSandboxが有効", body)
 
     def test_operator_docs_define_final_nested_claude_constraints(self) -> None:
         phase2 = (ROOT / "docs/phase2-claude-code.md").read_text(encoding="utf-8")
         codex = (ROOT / "docs/codex-operations.md").read_text(encoding="utf-8")
 
         for expected in (
-            "global scrubは意図的に設定しません",
+            "global scrubとして意図的に設定します",
             "強いsandboxを強制",
             "hooksとMCPは初期状態で無効",
             "review済みHTTP MCP",
@@ -588,6 +591,7 @@ class Phase2DocumentationTest(unittest.TestCase):
 
         self.assertIn("Claudeのmanaged sandbox", codex)
         self.assertIn("Codexのhook設定とは別", codex)
+        self.assertNotIn("global scrubは意図的に設定しません", phase2)
 
     def test_operator_guide_documents_claude_handover_broker_contract(self) -> None:
         body = (ROOT / "docs/phase2-claude-code.md").read_text(encoding="utf-8")
