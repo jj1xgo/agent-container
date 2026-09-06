@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
-import os  # noqa: F401 -- kept as a patch seam: tests patch os.chmod on this module
 from pathlib import Path
 import secrets
 import shutil

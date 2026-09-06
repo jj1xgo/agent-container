@@ -49,42 +49,45 @@ def collect_golden() -> dict[str, object]:
             protected_branches=("main",),
         )
         artifacts = RuntimeArtifacts.open(root, label="broker")
-        session = BrokerSession(
-            policy=policy,
-            run_id="0123456789abcdef",
-            run_dir=root,
-            socket_path=root / "broker.sock",
-            capability_path=root / "capability",
-            audit_file=root / "events.jsonl",
-            _capability="A" * 43,
-            _artifacts=artifacts,
-        )
-        with mock.patch("agent_container.github_broker.datetime") as clock:
-            clock.now.return_value.isoformat.return_value = (
-                "2026-09-05T00:00:00+00:00"
+        try:
+            session = BrokerSession(
+                policy=policy,
+                run_id="0123456789abcdef",
+                run_dir=root,
+                socket_path=root / "broker.sock",
+                capability_path=root / "capability",
+                audit_file=root / "events.jsonl",
+                _capability="A" * 43,
+                _artifacts=artifacts,
             )
-            for operation in payloads:
-                options = {}
-                if operation == "git-receive-pack":
-                    options["ref"] = "refs/heads/feat/demo"
-                if operation.startswith("pr-"):
-                    options["pr_number"] = 7
-                if operation == "issue-view":
-                    options["issue_number"] = 8
-                session.audit(
-                    operation=operation,
-                    status="ok",
-                    bytes_transferred=5,
-                    **options,
+            with mock.patch("agent_container.github_broker.datetime") as clock:
+                clock.now.return_value.isoformat.return_value = (
+                    "2026-09-05T00:00:00+00:00"
                 )
-            session.audit(operation="pr-view", status="denied", pr_number=7)
-            session.audit(
-                operation="issue-view",
-                status="error",
-                stage="issue-request",
-                issue_number=8,
-            )
-        audit = session.audit_file.read_bytes().hex()
+                for operation in payloads:
+                    options = {}
+                    if operation == "git-receive-pack":
+                        options["ref"] = "refs/heads/feat/demo"
+                    if operation.startswith("pr-"):
+                        options["pr_number"] = 7
+                    if operation == "issue-view":
+                        options["issue_number"] = 8
+                    session.audit(
+                        operation=operation,
+                        status="ok",
+                        bytes_transferred=5,
+                        **options,
+                    )
+                session.audit(operation="pr-view", status="denied", pr_number=7)
+                session.audit(
+                    operation="issue-view",
+                    status="error",
+                    stage="issue-request",
+                    issue_number=8,
+                )
+            audit = session.audit_file.read_bytes().hex()
+        finally:
+            artifacts.close()
     return {
         "requests": requests,
         "responses": responses,

@@ -28,7 +28,7 @@ class BrokerSessionTest(unittest.TestCase):
         self.session = BrokerSession.create(self.root, self.policy)
 
     def tearDown(self) -> None:
-        if not self.session._closed:
+        if not self.session._cleanup_complete:
             self.session.close()
         self.temporary.cleanup()
 
@@ -118,7 +118,7 @@ class BrokerSessionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "closed"):
             self.session.authorize(self.request())
 
-    @mock.patch("agent_container.github_broker.os.chmod")
+    @mock.patch("agent_container.broker.runtime.os.chmod")
     @mock.patch("agent_container.github_broker.socket.socket")
     def test_opens_private_unix_socket_and_cleans_runtime(
         self, socket_factory: mock.Mock, chmod: mock.Mock
@@ -137,7 +137,7 @@ class BrokerSessionTest(unittest.TestCase):
         self.assertFalse(run_dir.exists())
         self.assertEqual(self.session._capability, "")
 
-    @mock.patch("agent_container.github_broker.os.chmod")
+    @mock.patch("agent_container.broker.runtime.os.chmod")
     @mock.patch("agent_container.github_broker.socket.socket")
     def test_listener_rejects_existing_path_and_double_open(
         self, socket_factory: mock.Mock, _: mock.Mock
@@ -166,7 +166,7 @@ class BrokerSessionTest(unittest.TestCase):
         finally:
             client.close()
 
-    @mock.patch("agent_container.github_broker.os.chmod")
+    @mock.patch("agent_container.broker.runtime.os.chmod")
     @mock.patch("agent_container.github_broker.socket.socket")
     def test_default_length_state_root_is_within_socket_limit(
         self, socket_factory: mock.Mock, _: mock.Mock

@@ -330,6 +330,9 @@ class UploadPackBrokerRuntime(AbstractContextManager[BrokerRuntimeMount]):
             backlog=_LISTENER_BACKLOG,
             listener_timeout=_LISTENER_TIMEOUT_SECONDS,
             client_timeout=_CLIENT_TIMEOUT_SECONDS,
+            # Revoke only after the join so in-flight git/PR handlers can still
+            # audit; GitHub never revoked before the join in stage 1, and the
+            # kernel still revokes before the did-not-stop report.
             deactivate_after_join=True,
         )
 

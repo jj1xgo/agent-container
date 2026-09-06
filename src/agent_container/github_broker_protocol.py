@@ -45,6 +45,8 @@ _RESPONSE_SCHEMA = FrameSchema(
     max_bytes=MAX_RESPONSE_BYTES,
     json=JsonOptions(
         ensure_ascii=True,
+        # Encode-side only, kept at the stage 1 encoder default so golden
+        # bytes stay unchanged; decoding still rejects NaN/Infinity constants.
         allow_nan=True,
         sort_keys=True,
         separators=(",", ":"),
@@ -94,20 +96,17 @@ def _decode_request_json(body: bytes) -> Any:
 
 
 def encode_request_frame(request: BrokerRequest) -> bytes:
-    try:
-        return encode_frame(
-            _REQUEST_SCHEMA,
-            {
-                "version": request.version,
-                "capability": request.capability,
-                "project_id": request.project_id,
-                "sequence": request.sequence,
-                "operation": request.operation,
-                "payload": request.payload,
-            },
-        )
-    except FrameSizeError:
-        raise ValueError("broker request is too large") from None
+    return encode_frame(
+        _REQUEST_SCHEMA,
+        {
+            "version": request.version,
+            "capability": request.capability,
+            "project_id": request.project_id,
+            "sequence": request.sequence,
+            "operation": request.operation,
+            "payload": request.payload,
+        },
+    )
 
 
 def decode_request_frame(data: bytes) -> tuple[BrokerRequest, int]:

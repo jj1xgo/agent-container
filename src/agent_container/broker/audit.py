@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 import stat
-from typing import TextIO
 
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -39,13 +38,6 @@ def validate_envelope(record: Mapping[str, object], *, label: str) -> None:
         stage = record["stage"]
         if not isinstance(stage, str) or not stage:
             raise error
-
-
-def append_text_record(stream: TextIO, record: dict[str, object]) -> None:
-    json.dump(record, stream, ensure_ascii=True, separators=(",", ":"))
-    stream.write("\n")
-    stream.flush()
-    os.fsync(stream.fileno())
 
 
 class AuditLog:
