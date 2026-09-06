@@ -1,7 +1,7 @@
 {
   "sandbox": {
     "enabled": true,
-    "enableWeakerNestedSandbox": true,
+    "enableWeakerNestedSandbox": false,
     "allowUnsandboxedCommands": false,
     "failIfUnavailable": true,
     "network": {
