@@ -1,17 +1,19 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
-import os
 from pathlib import Path
-import re
 import secrets
 import shutil
 import socket
-import stat
-from typing import Any, TextIO
+import threading
+from typing import Any
 
-from agent_container.broker.audit import append_text_record
+from agent_container.broker.artifacts import RuntimeArtifacts
+from agent_container.broker.audit import AuditLog
 from agent_container.broker.runtime import allocate_run_dir
+from agent_container.broker.runtime import bind_private_listener
+from agent_container.broker.runtime import create_private_file
+from agent_container.broker.runtime import generate_capability
 from agent_container.github_broker_error import BROKER_FAILURE_STAGES
 from agent_container.github_broker_policy import BrokerPolicy
 from agent_container.github_broker_policy import validate_issue_number
@@ -23,43 +25,10 @@ from agent_container.state import ensure_private_directory
 from agent_container.state import github_broker_project_label
 
 
-_CAPABILITY = re.compile(r"^[A-Za-z0-9_-]{43}$")
-_AUDIT_STATUSES = frozenset(
-    {"ok", "denied", "error", "client-disconnected", "timeout"}
-)
+_LABEL = "broker"
+_AUDIT_LABEL = "broker audit"
+_AUDIT_STATUSES = frozenset({"ok", "denied", "error"})
 _POLICY_VERSION = 1
-_MAX_UNIX_SOCKET_PATH_BYTES = 107
-
-
-def _create_private_file(path: Path, body: str) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as stream:
-            stream.write(body)
-            stream.flush()
-            os.fsync(stream.fileno())
-    finally:
-        os.close(descriptor)
-
-
-def _open_audit_file(path: Path) -> TextIO:
-    if path.is_symlink():
-        raise ValueError("broker audit file must not be a symlink")
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags, 0o600)
-    metadata = os.fstat(descriptor)
-    if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
-        os.close(descriptor)
-        raise PermissionError("broker audit file must have mode 0600")
-    if metadata.st_uid != os.getuid():
-        os.close(descriptor)
-        raise PermissionError("broker audit file must be owned by the current user")
-    return os.fdopen(descriptor, "a", encoding="utf-8")
 
 
 @dataclass
@@ -71,9 +40,14 @@ class BrokerSession:
     capability_path: Path
     audit_file: Path
     _capability: str = field(repr=False)
+    _artifacts: RuntimeArtifacts = field(repr=False)
     _seen_sequences: set[int] = field(default_factory=set, repr=False)
     _listener: socket.socket | None = field(default=None, repr=False)
     _closed: bool = field(default=False, repr=False)
+    _cleanup_complete: bool = field(default=False, repr=False)
+    _lifecycle_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
 
     @classmethod
     def create(cls, state_root: Path, policy: BrokerPolicy) -> "BrokerSession":
@@ -85,15 +59,30 @@ class BrokerSession:
         project_root = ensure_private_directory(
             run_root / project_label, create=True
         )
-        run_id, run_dir = allocate_run_dir(project_root, label="broker")
-        capability = secrets.token_urlsafe(32)
-        if _CAPABILITY.fullmatch(capability) is None:
+        audit_file = audit_root / "events.jsonl"
+        AuditLog(audit_file, label=_AUDIT_LABEL).validate()
+
+        run_id, run_dir = allocate_run_dir(project_root, label=_LABEL)
+        try:
+            capability = generate_capability(label=_LABEL)
+        except RuntimeError:
             shutil.rmtree(run_dir)
-            raise RuntimeError("generated broker capability has invalid format")
+            raise
         capability_path = run_dir / "capability"
         try:
-            _create_private_file(capability_path, capability + "\n")
+            create_private_file(capability_path, capability + "\n", label=_LABEL)
         except Exception:
+            shutil.rmtree(run_dir)
+            raise
+        try:
+            artifacts = RuntimeArtifacts.open(run_dir, label=_LABEL)
+        except Exception:
+            shutil.rmtree(run_dir)
+            raise
+        try:
+            artifacts.track_file("capability")
+        except Exception:
+            artifacts.close()
             shutil.rmtree(run_dir)
             raise
         return cls(
@@ -102,8 +91,9 @@ class BrokerSession:
             run_dir=run_dir,
             socket_path=run_dir / "broker.sock",
             capability_path=capability_path,
-            audit_file=audit_root / "events.jsonl",
+            audit_file=audit_file,
             _capability=capability,
+            _artifacts=artifacts,
         )
 
     @property
@@ -111,42 +101,40 @@ class BrokerSession:
         return hashlib.sha256(self.run_id.encode("ascii")).hexdigest()[:16]
 
     def authorize(self, request: BrokerRequest) -> dict[str, Any]:
-        if self._closed:
-            raise ValueError("broker session is closed")
-        if request.version != PROTOCOL_VERSION:
-            raise ValueError("broker protocol version is not supported")
-        if not secrets.compare_digest(request.capability, self._capability):
-            raise ValueError("broker request is not authorized")
-        if request.project_id != self.policy.project_id:
-            raise ValueError("broker request project is not allowed")
-        if (
-            not 1 <= request.sequence <= MAX_REQUEST_NONCE
-            or request.sequence in self._seen_sequences
-            or len(self._seen_sequences) >= 4096
-        ):
-            raise ValueError("broker request sequence is invalid")
-        operation = self.policy.validate_operation(request.operation)
-        self._seen_sequences.add(request.sequence)
+        with self._lifecycle_lock:
+            if self._closed:
+                raise ValueError("broker session is closed")
+            if request.version != PROTOCOL_VERSION:
+                raise ValueError("broker protocol version is not supported")
+            if not secrets.compare_digest(request.capability, self._capability):
+                raise ValueError("broker request is not authorized")
+            if request.project_id != self.policy.project_id:
+                raise ValueError("broker request project is not allowed")
+            if (
+                not 1 <= request.sequence <= MAX_REQUEST_NONCE
+                or request.sequence in self._seen_sequences
+                or len(self._seen_sequences) >= 4096
+            ):
+                raise ValueError("broker request sequence is invalid")
+            operation = self.policy.validate_operation(request.operation)
+            self._seen_sequences.add(request.sequence)
         return {"operation": operation, "payload": request.payload}
+
+    def deactivate(self) -> None:
+        with self._lifecycle_lock:
+            self._closed = True
+            self._capability = ""
 
     def open_listener(self, backlog: int = 4) -> socket.socket:
         if self._closed or self._listener is not None:
             raise ValueError("broker listener state is invalid")
-        if len(os.fsencode(self.socket_path)) > _MAX_UNIX_SOCKET_PATH_BYTES:
-            raise ValueError("broker socket path is too long")
-        if self.socket_path.exists() or self.socket_path.is_symlink():
-            raise FileExistsError("broker socket path already exists")
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener = bind_private_listener(
+            self.socket_path, backlog=backlog, label=_LABEL
+        )
         try:
-            listener.bind(str(self.socket_path))
-            os.chmod(self.socket_path, 0o600)
-            listener.listen(backlog)
+            self._artifacts.track_socket("broker.sock")
         except Exception:
             listener.close()
-            if self.socket_path.exists() and stat.S_ISSOCK(
-                self.socket_path.lstat().st_mode
-            ):
-                self.socket_path.unlink()
             raise
         self._listener = listener
         return listener
@@ -202,28 +190,25 @@ class BrokerSession:
             record["issue_number"] = issue_number
         if stage is not None:
             record["stage"] = stage
-        with _open_audit_file(self.audit_file) as stream:
-            append_text_record(stream, record)
+        AuditLog(self.audit_file, label=_AUDIT_LABEL).append(record)
 
     def close(self) -> None:
-        if self._closed:
+        if self._cleanup_complete:
             return
-        self._closed = True
-        self._capability = ""
+        self.deactivate()
+        cleanup_failed = False
         if self._listener is not None:
-            self._listener.close()
-            self._listener = None
-        for path in (self.socket_path, self.capability_path):
             try:
-                metadata = path.lstat()
-            except FileNotFoundError:
-                continue
-            if path == self.socket_path and not stat.S_ISSOCK(metadata.st_mode):
-                raise ValueError("broker socket path changed during cleanup")
-            if path == self.capability_path and not stat.S_ISREG(metadata.st_mode):
-                raise ValueError("broker capability path changed during cleanup")
-            path.unlink()
-        self.run_dir.rmdir()
+                self._listener.close()
+            except OSError:
+                cleanup_failed = True
+            else:
+                self._listener = None
+        if self._artifacts.remove():
+            cleanup_failed = True
+        if cleanup_failed:
+            raise ValueError("broker cleanup failed")
+        self._cleanup_complete = True
 
     def __enter__(self) -> "BrokerSession":
         return self

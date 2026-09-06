@@ -151,7 +151,7 @@ def read_frame(schema: FrameSchema, stream: BinaryIO) -> dict[str, Any]:
     return decoded
 
 
-def write_all(stream: BinaryIO, frame: bytes, *, label: str) -> None:
+def _write_fully(stream: BinaryIO, frame: bytes, *, label: str) -> None:
     offset = 0
     while offset < len(frame):
         written = stream.write(frame[offset:])
@@ -163,6 +163,10 @@ def write_all(stream: BinaryIO, frame: bytes, *, label: str) -> None:
         ):
             raise StreamError(f"{label} write failed")
         offset += written
+
+
+def write_all(stream: BinaryIO, frame: bytes, *, label: str) -> None:
+    _write_fully(stream, frame, label=label)
     stream.flush()
 
 
@@ -174,10 +178,10 @@ def write_chunk_stream(
     for chunk in chunks:
         if not isinstance(chunk, bytes) or not chunk or len(chunk) > maximum_chunk:
             raise FrameSizeError(f"{label} chunk is invalid")
-        stream.write(struct.pack(">I", len(chunk)))
-        stream.write(chunk)
+        _write_fully(stream, struct.pack(">I", len(chunk)), label=label)
+        _write_fully(stream, chunk, label=label)
         transferred += len(chunk)
-    stream.write(b"\x00\x00\x00\x00")
+    _write_fully(stream, b"\x00\x00\x00\x00", label=label)
     stream.flush()
     return transferred
 

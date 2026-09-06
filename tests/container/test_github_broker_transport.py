@@ -893,3 +893,32 @@ class BrokerRuntimePathTest(unittest.TestCase):
             target.chmod(0o644)
             with self.assertRaises(ValueError):
                 read_broker_capability(target)
+
+    def test_rejects_capability_files_that_are_not_exactly_44_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            for body in ("c" * 43, "c" * 43 + "\n\n", "c" * 42 + "\n"):
+                path = Path(directory) / "capability"
+                path.write_text(body, encoding="ascii")
+                path.chmod(0o600)
+                with self.subTest(body=body), self.assertRaisesRegex(ValueError, "broker capability file is invalid"):
+                    read_broker_capability(path)
+                path.unlink()
+
+    def test_rejects_capability_replaced_after_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "capability"
+            path.write_text("c" * 43 + "\n", encoding="ascii")
+            path.chmod(0o600)
+            real_resolve = Path.resolve
+
+            def swap_then_resolve(self_path: Path, *args: object, **kwargs: object) -> Path:
+                resolved = real_resolve(self_path, *args, **kwargs)
+                if resolved == path and path.read_bytes() == ("c" * 43 + "\n").encode():
+                    path.unlink()
+                    path.write_text("d" * 43 + "\n", encoding="ascii")
+                    path.chmod(0o600)
+                return resolved
+
+            with mock.patch.object(Path, "resolve", swap_then_resolve):
+                with self.assertRaisesRegex(ValueError, "broker capability file is invalid"):
+                    read_broker_capability(path)

@@ -1,13 +1,13 @@
 from dataclasses import dataclass, field
 import json
-import os
 from pathlib import Path
-import re
 import secrets
 import socket
-import stat
 from typing import BinaryIO, Iterable
 
+from agent_container.broker.capability import read_capability
+from agent_container.broker.capability import validate_exact_path
+from agent_container.broker.capability import validate_socket
 from agent_container.git_remote_helper import MAX_STATELESS_REQUEST_BYTES
 from agent_container.git_remote_helper import MAX_RECEIVE_PACK_REQUEST_BYTES
 from agent_container.git_protocol import gate_receive_pack_commands
@@ -37,7 +37,6 @@ from agent_container.github_pr import GitHubPullRequestTransport
 from agent_container.github_pr import MAX_PR_RESPONSE_BYTES
 
 
-_CAPABILITY = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _PR_OPERATIONS = frozenset({"pr-create", "pr-view", "pr-checks"})
 _ISSUE_OPERATIONS = frozenset({"issue-list", "issue-view"})
 
@@ -54,54 +53,15 @@ def _write_response(connection: BinaryIO, status: str) -> bool:
 
 
 def _validate_exact_path(path: Path) -> Path:
-    if not path.is_absolute():
-        raise ValueError("broker runtime path must be absolute")
-    try:
-        resolved = path.resolve(strict=True)
-    except (OSError, RuntimeError):
-        raise ValueError("broker runtime path is invalid") from None
-    if resolved != path:
-        raise ValueError("broker runtime path must not contain symlinks")
-    return resolved
+    return validate_exact_path(path, label="broker runtime path")
 
 
 def read_broker_capability(path: Path) -> str:
-    _validate_exact_path(path)
-    metadata = path.stat()
-    if (
-        not stat.S_ISREG(metadata.st_mode)
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-        or metadata.st_uid != os.getuid()
-        or metadata.st_size > 45
-    ):
-        raise ValueError("broker capability file is invalid")
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags)
-    try:
-        body = os.read(descriptor, 46)
-    finally:
-        os.close(descriptor)
-    try:
-        capability = body.decode("ascii").removesuffix("\n")
-    except UnicodeDecodeError:
-        raise ValueError("broker capability file is invalid") from None
-    if _CAPABILITY.fullmatch(capability) is None or body != (capability + "\n").encode():
-        raise ValueError("broker capability file is invalid")
-    return capability
+    return read_capability(path, label="broker capability file")
 
 
 def validate_broker_socket(path: Path) -> Path:
-    _validate_exact_path(path)
-    metadata = path.stat()
-    if (
-        not stat.S_ISSOCK(metadata.st_mode)
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-        or metadata.st_uid != os.getuid()
-    ):
-        raise ValueError("broker socket is invalid")
-    return path
+    return validate_socket(_validate_exact_path(path), label="broker socket")
 
 
 @dataclass

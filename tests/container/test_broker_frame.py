@@ -11,6 +11,7 @@ from agent_container.broker.frame import encode_frame
 from agent_container.broker.frame import read_exact
 from agent_container.broker.frame import read_frame
 from agent_container.broker.frame import write_all
+from agent_container.broker.frame import write_chunk_stream
 from agent_container.broker.frame import FrameError, FrameIncomplete, FrameJsonError, FrameSchemaError, FrameSizeError, StreamError
 
 
@@ -305,6 +306,29 @@ class FrameErrorKindsTest(unittest.TestCase):
 
         with self.assertRaises(StreamError) as raised:
             write_all(Stuck(), b"abc", label="test stream")
+        self.assertEqual(str(raised.exception), "test stream write failed")
+
+
+class ChunkWriterTest(unittest.TestCase):
+    def test_short_writes_are_retried_until_the_frame_is_complete(self) -> None:
+        class ShortWriter(BytesIO):
+            def write(self, body: bytes) -> int:
+                return super().write(body[:1])
+
+        stream = ShortWriter()
+        transferred = write_chunk_stream(
+            stream, (b"ab",), maximum_chunk=16, label="test stream"
+        )
+        self.assertEqual(transferred, 2)
+        self.assertEqual(stream.getvalue(), bytes.fromhex("00000002616200000000"))
+
+    def test_zero_write_is_a_stream_error(self) -> None:
+        class Stuck(BytesIO):
+            def write(self, body: bytes) -> int:
+                return 0
+
+        with self.assertRaises(StreamError) as raised:
+            write_chunk_stream(Stuck(), (b"ab",), maximum_chunk=16, label="test stream")
         self.assertEqual(str(raised.exception), "test stream write failed")
 
 
