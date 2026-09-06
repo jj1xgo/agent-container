@@ -37,7 +37,7 @@ Phase 7〜10が「Obsidianを第2の脳として使う」ための中心範囲�
 
 ## 現在の実施順
 
-Phase 6-5はPR #106で完了し、6-6の実host smokeを進めています。GitHubのfetch／Issue参照／新規branch push／PR create・view・checks、専用branchの更新拒否、Familyのlocal doctor／live inventory照合まで観測済みです。実施commitと限界はCHANGELOGに記録しています。smoke PR #4と専用branchはmerge・削除せず保持しています。
+Phase 6-5はPR #106で完了し、6-6の実host smokeを進めています。GitHubのfetch／Issue参照／新規branch push／PR create・view・checks、専用branchの更新拒否、Familyのlocal doctor／live inventory照合まで観測済みです。実施commitと限界はCHANGELOGに記録しています。smoke PR #4と専用branchはmerge・削除せず保持しています。`/proc` unmask後のClaude sandbox、security probe、Family Claude intake、対話TUI経路は2026-09-06に実hostで再確認済みで、残るのはCodex／Claude handover createとrollback（binding保持のため意図的にnot run）です。
 
 egressの実Codex検証で見つかったsequence不整合は、stage 1のrefactorと分離したPR #107で修正し、main `7a9e927`へmergeしました。拒否後・到着順逆転の回帰testを含むcontainer1119／Codex48／local socket18件、独立review、required CIの実Podman14件が成功しています。[診断記録](superpowers/plans/2026-09-05-egress-sequence-investigation.md)は修正前の観測・再現です。
 
