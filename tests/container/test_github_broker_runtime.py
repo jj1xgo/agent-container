@@ -1,19 +1,28 @@
 import json
 import os
 from pathlib import Path
+import socket
 import stat
+import struct
+import tempfile
 from tempfile import TemporaryDirectory
+import threading
 import unittest
 from unittest import mock
 
 import agent_container.github_broker_runtime as github_broker_runtime
 from agent_container.github_app import GitHubAppMetadata
+from agent_container.github_broker import BrokerSession
+from agent_container.github_broker_protocol import BrokerRequest
+from agent_container.github_broker_protocol import encode_request_frame
+from agent_container.github_broker_runtime import GitHubBrokerRuntimeError
 from agent_container.github_broker_runtime import UploadPackBrokerRuntime
 from agent_container.github_broker_runtime import broker_token_metadata
 from agent_container.github_broker_runtime import load_broker_policy
 from agent_container.github_broker_runtime import upgrade_legacy_broker_policy
 from agent_container.github_broker_runtime import write_broker_policy
 from agent_container.github_broker_policy import BrokerPolicy
+from agent_container.podman import BrokerRuntimeMount
 from agent_container.state import ProjectRecord
 from agent_container.state import Repository
 from agent_container.state import StateLayout
@@ -618,3 +627,134 @@ class BrokerRuntimeConstructionTest(unittest.TestCase):
             )
         )
         self.assertIs(runtime.issue_transport, issue_transport.return_value)
+
+
+class UploadPackBrokerRuntimeLifecycleTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="ghb-runtime-")
+        self.root = Path(self.temporary.name) / "state"
+        self.root.mkdir(mode=0o700)
+        self.policy = BrokerPolicy.create(
+            project_id="agent-container",
+            repository="jj1xgo/agent-container",
+            default_branch="main",
+            protected_branches=("main",),
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _session(self) -> BrokerSession:
+        return BrokerSession.create(self.root, self.policy)
+
+    def test_enter_returns_mount_and_exit_removes_runtime(self) -> None:
+        session = self._session()
+        runtime = UploadPackBrokerRuntime(session, mock.Mock())
+        mount = runtime.__enter__()
+        try:
+            self.assertEqual(mount, BrokerRuntimeMount(session.run_dir, self.policy.repository))
+            self.assertTrue(session.socket_path.exists())
+            self.assertEqual(runtime._runtime.thread.name, "github-broker")
+        finally:
+            runtime.__exit__(None, None, None)
+        self.assertFalse(session.run_dir.exists())
+        self.assertTrue(runtime._runtime.exited)
+
+    def test_start_failure_is_reported_with_fixed_message_and_closes_session(self) -> None:
+        session = self._session()
+        runtime = UploadPackBrokerRuntime(session, mock.Mock())
+        with mock.patch.object(
+            session, "open_listener", side_effect=OSError("private-start-marker")
+        ):
+            with self.assertRaises(GitHubBrokerRuntimeError) as raised:
+                runtime.__enter__()
+        self.assertEqual(str(raised.exception), "GitHub broker failed to start")
+        self.assertNotIn("private-start-marker", str(raised.exception))
+        self.assertFalse(session.run_dir.exists())
+
+    def test_deactivate_failure_still_removes_runtime_and_reports_fixed_error(self) -> None:
+        session = self._session()
+        calls = {"deactivate": 0}
+        real_deactivate = session.deactivate
+
+        def flaky_deactivate() -> None:
+            calls["deactivate"] += 1
+            if calls["deactivate"] == 1:
+                raise ValueError("private-deactivate-marker")
+            real_deactivate()
+
+        run_dir = session.run_dir
+        runtime = UploadPackBrokerRuntime(session, mock.Mock())
+        with mock.patch.object(session, "deactivate", flaky_deactivate):
+            runtime.__enter__()
+            with self.assertRaises(GitHubBrokerRuntimeError) as raised:
+                runtime.__exit__(None, None, None)
+            self.assertEqual(str(raised.exception), "GitHub broker deactivate failed")
+            self.assertFalse(run_dir.exists())
+            self.assertFalse(runtime._runtime.exited)
+            runtime.__exit__(None, None, None)
+        self.assertTrue(runtime._runtime.exited)
+        self.assertEqual(session._capability, "")
+
+    def test_handler_failure_after_stop_is_reported(self) -> None:
+        session = self._session()
+        runtime = UploadPackBrokerRuntime(session, mock.Mock())
+        entered = threading.Event()
+
+        def explode(*_: object, **__: object) -> int:
+            entered.set()
+            raise RuntimeError("private-handler-marker")
+
+        with mock.patch(
+            "agent_container.github_broker_runtime.handle_broker_connection", explode
+        ):
+            runtime.__enter__()
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                client.connect(str(session.socket_path))
+                self.assertTrue(entered.wait(2))
+            finally:
+                client.close()
+            with self.assertRaises(GitHubBrokerRuntimeError) as raised:
+                runtime.__exit__(None, None, None)
+        self.assertEqual(str(raised.exception), "GitHub broker failed")
+        self.assertNotIn("private-handler-marker", str(raised.exception))
+        self.assertFalse(session.run_dir.exists())
+
+    def test_peer_from_another_user_gets_no_bytes(self) -> None:
+        session = self._session()
+        runtime = UploadPackBrokerRuntime(session, mock.Mock())
+        handled = threading.Event()
+
+        def record(*_: object, **__: object) -> int:
+            handled.set()
+            return 0
+
+        real_open = socket.socket
+        foreign = struct.pack("3i", 4321, os.getuid() + 1, 0)
+
+        with mock.patch(
+            "agent_container.github_broker_runtime.handle_broker_connection", record
+        ), mock.patch(
+            "agent_container.broker.runtime.socket.socket.getsockopt",
+            return_value=foreign,
+        ):
+            runtime.__enter__()
+            client = real_open(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                client.settimeout(2)
+                client.connect(str(session.socket_path))
+                client.sendall(encode_request_frame(BrokerRequest(1, "A" * 43, "agent-container", 1, "issue-list", {})))
+                # On Linux, closing a Unix-domain socket that still has
+                # unread bytes queued on the peer's side yields ECONNRESET
+                # rather than a clean EOF; both signal "no protocol bytes
+                # were returned to a denied peer".
+                try:
+                    payload = client.recv(1)
+                except ConnectionResetError:
+                    payload = b""
+                self.assertEqual(payload, b"")
+            finally:
+                client.close()
+            runtime.__exit__(None, None, None)
+        self.assertFalse(handled.is_set())

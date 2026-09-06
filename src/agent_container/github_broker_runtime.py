@@ -4,11 +4,11 @@ import json
 import os
 from pathlib import Path
 import secrets
-import socket
 import stat
-import threading
 
-from agent_container.broker.runtime import accept_clients
+from agent_container.broker.peer import SameUser
+from agent_container.broker.runtime import Connection
+from agent_container.broker.runtime import SocketBrokerRuntime
 from agent_container.github_app import GitHubAppMetadata
 from agent_container.github_app import InstallationTokenProvider
 from agent_container.github_broker import BrokerSession
@@ -26,6 +26,12 @@ from agent_container.state import ensure_private_file
 
 class GitHubBrokerRuntimeError(Exception):
     pass
+
+
+_LISTENER_TIMEOUT_SECONDS = 0.2
+_CLIENT_TIMEOUT_SECONDS = 30
+_STOP_TIMEOUT_SECONDS = 2
+_LISTENER_BACKLOG = 4
 
 
 def broker_token_metadata(
@@ -309,9 +315,23 @@ class UploadPackBrokerRuntime(AbstractContextManager[BrokerRuntimeMount]):
     receive_transport: GitHubReceivePackTransport | None = None
     pr_transport: GitHubPullRequestTransport | None = None
     issue_transport: GitHubIssueTransport | None = None
-    _stop: threading.Event = field(default_factory=threading.Event, init=False)
-    _thread: threading.Thread | None = field(default=None, init=False)
-    _error: BaseException | None = field(default=None, init=False, repr=False)
+    _runtime: SocketBrokerRuntime = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._runtime = SocketBrokerRuntime(
+            label="GitHub broker",
+            thread_name="github-broker",
+            open_listener=lambda backlog: self.session.open_listener(backlog=backlog),
+            handler=self._handle,
+            deactivate=lambda: self.session.deactivate(),
+            close=lambda: self.session.close(),
+            error_type=GitHubBrokerRuntimeError,
+            peer_policy=SameUser(),
+            backlog=_LISTENER_BACKLOG,
+            listener_timeout=_LISTENER_TIMEOUT_SECONDS,
+            client_timeout=_CLIENT_TIMEOUT_SECONDS,
+            deactivate_after_join=True,
+        )
 
     @classmethod
     def create(cls, layout: StateLayout, record: ProjectRecord) -> "UploadPackBrokerRuntime":
@@ -332,50 +352,19 @@ class UploadPackBrokerRuntime(AbstractContextManager[BrokerRuntimeMount]):
             GitHubIssueTransport(policy, tokens),
         )
 
+    def _handle(self, connection: Connection) -> int:
+        return handle_broker_connection(
+            self.session,
+            connection.stream,
+            self.transport,
+            self.receive_transport,
+            self.pr_transport,
+            self.issue_transport,
+        )
+
     def __enter__(self) -> BrokerRuntimeMount:
-        try:
-            listener = self.session.open_listener()
-            listener.settimeout(0.2)
-            self._thread = threading.Thread(
-                target=self._serve,
-                args=(listener,),
-                name="github-broker",
-                daemon=True,
-            )
-            self._thread.start()
-        except Exception:
-            self.session.close()
-            raise
+        self._runtime.start()
         return BrokerRuntimeMount(self.session.run_dir, self.session.policy.repository)
 
-    def _serve(self, listener: socket.socket) -> None:
-        try:
-            for client in accept_clients(listener, stop_event=self._stop):
-                with client:
-                    stream = client.makefile("rwb", buffering=0)
-                    try:
-                        handle_broker_connection(
-                            self.session,
-                            stream,
-                            self.transport,
-                            self.receive_transport,
-                            self.pr_transport,
-                            self.issue_transport,
-                        )
-                    finally:
-                        stream.close()
-        except BaseException as error:
-            if not self._stop.is_set():
-                self._error = error
-
     def __exit__(self, *_: object) -> None:
-        self._stop.set()
-        if self.session._listener is not None:
-            self.session._listener.close()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
-            if self._thread.is_alive():
-                raise GitHubBrokerRuntimeError("GitHub broker did not stop")
-        self.session.close()
-        if self._error is not None:
-            raise GitHubBrokerRuntimeError("GitHub broker failed") from None
+        self._runtime.stop(join_timeout=_STOP_TIMEOUT_SECONDS)

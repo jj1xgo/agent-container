@@ -6,7 +6,6 @@ import unittest
 from unittest import mock
 
 from agent_container import github_broker_protocol as protocol
-from agent_container.github_broker_runtime import UploadPackBrokerRuntime
 
 
 def frame(body):
@@ -89,49 +88,3 @@ class GitHubCompatibilityTest(unittest.TestCase):
                 )
             )
 
-    def test_start_preserves_original_error_and_closes_session(self):
-        session = mock.Mock()
-        error = OSError("synthetic-start-error")
-        session.open_listener.side_effect = error
-        runtime = UploadPackBrokerRuntime(session, mock.Mock())
-        with self.assertRaises(OSError) as caught:
-            runtime.__enter__()
-        self.assertIs(caught.exception, error)
-        session.close.assert_called_once_with()
-
-    def test_stop_order_and_cleanup_error_are_preserved(self):
-        events = []
-        session = mock.Mock()
-        runtime = UploadPackBrokerRuntime(session, mock.Mock())
-        runtime._thread = mock.Mock()
-        runtime._thread.is_alive.return_value = False
-
-        def close_listener():
-            self.assertTrue(runtime._stop.is_set())
-            events.append("listener")
-
-        session._listener.close.side_effect = close_listener
-        runtime._thread.join.side_effect = lambda **kw: events.append(("join", kw))
-        error = ValueError("synthetic-cleanup-error")
-
-        def close_session():
-            events.append("session")
-            raise error
-
-        session.close.side_effect = close_session
-        with self.assertRaises(ValueError) as caught:
-            runtime.__exit__()
-        self.assertIs(caught.exception, error)
-        self.assertEqual(events, ["listener", ("join", {"timeout": 2}), "session"])
-
-    def test_serve_suppresses_errors_after_stop(self):
-        runtime = UploadPackBrokerRuntime(mock.Mock(), mock.Mock())
-        listener = mock.Mock()
-
-        def fail():
-            runtime._stop.set()
-            raise RuntimeError("synthetic-after-stop")
-
-        listener.accept.side_effect = fail
-        runtime._serve(listener)
-        self.assertIsNone(runtime._error)
