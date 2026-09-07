@@ -1,6 +1,6 @@
 # Codex handoverのcreate-only broker統一 — 設計案
 
-状態: 2026-09-07、利用者が推奨案（申告IDを本文に明示して保持）を承認。実装中。
+状態: 2026-09-07、利用者が推奨案（申告IDを本文に明示して保持）を承認。実装・ローカル検証済み。remote CIと実host gateは検証記録で管理する。
 
 調査基準: main `74fc0d7a308b7038ac6513afd979270306ae8569`（PR #122 merge）。
 対象: [Issue #120](https://github.com/jj1xgo/agent-container/issues/120)。Phase 6の保守作業としてPhase 7より先に実施する。
@@ -76,7 +76,7 @@ profile versionを5へ進め、既存`project update-profile PROJECT`で配布�
 
 実host gateは実hostの接続・承認範囲を確認して実施する。このworkspaceではPodman commandが見つからず、実host gateを実行できることは確認できていない。未実施をPASSに読み替えず、Issue完了とmain mergeの判断へ明記する。
 
-## 今回の調査・検証記録
+## 設計時の調査・検証記録
 
 - GitHub Issue #120本文とorigin/mainを直接照合し、引き継ぎのmain commitと一致した。
 - `/workspace`の既存CI差分と未追跡handoverは保持。専用worktreeは `/workspace/.worktrees/codex-handover-broker`、branchは `feat/codex-handover-broker`。

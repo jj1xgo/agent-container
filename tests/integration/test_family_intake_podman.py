@@ -1,5 +1,6 @@
 """Opt-in rootless Podman evidence for the family intake runtime boundary."""
 
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,7 @@ from agent_container.podman import run_codex_spec
 from agent_container.podman import run_command_supervised
 from agent_container.state import Repository
 from agent_container.state import StateLayout
+from agent_container.handover_broker_runtime import HandoverBrokerRuntime
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
 from agent_container.egress_broker_runtime import EgressRuntimeMount
 
@@ -420,7 +422,8 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
             specs = (
                 run_codex_spec(
                     state, Path("/handover/demo"), "image", os.getuid(),
-                    os.getgid(), family_mount=mount,
+                    os.getgid(), HandoverRuntimeMount(Path("/handover/broker")),
+                    family_mount=mount,
                 ),
                 run_claude_spec(
                     state, Path("/handover/demo"), "image", os.getuid(),
@@ -429,7 +432,8 @@ class FamilyIntakePodmanFixtureTest(unittest.TestCase):
                 ),
                 run_codex_spec(
                     state, Path("/handover/demo"), "image", os.getuid(),
-                    os.getgid(), family_mount=mount, egress=egress_codex,
+                    os.getgid(), HandoverRuntimeMount(Path("/handover/broker")),
+                    family_mount=mount, egress=egress_codex,
                 ),
                 run_claude_spec(
                     state, Path("/handover/demo"), "image", os.getuid(),
@@ -527,6 +531,7 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                 self.subTest(agent=agent, with_egress=with_egress),
                 TemporaryDirectory() as temp,
                 TemporaryDirectory() as handover_temp,
+                ExitStack() as handover_brokers,
             ):
                 root = Path(temp)
                 root.chmod(0o700)
@@ -565,6 +570,9 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     for file_path in (state.codex_auth_file, state.claude_token_file):
                         file_path.parent.mkdir(parents=True, exist_ok=True)
                         file_path.write_text("sk-ant-oat01-" + "x" * 95, encoding="ascii")
+                    handover_broker = handover_brokers.enter_context(
+                        HandoverBrokerRuntime.create(state, handover)
+                    )
                     marker_id = secrets.token_hex(8)
                     ready_marker, done_marker = _marker_paths(
                         state.workspace, marker_id
@@ -579,12 +587,12 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                     base = (
                         run_codex_spec(
                             state, handover, _IMAGE, os.getuid(), os.getgid(),
-                            family_mount=mount, egress=egress,
+                            handover_broker, family_mount=mount, egress=egress,
                         )
                         if agent == "codex"
                         else run_claude_spec(
                             state, handover, _IMAGE, os.getuid(), os.getgid(),
-                            HandoverRuntimeMount(Path(handover_temp) / "broker"),
+                            handover_broker,
                             family_mount=mount, egress=egress,
                         )
                     )
@@ -704,12 +712,12 @@ class FamilyIntakePodmanTest(unittest.TestCase):
                 failed_base = (
                     run_codex_spec(
                         state, handover, _IMAGE, os.getuid(), os.getgid(),
-                        family_mount=failed_mount, egress=egress,
+                        handover_broker, family_mount=failed_mount, egress=egress,
                     )
                     if agent == "codex"
                     else run_claude_spec(
                         state, handover, _IMAGE, os.getuid(), os.getgid(),
-                        HandoverRuntimeMount(Path(handover_temp) / "broker"),
+                        handover_broker,
                         family_mount=failed_mount, egress=egress,
                     )
                 )

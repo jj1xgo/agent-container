@@ -4,7 +4,7 @@
 
 ## 現在の判定
 
-実装・検証中。両agentの実host gateはnot runであり、Issue完了とは判定しない。今回のworkspaceにはPodman commandがなく、hostの認証済みCLIへ接続する実行手段も確認できていない。既存handoversに記録された実host結果を今回の結果へ読み替えない。
+実装とローカル検証は完了、remote CIとブランチ全体reviewを確認中。両agentの実host gateはnot runであり、Issue完了とは判定しない。今回のworkspaceにはPodman commandがなく、hostの認証済みCLIへ接続する実行手段も確認できていない。既存handoversに記録された実host結果を今回の結果へ読み替えない。
 
 ## 対象と境界
 
@@ -22,7 +22,9 @@
 | 基準container unit | main `74fc0d7` | 1169件PASS。実装後の検証ではない |
 | wrapperと実Unix socket | 今回のwrapper、既存broker | session設定済み／未設定の両方で本文一致、canonical Session未記録、mode 0600、staleとbroker環境欠落を拒否。1 test・2 subcase PASS |
 | 旧wrapperによる再現 | `74fc0d7:container/bin/agent-handover`を独立一時directoryで使用 | 同じtestが両subcaseで期待どおり失敗。broker環境欠落でdirect writerがexit 0となりfileを作成した。現worktreeのwrapperは差し戻していない |
-| 実装後全unit・lint・socket | 今回のbranch | 検証中 |
+| 実装後全unit・lint・socket | `f966e64`の実装と同時点の統合fixture | container 1178件、Codex 49件、CI broker socket 9件PASS。ResourceWarningなし。lint PASS。内部validator改名後は対象7件を再実行してPASS |
+| Podman fixture準備 | 今回の統合test | 両sandbox fixtureで実brokerのmount作成・cleanupをローカル確認。probe Python／launcher shell構文、Ruff PASS。CI対象17件のdiscoveryを確認（未実行）。network testを拡張し、outer read-only mountのEROFSとCodex tool sandbox内の拒否・broker create・再読を分けて検査する |
+| 文書／skill独立review | `74fc0d7..cd87377`とmigration節 | 指摘なし。更新skillの判断評価は下記 |
 | required CI | 今回のPR | not run（PR作成前） |
 | 実Podman | 今回のimage | not run（workspaceにPodmanなし） |
 | 認証済み両agentの実host gate | 今回のimage/profile | not run（host実行手段・個別gate承認が未確認） |

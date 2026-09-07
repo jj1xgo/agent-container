@@ -77,6 +77,15 @@ profile version `5`は新しいstdin手順を配布する。旧profileはrun pre
 
 handover保存先はstate rootやworkspace、Codex／Claude設定、cacheなどのwrite mountと重複させない。旧登録が重複している場合も、既存文書を自動移動したり権限を緩めたりしない。全sessionを止め、operatorが保存先と登録情報を整合させてからdoctorで確認する。
 
+既存保存先を移す場合は、hostのoperatorが次の順で行う。`STATE`は実際のstate root、`PROJECT`は登録済みproject IDを指す。
+
+1. 対象projectのCodex／Claude runをすべて終了し、保存中のrequestがないことを確認する。新しい保存先は絶対pathの通常directoryで、stateやwrite mountの祖先・子孫に置かず、symlinkを使わない。
+2. `STATE/projects/PROJECT/project.json`の現在の`handover_root`を確認し、metadataのmode `0600`のbackupを保存する。新rootの`PROJECT` directoryへ旧文書をcopyし、file数・内容・所有者・permissionを照合する。directoryはmode `0700`で用意し、衝突する既存文書を上書きしない。旧文書は検証完了まで保持する。
+3. `project.json`の`handover_root`だけを新rootの絶対pathへ変更し、`repository`とmode `0600`を保持する。値は`PROJECT` directoryそのものではなく、その親root。`project add --handover-root ...`は既存登録の変更commandではなく、不一致を拒否するため代用しない。
+4. profile更新後に`doctor PROJECT --agent codex`を実行する。Claudeも利用するprojectでは`--agent claude`も確認し、新runで既存文書を読めることと新規createを検証する。旧copyの削除はこの確認とoperatorの判断の後に行う。
+
+この手順は利用者の保存済み文書を扱うため自動実行しない。今回のworkspaceでは実hostでの移行はnot run。
+
 ### read-only errorの切り分け
 
 `Read-only file system`だけでhost保存先が壊れたと判断しない。tool sandbox、Podmanのmount、host directoryは異なる制約である。
