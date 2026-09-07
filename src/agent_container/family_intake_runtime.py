@@ -12,6 +12,7 @@ import threading
 import time
 from typing import Callable
 
+from agent_container.broker.artifacts import RuntimeArtifacts
 from agent_container.broker.runtime import accept_clients
 from agent_container.family_intake_broker import FamilyIntakeSession
 from agent_container.family_intake_transport import handle_family_intake_connection
@@ -34,9 +35,7 @@ _MAX_UNIX_SOCKET_PATH_BYTES = 107
 _RUN_ID_ATTEMPTS = 16
 _STOP_TIMEOUT_SECONDS = 2
 _CONTAINER_SOCKET = "/run/agent-family/intake.sock"
-_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
-_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_LABEL = "family intake"
 
 
 class FamilyIntakeRuntimeError(FamilyRuntimeError):
@@ -45,14 +44,6 @@ class FamilyIntakeRuntimeError(FamilyRuntimeError):
 
 def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
     return left.st_dev == right.st_dev and left.st_ino == right.st_ino
-
-
-def _private_directory(metadata: os.stat_result) -> bool:
-    return (
-        stat.S_ISDIR(metadata.st_mode)
-        and stat.S_IMODE(metadata.st_mode) == 0o700
-        and metadata.st_uid == os.getuid()
-    )
 
 
 @dataclass
@@ -75,11 +66,7 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
         default_factory=threading.Lock, init=False, repr=False
     )
     _mount: FamilyRuntimeMount | None = field(default=None, init=False, repr=False)
-    _run_parent_descriptor: int | None = field(default=None, init=False, repr=False)
-    _run_descriptor: int | None = field(default=None, init=False, repr=False)
-    _run_id: str | None = field(default=None, init=False, repr=False)
-    _run_stat: os.stat_result | None = field(default=None, init=False, repr=False)
-    _socket_stat: os.stat_result | None = field(default=None, init=False, repr=False)
+    _artifacts: RuntimeArtifacts | None = field(default=None, init=False, repr=False)
     _cleanup_complete: bool = field(default=False, init=False, repr=False)
 
     @classmethod
@@ -118,36 +105,27 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
             self.layout.family_intake_run_root,
         ):
             ensure_private_directory(directory, create=True)
-        parent = os.open(
-            self.layout.family_intake_run_root,
-            os.O_RDONLY | _DIRECTORY | _NOFOLLOW | _CLOEXEC,
-        )
-        self._run_parent_descriptor = parent
         for _attempt in range(_RUN_ID_ATTEMPTS):
             generated = self.random_bytes(8)
             if type(generated) is not bytes or len(generated) != 8:
                 raise ValueError("family intake random source is invalid")
-            run_id = generated.hex()
+            run_dir = self.layout.family_intake_run_root / generated.hex()
             try:
-                os.mkdir(run_id, 0o700, dir_fd=parent)
+                run_dir.mkdir(mode=0o700)
             except FileExistsError:
                 continue
-            self._run_id = run_id
-            run_stat = os.stat(run_id, dir_fd=parent, follow_symlinks=False)
-            if not _private_directory(run_stat):
-                raise PermissionError("family intake run directory is not private")
-            self._run_stat = run_stat
-            run_descriptor = os.open(
-                run_id,
-                os.O_RDONLY | _DIRECTORY | _NOFOLLOW | _CLOEXEC,
-                dir_fd=parent,
-            )
-            opened = os.fstat(run_descriptor)
-            if not _private_directory(opened) or not _same_inode(run_stat, opened):
-                os.close(run_descriptor)
-                raise PermissionError("family intake run directory is not private")
-            self._run_descriptor = run_descriptor
-            return self.layout.family_intake_run_root / run_id
+            try:
+                # Opens the parent and the run directory by descriptor, requires
+                # mode 0700 and the current uid, and captures the identity that
+                # cleanup compares against (K2).
+                self._artifacts = RuntimeArtifacts.open(run_dir, label=_LABEL)
+            except BaseException:
+                try:
+                    os.rmdir(run_dir)
+                except OSError:
+                    pass
+                raise
+            return run_dir
         raise FileExistsError("could not allocate family intake runtime")
 
     def _new_capability(self) -> str:
@@ -199,27 +177,16 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
                 raise ValueError("family intake socket path is too long")
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             listener.bind(str(socket_path))
-            if self._run_descriptor is None:
+            artifacts = self._artifacts
+            if artifacts is None:
                 raise ValueError("family intake run directory is unavailable")
-            socket_stat = os.stat(
-                "intake.sock",
-                dir_fd=self._run_descriptor,
-                follow_symlinks=False,
-            )
-            if not stat.S_ISSOCK(socket_stat.st_mode):
-                raise ValueError("family intake socket is invalid")
-            self._socket_stat = socket_stat
-            os.chmod(
-                "intake.sock",
-                0o600,
-                dir_fd=self._run_descriptor,
-                follow_symlinks=False,
-            )
-            secured = os.stat(
-                "intake.sock",
-                dir_fd=self._run_descriptor,
-                follow_symlinks=False,
-            )
+            # Capture the bound socket's identity before chmod: cleanup only
+            # unlinks this inode (F2).
+            artifacts.track_socket("intake.sock")
+            dir_fd = artifacts.dir_fd
+            socket_stat = os.stat("intake.sock", dir_fd=dir_fd, follow_symlinks=False)
+            os.chmod("intake.sock", 0o600, dir_fd=dir_fd, follow_symlinks=False)
+            secured = os.stat("intake.sock", dir_fd=dir_fd, follow_symlinks=False)
             if (
                 not _same_inode(socket_stat, secured)
                 or not stat.S_ISSOCK(secured.st_mode)
@@ -351,68 +318,17 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
             self._interrupt_client()
 
     def _cleanup_artifacts(self) -> None:
-        cleanup_failed = False
+        artifacts = self._artifacts
+        self._artifacts = None
+        self._cleanup_complete = True
+        if artifacts is None:
+            return
         try:
-            if self._run_descriptor is not None and self._socket_stat is not None:
-                try:
-                    current = os.stat(
-                        "intake.sock",
-                        dir_fd=self._run_descriptor,
-                        follow_symlinks=False,
-                    )
-                except FileNotFoundError:
-                    pass
-                except OSError:
-                    cleanup_failed = True
-                else:
-                    if (
-                        _same_inode(current, self._socket_stat)
-                        and stat.S_ISSOCK(current.st_mode)
-                    ):
-                        try:
-                            os.unlink("intake.sock", dir_fd=self._run_descriptor)
-                        except OSError:
-                            cleanup_failed = True
-                    else:
-                        cleanup_failed = True
-
-            if (
-                not cleanup_failed
-                and self._run_parent_descriptor is not None
-                and self._run_id is not None
-                and self._run_stat is not None
-            ):
-                try:
-                    current_run = os.stat(
-                        self._run_id,
-                        dir_fd=self._run_parent_descriptor,
-                        follow_symlinks=False,
-                    )
-                except FileNotFoundError:
-                    pass
-                except OSError:
-                    cleanup_failed = True
-                else:
-                    if _same_inode(current_run, self._run_stat) and _private_directory(
-                        current_run
-                    ):
-                        try:
-                            os.rmdir(self._run_id, dir_fd=self._run_parent_descriptor)
-                        except OSError:
-                            cleanup_failed = True
-                    else:
-                        cleanup_failed = True
+            cleanup_failed = artifacts.remove()
         finally:
-            for attribute in ("_run_descriptor", "_run_parent_descriptor"):
-                descriptor = getattr(self, attribute)
-                if descriptor is not None:
-                    try:
-                        os.close(descriptor)
-                    except OSError:
-                        cleanup_failed = True
-                    finally:
-                        setattr(self, attribute, None)
-            self._cleanup_complete = True
+            # Family closes both descriptors even when removal failed; its
+            # close() is not retried (unchanged behavior).
+            artifacts.close()
         if cleanup_failed:
             raise ValueError("family intake cleanup failed")
 

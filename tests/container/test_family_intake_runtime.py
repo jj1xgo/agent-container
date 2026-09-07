@@ -279,8 +279,7 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
                 runtime.start()
 
         self.assertEqual(list(self.layout.family_intake_run_root.iterdir()), [])
-        self.assertIsNone(runtime._run_descriptor)
-        self.assertIsNone(runtime._run_parent_descriptor)
+        self.assertIsNone(runtime._artifacts)
 
     # Break caught: bind succeeding before chmod fails and leaving a live stale socket.
     def test_post_bind_start_failure_cleans_the_owned_socket_and_run_directory(self) -> None:
@@ -300,8 +299,7 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
                 runtime.start()
 
         self.assertEqual(list(self.layout.family_intake_run_root.iterdir()), [])
-        self.assertIsNone(runtime._run_descriptor)
-        self.assertIsNone(runtime._run_parent_descriptor)
+        self.assertIsNone(runtime._artifacts)
 
     # Break caught: startup inode replacement preserving attacker data but leaking both FDs.
     def test_startup_cleanup_preserves_replacement_and_closes_descriptors(self) -> None:
@@ -316,11 +314,11 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
         ) -> None:
             if path != "intake.sock":
                 raise AssertionError(f"unexpected chmod target: {path!r}")
-            run_descriptor = runtime._run_descriptor
-            parent_descriptor = runtime._run_parent_descriptor
-            self.assertIsNotNone(run_descriptor)
-            self.assertIsNotNone(parent_descriptor)
-            descriptors.extend((run_descriptor, parent_descriptor))  # type: ignore[arg-type]
+            artifacts = runtime._artifacts
+            self.assertIsNotNone(artifacts)
+            run_descriptor = artifacts.dir_fd  # type: ignore[union-attr]
+            parent_descriptor = artifacts.parent_dir_fd  # type: ignore[union-attr]
+            descriptors.extend((run_descriptor, parent_descriptor))
             os.unlink("intake.sock", dir_fd=run_descriptor)
             replacement = os.open(
                 "intake.sock",
@@ -349,8 +347,7 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
             "startup-replacement-marker",
         )
         self.assertNotIn("private-startup-marker", str(raised.exception))
-        self.assertIsNone(runtime._run_descriptor)
-        self.assertIsNone(runtime._run_parent_descriptor)
+        self.assertIsNone(runtime._artifacts)
         self.assertEqual(len(descriptors), 2)
         for descriptor in descriptors:
             with self.assertRaises(OSError):
@@ -360,10 +357,10 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
     def test_cleanup_preserves_replacement_inode_and_reports_fixed_failure(self) -> None:
         runtime = self.runtime()
         mount = runtime.start()
-        run_descriptor = runtime._run_descriptor
-        parent_descriptor = runtime._run_parent_descriptor
-        self.assertIsNotNone(run_descriptor)
-        self.assertIsNotNone(parent_descriptor)
+        artifacts = runtime._artifacts
+        self.assertIsNotNone(artifacts)
+        run_descriptor = artifacts.dir_fd  # type: ignore[union-attr]
+        parent_descriptor = artifacts.parent_dir_fd  # type: ignore[union-attr]
         mount.socket_path.unlink()
         mount.socket_path.write_text("replacement-marker", encoding="ascii")
         mount.socket_path.chmod(0o600)
@@ -374,8 +371,7 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
         self.assertEqual(str(raised.exception), "family intake runtime cleanup failed")
         self.assertEqual(mount.socket_path.read_text("ascii"), "replacement-marker")
         self.assertNotIn("replacement-marker", str(raised.exception))
-        self.assertIsNone(runtime._run_descriptor)
-        self.assertIsNone(runtime._run_parent_descriptor)
+        self.assertIsNone(runtime._artifacts)
         for descriptor in (run_descriptor, parent_descriptor):
             with self.assertRaises(OSError):
                 os.fstat(descriptor)  # type: ignore[arg-type]
