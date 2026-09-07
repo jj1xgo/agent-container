@@ -25,7 +25,7 @@
 
 文書検査: `git diff --check`成功。変更・新規Markdown 6件の相対linkと空白を確認し、CHANGELOGの既存の相対link誤り1件（Claude sandbox設計への`docs/`欠落）を修正した。既存smoke手順書5件はHEADとbyte一致。
 
-## 実host smoke（すべてnot run）
+## 前セッション時点の実host smoke（すべてnot run）
 
 理由: このsandboxにはPodmanと実host実行手段がない。認証やfixtureの現在状態も未確認。以下の既存手順書は変更していない。
 
@@ -50,3 +50,34 @@ GitHubはSameUserによる実clientの許可とjoin後失効を確認し、30秒
 ## 次の実装
 
 利用者指定（2026-09-07）: S2-4の実host smoke・required CI・必要なmain取り込みを完了した直後、Phase 7へ進む前に[Issue #120: Codex handoverのcreate-only broker統一](https://github.com/jj1xgo/agent-container/issues/120)へ最優先で着手する。S2-4へruntime変更を混ぜず、独立した設計・実装PRとする。
+
+## 実hostでの再開（2026-09-07）
+
+前セッションの専用workspaceでbranch `docs/broker-kernel-s2-4`、commit `5a2a49a`を確認し、ホストrepositoryへ取得して`.worktrees/broker-kernel-s2-4`に同commitのworktreeを作成した。元workspaceのCI差分と未追跡handoverは保持している。ホストのmainは`e41d096`のまま、fetch後の`origin/main`は`36f02a8`。このworktreeのCIはHEADと一致し、Podman gateは17件である。
+
+### Buildとlocal gate
+
+- local Podman `5.8.6`、rootless `true`、OCI runtime `crun`。
+- 対象checkoutで`bin/agentctl --image localhost/agent-family-test:local build`がexit 0。version固定optionなし。
+- image ID: `e9791cbc483f8516963d3afe85da6c662373156b77e5904ad4868b3a98e12c02`。
+- 公開version: Node `v26.8.1`、Codex `0.153.4`、Claude `2.1.263`。image内agentctlは`0.6.0-dev.46+g5a2a49a`、`agent-github --help`もexit 0。
+
+| 検証 | 今回の実測結果 |
+| --- | --- |
+| `bin/lint` | PASS |
+| Codex unit | PASS、49件、skip 0 |
+| container unit | PASS、1169件、skip 0 |
+| socket 4 module＋forced unknown | PASS、18＋4＝22件、skip 0、ResourceWarningなし |
+| 実Podman 5 module | PASS、17件、138.403秒、skip 0。専用imageをbase imageとFamily imageの双方に指定し、socket／Podman integrationを有効化。両agentのFamily ancestry／duplicate／non-exposure／cleanup、egress、strong nested sandbox、Codex sandbox内socket接続を含む |
+| 専用smoke projectのdoctor（両agent、GitHub broker、専用image） | PASS、全項目成功。Claude auth status、managed policy、handover client、既存egress policyも成功。実推論・remote inventoryの成功とは区別する |
+| Family doctor | local state、binding、pending invariants、audit、App metadata permissionsはPASS。remote availabilityはnot run |
+
+上記unit／socketのcommandは既存gateと同じで、`PYTHONDONTWRITEBYTECODE=1`を追加した。初回の通常sandboxではcontainer suiteのsocket関連31件がERROR、1件skip、managed policy 1件FAIL、socket suiteは18件ERRORだった。socket作成は`EPERM`であり、sandbox外で再実行した。managed policy失敗は新規checkoutの`profiles/claude/statusline.sh`が`0664`で、validatorが`0644`を要求したため。`CLAUDE.md`と同fileのworktree内modeを`0644`へ合わせ、対象test成功後にホストでcontainer全suiteを実行して上表の結果を得た。追跡fileの内容やvalidatorは変更していない。buildとdoctorも通常sandboxではPodmanを利用できず、ホスト実行へ切り替えた。
+
+### CIと残存gate
+
+[PR #119](https://github.com/jj1xgo/agent-container/pull/119)はmerge済みで、head `91585c6bd89cfdfbaa27576d498db7fad5894eca`、merge commit `36f02a87c14603114bd5856575c0c92b49a07d66`を照合した。[同PRのCI](https://github.com/jj1xgo/agent-container/actions/runs/34072250396)はUnit tests／Podman integrationともpass。これは先行PRの結果であり、S2-4 commitの新規required CIはnot run（push／PR未実施）。
+
+認証済み実CLIの操作、GitHub clone／fetchとcreate-only push／PR、Issue read／stale client、egress実サービス接続、Family両CLI intake／実Issue作成、各rollbackはnot run。専用smoke projectの既存workspaceは追跡branchに対してahead 2／behind 1であり、resetや既存branch変更はしていない。次の実サービスgateは対象project・agent・exact domain・操作を具体化し、各手順書のfresh approval条件を満たしてから行う。Phase 6は引き続き進行中。
+
+今回のlocalログ: `/tmp/s2-4-host-{build,codex,container,socket,podman,doctor-smoke,docs}.log`。credential本文を取得せず、認証関連の直接観測は既存手順で許可されたmetadataとdoctor結果に限定した。
