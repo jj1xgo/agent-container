@@ -78,7 +78,7 @@ GitHubはSameUserによる実clientの許可とjoin後失効を確認し、30秒
 
 [PR #119](https://github.com/jj1xgo/agent-container/pull/119)はmerge済みで、head `91585c6bd89cfdfbaa27576d498db7fad5894eca`、merge commit `36f02a87c14603114bd5856575c0c92b49a07d66`を照合した。[同PRのCI](https://github.com/jj1xgo/agent-container/actions/runs/34072250396)はUnit tests／Podman integrationともpass。これは先行PRの結果であり、S2-4 commitの新規required CIはnot run（push／PR未実施）。
 
-Codexの最小応答とegress cleanup、Claudeの最小応答とcredential非露出probe、直接CLIによるGitHub fetch／Issue read／新規branch作成pushは下記のとおり確認した。GitHub新規clone、PR、negative push、stale client、Family両CLI intake／実Issue作成、各rollbackはnot run。専用smoke projectの既存workspaceは追跡branchに対してahead 2／behind 1であり、resetや既存branch変更はしていない。次の実サービスgateは対象project・agent・exact domain・操作を具体化し、各手順書のfresh approval条件を満たしてから行う。Phase 6は引き続き進行中。
+Codexの最小応答とegress cleanup、Claudeの最小応答とcredential非露出probe、直接CLIによるGitHub fetch／Issue read／新規branch作成push／PR create・view・checksは下記のとおり確認した。GitHub新規clone、negative push、stale client、Family両CLI intake／実Issue作成、各rollbackはnot run。専用smoke projectの既存workspaceは追跡branchに対してahead 2／behind 1であり、resetや既存branch変更はしていない。次の実サービスgateは対象project・agent・exact domain・操作を具体化し、各手順書のfresh approval条件を満たしてから行う。Phase 6は引き続き進行中。
 
 今回のlocalログ: `/tmp/s2-4-host-{build,codex,container,socket,podman,doctor-smoke,docs}.log`。credential本文を取得せず、認証関連の直接観測は既存手順で許可されたmetadataとdoctor結果に限定した。
 
@@ -160,4 +160,18 @@ PASS: exit 0、1.791秒、`new branch`報告あり。push後のbroker経由のre
 
 launcher／processともexit 0、timeoutなし。GitHub／egress双方のsocket・capability・run directoryと対象containerが不在、既存workspaceのfile状態とlocal HEADは不変。`--network=none`とlegacy host gh mountなしを維持した。create-onlyの正の操作はPASSだが、既存branch更新拒否などのnegative gateはまだnot run。
 
-次のPR候補: repositoryは同じ専用smoke repository、base `main`、headは上記branch、titleは`test: GitHub broker S2-4 smoke`、bodyは「Phase 6 S2-4の承認済みsmoke test。空commitのみでファイル変更なし。mergeしない。」。本文を`/tmp/s2-4-smoke-pr-body.md`に準備済み。PR作成は別のfresh approval待ちで、mergeや自動close／deleteは行わない。
+準備したPR候補: repositoryは同じ専用smoke repository、base `main`、headは上記branch、titleは`test: GitHub broker S2-4 smoke`、bodyは「Phase 6 S2-4の承認済みsmoke test。空commitのみでファイル変更なし。mergeしない。」。本文を`/tmp/s2-4-smoke-pr-body.md`に準備し、別のfresh approval後に次節のとおり作成した。mergeや自動close／deleteは行わない。
+
+### 承認済みsmoke PR create／view／checks（2026-09-07）
+
+利用者のfresh approval後、host checkout `29505f7`と上記image、一時driver `/tmp/s2-4-github-pr-smoke.py`を使い、同じ直接CLI／通常broker監視経路からPRを1件作成した。[専用smoke PR #5](https://github.com/jj1xgo/agent-container-smoke/pull/5)はOPEN、base `main`、head `test/github-broker-smoke-s2-4-20260907`、head SHA `99a8a51e629f0b5fd0a65931b93bae6d1b9b8d84`。host側のread-only `gh pr view`でもbase／head／SHAと承認済みtitle／bodyの一致を確認した。PR createの呼び出しは1回だけ。
+
+| 実CLI操作 | exit | 実測秒数 | 結果 |
+| --- | --- | --- | --- |
+| `agent-github pr create` | 0 | 2.376 | PASS、固定schema、期待title／state／URL |
+| `agent-github pr view 5` | 0 | 0.580 | PASS、create結果と一致 |
+| `agent-github pr checks 5` | 0 | 1.099 | PASS、固定schema、checks 0件。読み取り成功でありCI成功ではない |
+
+3操作ともstderr空。auditは`pr-create`／`pr-view`／`pr-checks`各1件ok、stageなし、固定schema、createのPR番号一致。launcher／processともexit 0、timeoutなし。GitHub／egress双方のsocket・capability・run directoryと対象containerが不在で、既存workspaceのfile状態とHEADは不変。PRはmergeせずOPENのまま保持する。S2-4文書branch自体のrequired CI／PR／main取り込みとは別のsmoke結果である。
+
+次のread-only gate候補として`/tmp/s2-4-github-clone-stale-smoke.py`を準備し、構文検査のみ実施。専用repositoryをcontainer内`/tmp`の一意な一時directoryへ新規cloneし、exact originとmain commitを照合して一時cloneを除去する。runtime中にsocket／capabilityのpathだけを保持し、通常終了後にその設定の実clientが固定errorで拒否されることとaudit不変を確認する。capability本文は取得・複製しない。新規cloneの実行は直前承認待ち。
