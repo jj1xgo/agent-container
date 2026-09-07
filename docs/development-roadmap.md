@@ -6,7 +6,7 @@
 
 Phase 5の成果は専用`release/0.5`系統の`v0.5.0`として切り出す。Phase 6はmainの`0.6.0-dev`で継続する。公開候補と検証状態は[release記録](v0.5.0-release.md)を参照する。
 
-Phase 1〜5は完了した。現在地は**Phase 6**である。Phase 5は、2026-09-02の実host smokeで専用App／binding、実PodmanのCodex／Claude両path、Codex intake、承認付き実Issue、non-exposure、duplicate、audit／cleanupがPASSし、残っていたClaude実CLIのintakeを2026-09-04に再実行してPASSしたことで閉じた。以前HTTP 401で停止していた原因は、browserのlogin codeをsetup tokenとして保存していた貼り間違いであり、validatorの強化（PR #79）と折り返しpasteの連結（PR #81）で再発を防いだ。
+Phase 1〜6は完了した。現在地は**Phase 7**である。ただし利用者指定により、Phase 7の実装に着手する前にPhase 6の保守作業として[Issue #120](https://github.com/jj1xgo/agent-container/issues/120)（Codex handoverのcreate-only broker統一）を最優先で行う。Phase 6は、stage 1（PR #106まで）とstage 2（S2-1〜S2-3、PR #117〜#119）を取り込んだmain `36f02a8`に対し、2026-09-07の実host smoke（[検証記録](broker-kernel-stage2-validation.md)の現在地一覧）で、stage 2が観測挙動を変えた4 broker（handover、egress、GitHub、Family）の既存手順gateがすべてPASSし、その記録をS2-4（PR #122）で取り込んだことで閉じた。stage 2対象外の一部項目はstage 1証拠を採用し、各rollbackはnot run（policy／binding保持）のまま記録している。Phase 5は、2026-09-02の実host smokeで専用App／binding、実PodmanのCodex／Claude両path、Codex intake、承認付き実Issue、non-exposure、duplicate、audit／cleanupがPASSし、残っていたClaude実CLIのintakeを2026-09-04に再実行してPASSしたことで閉じた。以前HTTP 401で停止していた原因は、browserのlogin codeをsetup tokenとして保存していた貼り間違いであり、validatorの強化（PR #79）と折り返しpasteの連結（PR #81）で再発を防いだ。
 
 状態は次の4種類とする。
 
@@ -24,7 +24,7 @@ Phase 1〜5は完了した。現在地は**Phase 6**である。Phase 5は、202
 | Phase 3 | GitHub App broker | 完了 | credentialをcontainerへ渡さず、exact repositoryのclone／fetch、create-only push、PR、Issue readを提供する。 |
 | Phase 4 | scope整合・安全性安定化・`v0.4.0` | 完了 | private fixture gate、create-only強制、Issue read、cleanup、releaseを完了する。 |
 | Phase 5 | Family機能の運用完成 | 完了 | 専用App、binding、Codex／Claude intake、non-exposure、duplicate、承認付き実Issue、unknown reconciliation、cleanupの実host smokeがPASSする。 |
-| Phase 6 | 共通broker kernel | 進行中 | GitHub／handover／egress／Familyの4 brokerが仕様に記録した共通kernel部品と互換adapter上で動き（stage 1）、残したlifecycle・capability・audit opener等を統一し、kernelがreadiness gate・fail-closed cleanup・統一auditを全brokerへ提供し（stage 2）、既存の実host smoke手順が変更なしでPASSする。設計は[`docs/superpowers/specs/2026-09-04-broker-kernel-design.md`](superpowers/specs/2026-09-04-broker-kernel-design.md)。 |
+| Phase 6 | 共通broker kernel | 完了 | GitHub／handover／egress／Familyの4 brokerが仕様に記録した共通kernel部品と互換adapter上で動き（stage 1）、残したlifecycle・capability・audit opener等を統一し、kernelがreadiness gate・fail-closed cleanup・統一auditを全brokerへ提供し（stage 2）、既存の実host smoke手順が変更なしでPASSする。設計は[`docs/superpowers/specs/2026-09-04-broker-kernel-design.md`](superpowers/specs/2026-09-04-broker-kernel-design.md)。 |
 | Phase 7 | Obsidian Vault config sync | 未着手 | review可能なschemaをVault原本から検査済みprivate stateへ同期し、credential、session、cacheを除外する。 |
 | Phase 8 | Worktree・task lease | 未着手 | task・event・agentのhost側contractをleaseの最初の消費者として定義し、agent別worktree、exclusive claim、期限、回収、stale writer拒否を提供する。 |
 | Phase 9 | Conversation room | 未着手 | Codex／Claudeがtask単位のroomへ対等なparticipantとしてbounded read/postできる。 |
@@ -37,13 +37,13 @@ Phase 7〜10が「Obsidianを第2の脳として使う」ための中心範囲�
 
 ## 現在の実施順
 
-Phase 6 stage 2のS2-1（[PR #117](https://github.com/jj1xgo/agent-container/pull/117)）、S2-2（[PR #118](https://github.com/jj1xgo/agent-container/pull/118)）、S2-3（[PR #119](https://github.com/jj1xgo/agent-container/pull/119)）はmainへ取り込み済みです。2026-09-07の照合基準は`36f02a8`です。現在は**S2-4（文書整合とstage 2実host smoke）**を進めています。
+Phase 6 stage 2のS2-1（[PR #117](https://github.com/jj1xgo/agent-container/pull/117)）、S2-2（[PR #118](https://github.com/jj1xgo/agent-container/pull/118)）、S2-3（[PR #119](https://github.com/jj1xgo/agent-container/pull/119)）はmainへ取り込み済みです。2026-09-07の照合基準は`36f02a8`です。S2-4（文書整合とstage 2実host smoke、[PR #122](https://github.com/jj1xgo/agent-container/pull/122)）で実host smokeの記録を取り込み、Phase 6を閉じました。
 
 範囲は[stage 2設計](superpowers/specs/2026-09-06-broker-kernel-stage2-design.md)で固定しています。kernelのfail-closed lifecycle、identity付きcleanup、peer policy、frame error、audit envelopeを整備し、handover／egress／GitHubを統一しました。Familyはpeer policyとcleanupを共通部品へ移し、request毎のpeer検証、audit transaction、Mountを保持しています。readiness gateの新しい消費者と全brokerへの祖先chain検証は後続課題です。
 
-stage 1（6-6）の実host観測と独立修正の経緯は[CHANGELOG](../CHANGELOG.md)に保存しています。Codex／Claude intakeやhandoverの過去のPASSを、stage 2の再実行結果として扱いません。S2-4の[実施計画](superpowers/plans/2026-09-07-broker-kernel-s2-4-validation.md)と[検証記録](broker-kernel-stage2-validation.md)で今回の結果と未実施理由を管理します。実hostのPodmanと認証済みCLIが必要な再実行は未実施であり、Phase 6は進行中です。既存smoke手順が変更なしでPASSするまで完了にしません。
+stage 1（6-6）の実host観測と独立修正の経緯は[CHANGELOG](../CHANGELOG.md)に保存しています。Codex／Claude intakeやhandoverの過去のPASSを、stage 2の再実行結果として扱いません。S2-4の[実施計画](superpowers/plans/2026-09-07-broker-kernel-s2-4-validation.md)と[検証記録](broker-kernel-stage2-validation.md)で今回の結果と未実施理由を管理します。2026-09-07のhostで、専用image `e9791cbc483f`（Codex 0.153.4、Claude 2.1.263）を使い、自動gate（lint、unit、socket、実Podman 17件）と、Codex／Claude runtime、GitHub broker、Family、Claude handover createの実host gateが既存手順の変更なしでPASSしました。stage 2対象外で未再実施の項目はstage 1証拠を採用し、rollbackはnot runのまま記録しています。
 
-利用者指定（2026-09-07）: S2-4の実host smoke・required CI・必要なmain取り込みを完了した直後、Phase 7へ進む前に[Issue #120: Codex handoverのcreate-only broker統一](https://github.com/jj1xgo/agent-container/issues/120)へ最優先で着手する。S2-4へruntime変更を混ぜず、独立した設計・実装PRとする。
+利用者指定（2026-09-07）: S2-4のmain取り込み直後、Phase 7へ進む前に[Issue #120: Codex handoverのcreate-only broker統一](https://github.com/jj1xgo/agent-container/issues/120)へ最優先で着手する。S2-4へruntime変更を混ぜず、独立した設計・実装PRとする。
 
 実施順はPhase番号と一致します。
 

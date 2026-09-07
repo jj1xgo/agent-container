@@ -49,8 +49,8 @@
 | Family §5 | 承認付き実Issue、再approve拒否 | 手動CLI | Issue #121 PASS、再approve拒否 | PASS | — |
 | Family §6 | forced unknown | 自動test | PASS 4件 | PASS | — |
 | Family §7 | audit／cleanup／rollback | 直接CLI | cleanup PASS。rollbackはnot run（binding保持、stage 1と同じ） | PASS／rollback not run | Codex由来pending 1件は未送信、期限を確認して無断で送信／rejectしない |
-| stage 2受け入れ | required CI（unit、socket 3 module、Podman 17） | CI | S2-4 commitでnot run（push／PR未実施）。PR #119の成功は先行PRの結果 | not run | 文書のみのbranchをpush・PR（承認後） |
-| stage 2受け入れ | main取り込み後にPhase 6を閉じる | — | not run | not run | 上記gateとCIの後 |
+| stage 2受け入れ | required CI（unit、socket 3 module、Podman 17） | CI | [PR #122](https://github.com/jj1xgo/agent-container/pull/122)の`34829c6`で[Unit tests／Podman integration](https://github.com/jj1xgo/agent-container/actions/runs/34103416701)ともpass | PASS | roadmap更新commitの再実行結果はPRで確認 |
+| stage 2受け入れ | main取り込み後にPhase 6を閉じる | — | PR #122でroadmapのPhase 6を完了へ変更。merge後に確定 | PR待ち | merge後、Issue #120へ |
 
 ## 実行環境
 
