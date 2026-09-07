@@ -4,7 +4,7 @@
 
 ## 現在の判定
 
-実装とローカル検証は完了、remote CIとブランチ全体reviewを確認中。両agentの実host gateはnot runであり、Issue完了とは判定しない。今回のworkspaceにはPodman commandがなく、hostの認証済みCLIへ接続する実行手段も確認できていない。既存handoversに記録された実host結果を今回の結果へ読み替えない。
+実装・ローカル検証・独立のブランチ全体reviewは完了。required CIは[draft PR #123の最新headのchecks](https://github.com/jj1xgo/agent-container/pull/123/checks)で確認する。両agentの実host gateはnot runであり、Issue完了とは判定しない。今回のworkspaceにはPodman commandがなく、hostの認証済みCLIへ接続する実行手段も確認できていない。既存handoversに記録された実host結果を今回の結果へ読み替えない。
 
 ## 対象と境界
 
@@ -25,8 +25,9 @@
 | 実装後全unit・lint・socket | `f966e64`の実装と同時点の統合fixture | container 1178件、Codex 49件、CI broker socket 9件PASS。ResourceWarningなし。lint PASS。内部validator改名後は対象7件を再実行してPASS |
 | Podman fixture準備 | 今回の統合test | 両sandbox fixtureで実brokerのmount作成・cleanupをローカル確認。probe Python／launcher shell構文、Ruff PASS。CI対象17件のdiscoveryを確認（未実行）。network testを拡張し、outer read-only mountのEROFSとCodex tool sandbox内の拒否・broker create・再読を分けて検査する |
 | 文書／skill独立review | `74fc0d7..cd87377`とmigration節 | 指摘なし。更新skillの判断評価は下記 |
-| required CI | 今回のPR | not run（PR作成前） |
-| 実Podman | 今回のimage | not run（workspaceにPodmanなし） |
+| ブランチ全体独立review | `74fc0d7..cf50a07` | `gpt-6-astra`／high、指摘なし。runtime、profile移行、session表記、統合testを確認。実行gateの代替ではない |
+| required CI | [PR #123](https://github.com/jj1xgo/agent-container/pull/123/checks) | Unit tests／Podman integrationの最新headの結果をPR checksに集約する。ローカル結果で代用しない |
+| 実Podman | CIの専用image | ローカルはnot run（workspaceにPodmanなし）。CIのPodman integrationで17件を検証し、実行結果は上記PR checksを参照 |
 | 認証済み両agentの実host gate | 今回のimage/profile | not run（host実行手段・個別gate承認が未確認） |
 
 ## Skillの振る舞い評価

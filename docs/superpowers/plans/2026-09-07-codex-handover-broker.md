@@ -77,6 +77,6 @@ agent-handover create --title "Codex作業引き継ぎ" < /tmp/agent-handover-BO
 **Files:** Task1/2の結果、検証記録とplan。
 
 - [x] Codex/container全unit、bin/lint、CI指定のbroker socket suiteを実行。実Podmanが使えなければnot runと理由を記録する。
-- [ ] 独立reviewでcredential/mount境界、起動・停止・再試行、profile移行、Session、fallback禁止、テスト妥当性を確認し、指摘を修正・対象再検証する。
-- [ ] draft PRを作りrequired CIを確認する。外部送信禁止がPR作成を阻む場合はローカルcommitとレビュー可能なPR本文を用意して報告する。main mergeや実サービス操作の承認は推測しない。
+- [x] 独立reviewでcredential/mount境界、起動・停止・再試行、profile移行、Session、fallback禁止、テスト妥当性を確認し、指摘を修正・対象再検証する。
+- [x] [draft PR #123](https://github.com/jj1xgo/agent-container/pull/123)を作成。required CIの最新headの最終判定はPR checksを参照する。main mergeや実サービス操作の承認は推測しない。
 - [ ] 両agent実host smokeの必要操作と実行可能環境を照合し、可能な範囲を実施する。環境外のgateはnot runとし、Issue完了とは報告しない。
