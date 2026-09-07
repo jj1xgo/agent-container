@@ -114,3 +114,13 @@ host checkout `b127e14`（runtime実装は`5a2a49a`と同一）と上記imageを
 | Workspace／project credential | Git status（branchを含む）は実行前後で一致、project `.credentials.json`は実行前後とも不在 |
 
 `/status`、`/sandbox` Config、`/hooks`の対話画面、`/proc`のprocess数照合、編集・test・local commit・resume、handover create／stale client、他projectとの分離はこのrunではnot run。managed policyの事前doctor成功と上記probe成功を、それらの手動gate成功へ読み替えない。Claude runtimeの今回承認範囲はPASS、Phase 2手順全体とS2-4全体はPARTIALのまま維持する。
+
+### 承認済みGitHub read gateの試行（2026-09-07）
+
+利用者が専用`agent-container-smoke`のGitHub broker経由での`git fetch origin`、`agent-github issue list`、Issue #1／#2のview、終了後cleanupを承認した。host checkout `dbf018c`と上記imageから、通常のCodex runtime builderと`--github-broker`、既存egress policyを使い、4commandを順に1回ずつ実行するよう非対話Codexへ依頼した。一時driverは`/tmp/s2-4-github-read-smoke.py`。
+
+結果は**操作gate not run／driver検証FAIL**。runtimeは16.923秒でexit 0、turn completedだったが、`command_execution`完了eventは0件で、対象projectのGitHub broker audit追加も0件。fetch／Issue読み取りの成功証拠は得られていない。応答・stderrの生本文は保存せず判定後に破棄したため、未実行の理由は判定不能。GitHub通信の失敗やclient timeoutを観測したとは扱わない。
+
+CleanupはPASS。GitHub／egress双方のsocket・capability・run directory、対象containerがすべて不在。既存egress policy、fixture manifest、workspace fileのGit状態、local HEADは不変。runtime specは`--network=none`でlegacy host gh mountなし。
+
+追加の外部試行は未実施。次の候補として、同じPodman mount・network-none・GitHub brokerとhost側監視を使い、container内の実`git`／`agent-github`を直接実行する一時driver `/tmp/s2-4-github-direct-read-smoke.py`を準備し、構文検査だけ行った。この候補はCodexのtool実行を検証するものではなく、実clientとbrokerのgateとして別に記録する。Codex／egress agent commandはPythonの固定4commandに置き換えるが、外向きnetworkを追加しない。実行はfresh approval待ち。
