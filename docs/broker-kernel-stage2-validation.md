@@ -252,3 +252,9 @@ Claudeはintake **not run**。launcher／processはexit 0で終了したが、to
 初回の一時driverはmetadataの存在しない`app_id`を参照し、API接続前に失敗した。一次情報のdataclass定義に合わせて`client_id`比較へ修正。修正後の通常sandbox実行はlive inventory段階で失敗したが、同じdriverの許可済みhost実行はPASS。Family Appと開発用Appのclient IDが異なり、live inventoryのselected repositoryはexact 1件で既存bindingと一致した。App／bindingを変更せず、tokenはメモリ内で扱い最後にcacheをinvalidateした。repository名／ID、token、raw API応答は出力していない。この検査はGitHub設定画面の全権限を確認した証跡ではない。
 
 FamilyのClaude intakeと実Issue作成等の残ゲートは未完了。S2-4全体も未完了のまま保持する。
+
+### 診断付きClaude intake再検証（2026-09-07）
+
+利用者がlocal pending作成と重複拒否の範囲でClaudeの追加1回を直前承認し、host checkout `d113a11`と同じimageから`/tmp/s2-4-family-cli-smoke-v2.py claude`を1回実行した。intakeは引き続き **not run**、検証driverはexit 1。実agentのlauncher／processはexit 0、timeoutなし、result subtypeは`success`、is_error false、Bash tool提供あり、permission denial 0件だったが、tool実行0件、新規pending0件、追加audit0件だった。これらはintake成功の証拠ではなく、未実行の原因も未確定。
+
+既存pendingを含む全recordとworkspaceのGit状態は不変、audit valid。通常container境界と単一socket file mountを維持し、Family／handover artifactと対象containerは終了後不在。event件数はassistant 2、rate_limit_event 1、result 1、system 13、その他1。応答本文・credentialは保存していない。GitHub Issue作成は実行せず、追加の実agent再試行も行っていない。Claude intakeの未解決を残し、S2-4を完了扱いにしない。
