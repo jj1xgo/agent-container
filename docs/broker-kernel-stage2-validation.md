@@ -16,17 +16,18 @@
 | Phase 2 §2 | clean projectのdoctorと最小inference | 実agent（非対話`--print`） | `agent-container-claude-smoke`のdoctor PASS、最小応答PASS | PASS | 対話TUI経路の起動は未実施 |
 | Phase 2 §3 | `/status`、`/sandbox` Config、`/hooks`、`/mcp` | 手動TUI | S2-4 not run。非対話runのMCP init一覧は空、managed policy doctor PASSのみ。stage 1証拠: 2026-09-06 `findsummits`でPASS（hook 1件はpolicyでblock済みと証拠付きで判断） | not run（stage 1証拠あり） | stage 2はClaude sandbox設定を変えない。stage 1証拠を採用するか、下記handover create runと同じTUIで1回確認するかは利用者判断 |
 | Phase 2 §4 | security probe 3項目false | 実agent（Bash tool） | S2-4 PASS: 3項目false、追加tool呼び出しなし | PASS | — |
-| Phase 2 §4 | `/proc` process数照合 | 手動TUI | S2-4 not run。`test_agent_sandbox_podman`（自動test）で`/proc` unmask後のsandbox実行を確認。stage 1証拠なし（2026-09-06はprobeのみ） | not run（自動test代替） | 上記TUI runで併せて確認可 |
+| Phase 2 §4 | `/proc` process数照合 | 実agent（手動TUI） | 2026-09-07のhandover create runで`ls /proc \| grep -c '^[0-9]\+$'`を1回実行し出力は`7`。agentは内訳を述べず、sandbox内process数との照合は未実施。`test_agent_sandbox_podman`（自動test）で`/proc` unmask後のsandbox実行を確認 | PARTIAL | 親Claude PIDを含まないことの照合はstage 1でも未実施。stage 1と同じ範囲で受け入れ |
 | Phase 2 §5〜6 | quarantined credentialの回復 | — | 2026-08-26に1回限り実施済み | N/A | 再実行対象外 |
-| Phase 2 §7 | 編集・focused test・local commit・resume | 実agent（TUI） | S2-4 not run。stage 1（6-6、2026-09-06）でも未実施、2026-08-26のみPASS | not run（stage 1でも対象外） | stage 2対象外。採用か実施かは利用者判断 |
-| Phase 2 §8 | project `.credentials.json`不在、他projectからの非観測 | metadata | S2-4: project `.credentials.json`は実行前後とも不在PASS。他projectからの観測不能はnot run | PARTIAL | stage 2対象外 |
+| Phase 2 §7 | 編集・focused test・local commit・resume | 実agent（TUI） | S2-4 not run。stage 1（6-6、2026-09-06）でも未実施、2026-08-26のみPASS | not run（stage 1証拠を採用、利用者判断2026-09-07） | stage 2対象外 |
+| Phase 2 §8 | project `.credentials.json`不在、他projectからの非観測 | metadata | S2-4: project `.credentials.json`は実行前後とも不在PASS。他projectからの観測不能はnot run | PARTIAL（stage 1証拠を採用、利用者判断2026-09-07） | stage 2対象外 |
 | Phase 2 §9 | dual-agent doctor、Codex回帰 | 直接CLI／実agent | doctor両agent PASS、Codex最小応答PASS、全suite PASS | PASS | — |
-| Phase 2 handover gate 1 | Claude handover create（7 section、path-only stdout、audit `create`／`ok`／`write` 1行） | 実agent | **S2-4 not run**。S2-4のClaude runはhandover brokerの起動とcleanupだけで`agent-handover create`を発行していない。stage 1証拠: 2026-09-06 PASS（旧broker実装） | **not run（stage 2対象H1〜H4）** | 最優先の不足。直前承認後、利用者のprivate terminalのTUI runで1回実施する。Codex handoverはbrokerを使わないdirect writerのためstage 2 gateにならない（Issue #120） |
-| Phase 2 handover gate 2〜5 | read-only拒否、cross-project拒否、malformed／secret拒否、non-logging | 自動test（実hostは2026-08-27のみ） | S2-1後の`test_handover_broker_socket`等PASS。stage 1（6-6）でも実host再実施なし | PARTIAL（自動test） | create runのstdout／auditでnon-loggingを併せて確認 |
-| Phase 2 handover gate 6 | 終了後のsocket／capability消滅、stale client拒否 | 直接CLI | artifact不在はS2-4 Claude runでPASS。stale client requestはnot run | PARTIAL | create runの終了後にstale clientを追加（GitHubと同方式） |
+| Phase 2 handover gate 1 | Claude handover create（7 section、path-only stdout、audit `create`／`ok`／`write` 1行） | 実agent（手動TUI） | **S2-4 PASS**（2026-09-07、下記「承認済みClaude handover create gate」）。利用者のprivate terminalから起動した実ClaudeのBash toolが`agent-handover create`を1回実行し、host fileのbyte一致、audit 1行、cleanupを確認 | PASS（stage 2対象H1〜H4） | Codex handoverはbrokerを使わないdirect writerのためstage 2 gateにならない（Issue #120） |
+| Phase 2 handover gate 2〜4 | read-only拒否、cross-project拒否、malformed／secret拒否 | 自動test（実hostは2026-08-27のみ） | S2-1後の`test_handover_broker_socket`等PASS。stage 1（6-6）でも実host再実施なし | PARTIAL（自動test） | stage 1と同じ範囲で受け入れ |
+| Phase 2 handover gate 5 | non-logging（stdout／audit） | 実agent／直接CLI | create runのstdoutは作成pathのみ、audit追加行にtitle・本文sentinelなし | PASS | — |
+| Phase 2 handover gate 6 | 終了後のsocket／capability消滅、stale client拒否 | 直接CLI | run directory・socket・capability不在、旧pathを使うstale clientはexit 1・stdout空・固定stderr・audit不変・新規fileなし | PASS | — |
 | Phase 3 §1 | rootless Podman、App installation／permission | host read-only | rootless PASS。開発用App installation／permissionはS2-4未再確認（2026-08-26／29の記録） | PARTIAL | stage 2対象外、採用 |
 | Phase 3 §2 | broker doctor | 直接CLI | 両agent＋`--github-broker` PASS | PASS | — |
-| Phase 3 §3 | runtime credential非露出（env、mount、argv、`/proc`、`gh auth status`） | spec検査 | S2-4はruntime specの`--network=none`とlegacy gh mount不在のみ。container内のenv／argv／`/proc`検査と`gh auth status`はnot run。stage 1証拠: 2026-09-05 PASS | PARTIAL | stage 1より狭い。次のcontainer runで固定probeを併せるか、spec検査で採用するかは利用者判断 |
+| Phase 3 §3 | runtime credential非露出（env、mount、argv、`/proc`、`gh auth status`） | spec検査 | S2-4はruntime specの`--network=none`とlegacy gh mount不在のみ。container内のenv／argv／`/proc`検査と`gh auth status`はnot run。stage 1証拠: 2026-09-05 PASS | PARTIAL（stage 1証拠を採用、利用者判断2026-09-07） | stage 1より狭いが、stage 2はmount・環境の受け渡しを変えない |
 | Phase 3 §4／Phase 4 §4 | clone／fetch、別repository拒否、broker停止後の失敗 | 直接CLI | clone（保存origin HTTPS、実効origin broker URL）／fetch PASS、別repository read拒否PASS、終了後stale client（issue view）PASS | PASS | fetchによるstaleは未実施、issue viewで代替 |
 | Phase 3 §5／Phase 4 §4 | create-only push、既存branch FF／NFF・protected・delete・tag拒否 | 直接CLI／guard付き | push（新規branch、空commit）PASS。negative 5件はguard到達0で拒否、remote refs不変。stage 1も同じguard方式 | PASS | — |
 | Phase 3 §6／Phase 4 §4 | PR create／view／checks、merge・close・generic不在 | 直接CLI／自動test | smoke PR #5 PASS。不在interfaceはunit test | PASS | smoke PRはOPENのまま保持 |
@@ -335,3 +336,22 @@ section 5に従い、その場のpreviewからexact target、request ID、canoni
 **PASS**: [smoke Issue #121](https://github.com/jj1xgo/agent-container/issues/121)を1件作成し、CLI exit 0、host record `created`、canonical本文消去を確認。hostのread-only `gh issue view`でnumber／URL、承認済みtitle／bodyの完全一致、OPEN、期待Family App authorを照合した。Issueは自動close／deleteせず保持する。他のpending recordは不変。
 
 同じrequestへ通常CLIのapproveをもう1回実行すると、確認入力前にexit 1で拒否された。recordとauditは再approve前後で不変。terminal stateの検査がprovider／送信より前にある実装とも一致し、追加Issueを作成していない。作成時の追加auditは`approve/sending/send`と`approve/created/cleanup`各1件、固定schemaでvalid。いずれのCLIも中断なし。Codex由来pendingは未送信のまま保持する。残りの実host gateとrequired CI／main取り込みがあるため、S2-4全体は未完了。
+
+### 承認済みClaude handover create gate（2026-09-07）
+
+担当交代後の照合で、stage 2対象（S2-1 H1〜H4）の実host証拠が無い唯一の項目としてClaude handover createを特定し、利用者がprivate terminalのTUI runによる1回実施を承認した。外部影響は専用smoke projectのhandover root（host上）へfileが1件増えることだけである。host checkout `3f382db`（runtime実装は`36f02a8`と同一）、上記image、Claude Code `2.1.263`。
+
+事前に固定7 section本文をsmoke workspaceへmode `0600`で置き、broker audit行数（103）、handover directoryの既存file（2件）、run root `r/b73fb7e09b35/`（空）、対象container（0件）を記録した。利用者が`bin/agentctl --image localhost/agent-family-test:local run agent-container-claude-smoke --agent claude`を起動し、実行中にhost側から次を記録した。run directory `d312b4050e5ce65f`はmode `0700`、`broker.sock`と`capability`はともにmode `0600`・実行user所有（本文は未読）。container `339773c654cb`は`/run/agent-handover`をread-only、`/workspace`をsmoke workspaceとしてmountし、rootfs read-only、`no-new-privileges`。
+
+container側のsession記録（内容はcommandと固定出力だけを照合）では、tool実行は4件で、本文fileのRead、read-onlyの`git status`、指定どおりの`agent-handover create --title "Phase 6 S2-4 Claude handover create smoke" < /workspace/handover-body.md`が1回、`ls /proc | grep -c '^[0-9]\+$'`が1回だった。createのtool resultは作成path 1行のみ。
+
+| 観測 | 結果 |
+| --- | --- |
+| host file | PASS。`2026-09-07_085132_6e09d10b.md`が1件だけ増え、通常file・mode `0600`・owner 1000:1000。title行、`Project`／`Created`／`Session` metadata、固定順の7 sectionを持ち、section以降は用意した本文とbyte一致。既存2 fileは残存 |
+| audit | PASS。1行だけ増加（103→104）。key集合は`operation`／`path`／`project`／`run`／`stage`／`status`／`timestamp`、`create`／`ok`／`write`、projectは一致。追加行にtitleと本文sentinelを含まない |
+| cleanup | PASS。通常終了後にrun directory・socket・capabilityが不在、対象containerは0件 |
+| stale client | PASS。旧socket／capability pathを指定したhost側実clientの`create`はexit 1、stdout空、stderrは固定`error: handover broker request failed`、audit不変、新規fileなし。socket消失後の拒否であり、稼働中brokerへの失効済みcapability提示ではない |
+| `/proc`件数 | 出力は`7`。agentは内訳を述べず、sandbox内process数との照合はPARTIAL |
+| workspace | 一時本文fileは検査後に削除し、smoke workspaceのGit状態は`main...origin/main`のまま |
+
+これでstage 2が観測挙動を変える4 broker（handover、egress、GitHub、Family）すべてに実host証拠が揃った。gate 2〜4（read-only拒否、cross-project、malformed／secret）は自動testのみで、stage 1（6-6）と同じ範囲で受け入れる。
