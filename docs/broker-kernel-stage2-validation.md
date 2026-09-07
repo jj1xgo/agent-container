@@ -78,7 +78,7 @@ GitHubはSameUserによる実clientの許可とjoin後失効を確認し、30秒
 
 [PR #119](https://github.com/jj1xgo/agent-container/pull/119)はmerge済みで、head `91585c6bd89cfdfbaa27576d498db7fad5894eca`、merge commit `36f02a87c14603114bd5856575c0c92b49a07d66`を照合した。[同PRのCI](https://github.com/jj1xgo/agent-container/actions/runs/34072250396)はUnit tests／Podman integrationともpass。これは先行PRの結果であり、S2-4 commitの新規required CIはnot run（push／PR未実施）。
 
-Codexの最小応答とegress cleanup、Claudeの最小応答とcredential非露出probe、直接CLIによるGitHub fetch／Issue read／新規branch作成push／PR create・view・checksは下記のとおり確認した。GitHub新規clone、negative push、stale client、Family両CLI intake／実Issue作成、各rollbackはnot run。専用smoke projectの既存workspaceは追跡branchに対してahead 2／behind 1であり、resetや既存branch変更はしていない。次の実サービスgateは対象project・agent・exact domain・操作を具体化し、各手順書のfresh approval条件を満たしてから行う。Phase 6は引き続き進行中。
+Codexの最小応答とegress cleanup、Claudeの最小応答とcredential非露出probe、直接CLIによるGitHub fetch／Issue read／新規branch作成push／PR create・view・checks、終了後stale client拒否は下記のとおり確認した。新規cloneはcommand成功・main一致を確認したが、driverのURL比較誤りによりorigin検査は未確定でPARTIAL。negative push、Family両CLI intake／実Issue作成、各rollbackはnot run。専用smoke projectの既存workspaceは追跡branchに対してahead 2／behind 1であり、resetや既存branch変更はしていない。次の実サービスgateは対象project・agent・exact domain・操作を具体化し、各手順書のfresh approval条件を満たしてから行う。Phase 6は引き続き進行中。
 
 今回のlocalログ: `/tmp/s2-4-host-{build,codex,container,socket,podman,doctor-smoke,docs}.log`。credential本文を取得せず、認証関連の直接観測は既存手順で許可されたmetadataとdoctor結果に限定した。
 
@@ -174,4 +174,21 @@ launcher／processともexit 0、timeoutなし。GitHub／egress双方のsocket�
 
 3操作ともstderr空。auditは`pr-create`／`pr-view`／`pr-checks`各1件ok、stageなし、固定schema、createのPR番号一致。launcher／processともexit 0、timeoutなし。GitHub／egress双方のsocket・capability・run directoryと対象containerが不在で、既存workspaceのfile状態とHEADは不変。PRはmergeせずOPENのまま保持する。S2-4文書branch自体のrequired CI／PR／main取り込みとは別のsmoke結果である。
 
-次のread-only gate候補として`/tmp/s2-4-github-clone-stale-smoke.py`を準備し、構文検査のみ実施。専用repositoryをcontainer内`/tmp`の一意な一時directoryへ新規cloneし、exact originとmain commitを照合して一時cloneを除去する。runtime中にsocket／capabilityのpathだけを保持し、通常終了後にその設定の実clientが固定errorで拒否されることとaudit不変を確認する。capability本文は取得・複製しない。新規cloneの実行は直前承認待ち。
+次のread-only gate候補として`/tmp/s2-4-github-clone-stale-smoke.py`を準備し、構文検査を実施した。専用repositoryをcontainer内`/tmp`の一意な一時directoryへ新規cloneし、exact originとmain commitを照合して一時cloneを除去する。runtime中にsocket／capabilityのpathだけを保持し、通常終了後にその設定の実clientが固定errorで拒否されることとaudit不変を確認する。capability本文は取得・複製しない。直前承認後の結果は次節のとおり。
+
+### 承認済み新規clone／stale client gate（2026-09-07）
+
+利用者のfresh approval後、host checkout `1a387d6`と上記image、準備済みdriverを1回実行した。同じ直接CLI／通常broker監視経路から、containerの一意な一時directoryへ`git clone https://github.com/jj1xgo/agent-container-smoke.git`を実行。
+
+| 観測 | 結果 |
+| --- | --- |
+| clone command／main | PASS、exit 0、1.735秒、clone先HEADは期待main `98ecc7c45892c62ba9e541991bd39cd99a4cf1c5`と一致 |
+| origin検査 | driver FAIL。`git remote get-url origin`を入力HTTPS URLと比較したassertionがfalse。実URLは出力せずメモリ内で破棄済みのため、この実行のorigin検査は未確定 |
+| 一時clone除去 | PASS、container内の一時directoryは不在 |
+| audit | `git-upload-pack` 1件ok、stageなし、固定schema |
+| 終了後stale client | PASS、保持した旧socket／capability pathを使う実clientのIssue viewがexit 1、stdout空、stderrは固定`error: GitHub broker request failed`、audit不変。socket消失後の拒否であり、稼働中brokerへの失効済みcapability提示とは区別する |
+| Cleanup／workspace | PASS、GitHub／egress双方のsocket・capability・run directoryと対象containerが不在。既存workspaceのfile状態とHEADは不変 |
+
+origin assertionによりdriver／launcherはexit 1、timeoutなし。clone通信失敗やbroker拒否ではない。外部操作を再実行せず、`_broker_git_args`のexact `url.agent-broker://...insteadOf=https://...git`設定を確認した。外部通信なしの一時Git repositoryで同じ書き換えを再現し、`git remote get-url origin`は実効broker URLを返すため旧HTTPS assertionが失敗し、`git config --get remote.origin.url`は保存されたHTTPS URLを返すことを確認した。
+
+一時driverの比較だけを修正し、`/tmp/s2-4-github-clone-stale-smoke-v2.py`を準備した。保存HTTPS URLと実効broker URLを別々に照合する。driverとcontainer probeの構文検査、外部通信なしの旧assertion失敗／新assertion成功は確認済み。runtime実装・既存smoke手順・sandbox境界は変更していない。修正driverでの実cloneはnot run（fresh approval待ち）。新規clone gateはPARTIALのまま保持する。
