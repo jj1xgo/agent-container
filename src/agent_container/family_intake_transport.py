@@ -35,7 +35,10 @@ def handle_family_intake_connection(
     session: FamilyIntakeSession,
     store: Path,
 ) -> None:
-    """Close ordinary denials silently; propagate sanitized internal failures."""
+    """Handle one admitted connection; the caller admits the peer and owns the stream.
+
+    Close ordinary denials silently; propagate sanitized internal failures.
+    """
 
     stream: BinaryIO = connection.stream
     try:

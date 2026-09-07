@@ -114,6 +114,10 @@ def _read_adapter_capability(path: Path) -> str:
     )
 
 
+# The socket is validated once, at configuration load: the host binds the broker
+# listener in EgressBrokerRuntime.__enter__ before `podman run` starts the
+# container, so a missing or non-private /run/agent-egress/broker.sock is a
+# startup failure of the adapter (exit 1), not a per-CONNECT condition.
 def _validate_adapter_socket(path: Path) -> Path:
     try:
         return validate_socket(
