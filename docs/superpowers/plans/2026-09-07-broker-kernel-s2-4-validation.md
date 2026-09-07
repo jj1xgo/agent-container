@@ -33,8 +33,8 @@ Files: `docs/broker-kernel-stage2-validation.md`、`CHANGELOG.md`。
 
 - [x] `bin/lint`、Codex／container unit、socket 4 module、forced unknownを実行し、件数・失敗・skipを記録する。
 - [x] ホストへ`5a2a49a`を復元し、専用imageをbuild。lint、Codex 49件、container 1169件、socket＋forced unknown 22件、実Podman 17件の成功と前提確認を検証記録へ追記する（認証済みCLI smokeは未実施）。
-- [ ] 既存smoke 5手順書を実hostで再実行し、commit、image、CLI version、実施日時、各gateの結果を記録する。実行順と前提は検証記録から各手順書を参照する。
-- [ ] fresh approvalを要する外部変更は対象が具体化した直前に判断を受ける。以前のIssue／PRを再利用・変更せず、rollback未実施をPASSへ読み替えない。
+- [x] 既存smoke 5手順書を実hostで再実行し、commit、image、CLI version、実施日時、各gateの結果を記録する。実行順と前提は検証記録から各手順書を参照する。2026-09-07、検証記録冒頭の現在地一覧に対応付け済み。stage 2対象の4 brokerは実host PASS、stage 2対象外の未実施項目はstage 1証拠を採用（利用者判断）。
+- [x] fresh approvalを要する外部変更は対象が具体化した直前に判断を受ける。以前のIssue／PRを再利用・変更せず、rollback未実施をPASSへ読み替えない。smoke PR #5、Issue #121、Claude handover createの各1回を個別承認で実施し、rollbackはnot runのまま記録。
 - [ ] required CI（unit、socket 3 module、Podman 17件）の対象commitと成功を確認する。
 - [ ] 全実host gateのPASSと必要なmergeを確認した後だけroadmapのPhase 6を完了へ変更する。
 - [x] `git diff --check`、相対link、smoke手順書が不変であることを確認する。

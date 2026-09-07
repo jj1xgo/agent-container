@@ -14,7 +14,7 @@
 | --- | --- | --- | --- | --- | --- |
 | Phase 2 preflight | 全unit、`git diff --check`、derived image実Podman | 自動test | 2026-09-07 host: lint、Codex 49、container 1169、socket 18＋forced unknown 4、実Podman 17（`test_project_image_podman`含む）、skip 0 | PASS | — |
 | Phase 2 §2 | clean projectのdoctorと最小inference | 実agent（非対話`--print`） | `agent-container-claude-smoke`のdoctor PASS、最小応答PASS | PASS | 対話TUI経路の起動は未実施 |
-| Phase 2 §3 | `/status`、`/sandbox` Config、`/hooks`、`/mcp` | 手動TUI | S2-4 not run。非対話runのMCP init一覧は空、managed policy doctor PASSのみ。stage 1証拠: 2026-09-06 `findsummits`でPASS（hook 1件はpolicyでblock済みと証拠付きで判断） | not run（stage 1証拠あり） | stage 2はClaude sandbox設定を変えない。stage 1証拠を採用するか、下記handover create runと同じTUIで1回確認するかは利用者判断 |
+| Phase 2 §3 | `/status`、`/sandbox` Config、`/hooks`、`/mcp` | 手動TUI | 2026-09-07のhandover create runで利用者が確認。`/status`は正常表示、`/sandbox`はsession記録上`Error: Sandbox settings are overridden by a higher-priority configuration and cannot be changed locally.`（stage 1と同じmanaged強制の表示、sandbox_instructions attachmentあり）、`/hooks`はstage 1と同じ（user scope pluginのhook 1件がpolicyでblock済み）、`/mcp`は0件 | PASS | stage 2はClaude sandbox設定を変えない |
 | Phase 2 §4 | security probe 3項目false | 実agent（Bash tool） | S2-4 PASS: 3項目false、追加tool呼び出しなし | PASS | — |
 | Phase 2 §4 | `/proc` process数照合 | 実agent（手動TUI） | 2026-09-07のhandover create runで`ls /proc \| grep -c '^[0-9]\+$'`を1回実行し出力は`7`。agentは内訳を述べず、sandbox内process数との照合は未実施。`test_agent_sandbox_podman`（自動test）で`/proc` unmask後のsandbox実行を確認 | PARTIAL | 親Claude PIDを含まないことの照合はstage 1でも未実施。stage 1と同じ範囲で受け入れ |
 | Phase 2 §5〜6 | quarantined credentialの回復 | — | 2026-08-26に1回限り実施済み | N/A | 再実行対象外 |
@@ -352,6 +352,7 @@ container側のsession記録（内容はcommandと固定出力だけを照合）
 | cleanup | PASS。通常終了後にrun directory・socket・capabilityが不在、対象containerは0件 |
 | stale client | PASS。旧socket／capability pathを指定したhost側実clientの`create`はexit 1、stdout空、stderrは固定`error: handover broker request failed`、audit不変、新規fileなし。socket消失後の拒否であり、稼働中brokerへの失効済みcapability提示ではない |
 | `/proc`件数 | 出力は`7`。agentは内訳を述べず、sandbox内process数との照合はPARTIAL |
+| 対話確認 | 利用者報告: `/status`正常、`/hooks`はstage 1と同じ、`/mcp`なし。`/sandbox`はsession記録上`Error: Sandbox settings are overridden by a higher-priority configuration and cannot be changed locally.`で、stage 1（2026-08-26、09-06）と同じmanaged強制の表示。停止条件（managed policy未読込、sandbox無効、fallback可能、hook／MCP読込）には該当しない |
 | workspace | 一時本文fileは検査後に削除し、smoke workspaceのGit状態は`main...origin/main`のまま |
 
 これでstage 2が観測挙動を変える4 broker（handover、egress、GitHub、Family）すべてに実host証拠が揃った。gate 2〜4（read-only拒否、cross-project、malformed／secret）は自動testのみで、stage 1（6-6）と同じ範囲で受け入れる。
