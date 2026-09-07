@@ -40,7 +40,7 @@ done
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 agentctl=$script_dir/agentctl
 state_root=${AGENT_CONTAINER_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/agent-container}
-handover_root=${AGENT_HANDOVER_ROOT:-$state_root/handovers}
+handover_root=${AGENT_HANDOVER_ROOT:-${state_root%/}-handovers}
 codex_auth_file=$state_root/shared-auth/codex/auth.json
 
 case "$state_root:$handover_root" in

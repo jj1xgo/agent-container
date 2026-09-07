@@ -39,6 +39,10 @@
 
 ### Changed
 
+- Codexのhandover作成をClaudeと同じcreate-only brokerへ統一し、project handover directoryをread-only mountします。完成した7 sectionをstdinで送り、broker欠落・失敗時のdirect writer fallbackを廃止します。canonical `Session`は`（未記録）`とし、Codex会話IDは本文にagent申告・host未検証として残します（[#120](https://github.com/jj1xgo/agent-container/issues/120)）。
+- managed profile version `5`で新しいhandover skillを配布し、旧profileのrunを更新案内付きで拒否します。新規setupのhandover既定をstate rootの隣の`-handovers` directoryへ変更します。既存文書は自動移動しません。移行・今回の検証と未実施gateは[検証記録](docs/codex-handover-broker-validation.md)を参照してください。
+
+
 - Claude runtimeのnested sandboxをstrong mode（`sandbox.enableWeakerNestedSandbox=false`）に切り替え、launcherが`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`を設定するようにしました。PR #108の`/proc` unmaskによりstrong modeが必要とする新しい`/proc`のuser namespace内mountが可能になったため、2026-08-24設計がglobal scrub採用を見送った前提が解消しました（[設計](docs/superpowers/specs/2026-09-06-claude-strong-nested-sandbox-design.md)）。fallbackは設けず、`failIfUnavailable: true`は維持します。この変更は、修正を取り込んで再buildしたimageにだけ適用され、既存imageはrebuildするまで旧設定のまま動作します。
 
 ### Security boundaries

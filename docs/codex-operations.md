@@ -32,7 +32,7 @@ Codexやskillの更新時は、停止理由が権限・不足情報・skillの�
 
 `profiles/codex/config.toml`は`[sandbox_workspace_write] network_access = true`を固定する。Codex 0.153系のLinux sandbox（bubblewrap＋seccomp）は既定でtool commandのnetworkを切り、`socket`／`connect`をEPERMで拒否するため、`agent-family issue create`、`--github-broker`のgit操作、egress proxy経由のcommandがsandbox内から失敗する。network境界はPodman側（`--network=none`＋egress adapter、または制限なしprojectの通常network）で与えており、この設定はsandbox内commandにCodex本体processと同じ到達性を与えるだけで、新しい外向き経路を増やさない。`sandbox_mode`、`default_permissions`、`features.network_proxy`は設定しない。read-only sandboxではnetworkは引き続き無効である。
 
-project別`CODEX_HOME`の`config.toml`は初回`project add`時に配布したままで、`run`は上書きしない。この設定より前に作ったprojectでは`bin/agentctl project update-profile PROJECT`を実行する。update-profileは既存`config.toml`のmodelやstatus lineなど他のkeyを保持したまま`[sandbox_workspace_write]`の`network_access = true`だけを保証し、`managed-profile.version`を`4`にする。version `1`のprojectのように`rules/`が無い場合は、profileの`rules/`を`project add`と同じ方法で配布してから更新する（`rules/`がsymlinkなら拒否）。
+project別`CODEX_HOME`の`config.toml`は初回`project add`時に配布したままで、`run`は上書きしない。この設定より前に作ったprojectでは`bin/agentctl project update-profile PROJECT`を実行する。update-profileは既存`config.toml`のmodelやstatus lineなど他のkeyを保持したまま`[sandbox_workspace_write]`の`network_access = true`だけを保証し、`managed-profile.version`を`5`にする。version `1`のprojectのように`rules/`が無い場合は、profileの`rules/`を`project add`と同じ方法で配布してから更新する（`rules/`がsymlinkなら拒否）。
 
 ## Image再buildとCLI version
 
@@ -44,7 +44,56 @@ project別`CODEX_HOME`の`config.toml`は初回`project add`時に配布した�
 
 launcherは対象projectについてだけ`AGENT_PROJECT_ID`と`AGENT_HANDOVER_ROOT`を設定する。Obsidian vault全体をmountしない。handover本文にはcredentialの値を残さない。
 
-Phase 1ではCodexは既存のdirect handover pathを維持します。Claude限定のcreate-only brokerはCodex runtimeに適用せず、Codexの`agent-handover create --title TITLE`は従来のproject別direct writerを使います。
+Codex／Claudeとも、project別handover directoryをread-only mountし、hostのcreate-only brokerで新規文書を追加する。完成した7 sectionの本文をmode `0600`の一時fileに用意し、次の専用commandへstdinで一度に渡す。空文書を作成してから直接編集する手順は使わない。
+
+```sh
+agent-handover create --title "Codex作業引き継ぎ" < "$handover_body"
+```
+
+`handover_body`は自分で作成した一時fileのpathを指す。成功時はstdoutの作成pathを読み直し、title、Project、7 section、本文、Git状態、検証結果を確認してから完了とする。host writerがmode `0600`でatomic publishし、既存文書のwrite／overwrite／rename／deleteを許可しない。broker環境の欠落・不通・拒否では非zeroで終了し、direct writerやread-write mountへfallbackしない。host用のinstalled executableは別経路であり、今回のcontainer移行では変更しない。
+
+### session IDの記録
+
+canonical `Session`は両agentとも `（未記録）`。containerの環境変数や書き込み可能なsession fileは、hostが会話IDの真正性を検証する根拠にしない。Codex skillは設定済みの`CODEX_SESSION_ID`を、本文の「現在地」に次の形で記録する。
+
+```text
+Codex session ID（agent申告・host未検証）: 会話ID
+```
+
+未設定なら値を推測せず `Codex session ID: 未設定（host未検証）` とする。設定値もcredential検査の対象にし、改行やcredentialらしい値なら転記しない。保存後にこの記述を照合する。これは会話再開用の手掛かりであり、認証や権限判定には使わない。従来のcanonical `Session`欄を読む自動処理は、この互換性変更を考慮する必要がある。本文の申告値は任意clientが省略でき、brokerがIDの記録を強制するものではない。
+
+### 既存projectの更新
+
+実行中sessionを終了したうえで、hostの対応checkoutから順に実行する。
+
+```sh
+bin/agentctl build
+bin/agentctl project update-profile PROJECT
+bin/agentctl doctor PROJECT --agent codex
+bin/agentctl run PROJECT --agent codex
+```
+
+profile version `5`は新しいstdin手順を配布する。旧profileはrun preflightで拒否し、update-profileを案内する。更新はcustom rules、model、認証、hook trustを保持し、handover skillと専用allow rule、sandbox network設定だけを管理する。対象と祖先のsymlinkを拒否し、更新が完了してからversionを記録する。失敗時は原因を解決してupdate-profileを再実行する。clientの自己検査はimage内clientの確認であり、実際のsocket到達性や実host保存成功の証拠ではない。
+
+handover保存先はstate rootやworkspace、Codex／Claude設定、cacheなどのwrite mountと重複させない。旧登録が重複している場合も、既存文書を自動移動したり権限を緩めたりしない。全sessionを止め、operatorが保存先と登録情報を整合させてからdoctorで確認する。
+
+既存保存先を移す場合は、hostのoperatorが次の順で行う。`STATE`は実際のstate root、`PROJECT`は登録済みproject IDを指す。
+
+1. 対象projectのCodex／Claude runをすべて終了し、保存中のrequestがないことを確認する。新しい保存先は絶対pathの通常directoryで、stateやwrite mountの祖先・子孫に置かず、symlinkを使わない。
+2. `STATE/projects/PROJECT/project.json`の現在の`handover_root`を確認し、metadataのmode `0600`のbackupを保存する。新rootの`PROJECT` directoryへ旧文書をcopyし、file数・内容・所有者・permissionを照合する。directoryはmode `0700`で用意し、衝突する既存文書を上書きしない。旧文書は検証完了まで保持する。
+3. `project.json`の`handover_root`だけを新rootの絶対pathへ変更し、`repository`とmode `0600`を保持する。値は`PROJECT` directoryそのものではなく、その親root。`project add --handover-root ...`は既存登録の変更commandではなく、不一致を拒否するため代用しない。
+4. profile更新後に`doctor PROJECT --agent codex`を実行する。Claudeも利用するprojectでは`--agent claude`も確認し、新runで既存文書を読めることと新規createを検証する。旧copyの削除はこの確認とoperatorの判断の後に行う。
+
+この手順は利用者の保存済み文書を扱うため自動実行しない。今回のworkspaceでは実hostでの移行はnot run。
+
+### read-only errorの切り分け
+
+`Read-only file system`だけでhost保存先が壊れたと判断しない。tool sandbox、Podmanのmount、host directoryは異なる制約である。
+
+- **移行前のdirect経路**: broker環境がない旧imageでは、既存承認とpolicyが許す専用commandのsandbox外実行経路を確認する。許可される場合はその経路で作成・本文保存まで行い、実際のfileを読み直す。workspaceへの代替保存を正式handoverの成功としない。
+- **移行後のbroker経路**: read-only mountは正常である。broker環境の設定有無、固定error、operator側のdoctorを確認する。tool sandboxの制約で接続できない場合も、許可された同じ専用commandの経路を調べる。broker自身の拒否・不通はdirect writeで回避しない。応答不明の再送前には最新fileを確認し、重複作成を避ける。
+
+移行の設計と今回の検証／未実施項目は[Issue #120検証記録](codex-handover-broker-validation.md)を参照する。
 
 ## 起動hook
 
@@ -54,8 +103,8 @@ Claudeのmanaged sandboxでは、初期状態のhooksとMCPをEnterprise policy�
 
 ## 手動確認
 
-1. test用のhandover rootとproject IDを設定する。
-2. `agent_container.handover_cli create`でhandoverを作る。
+1. 専用test projectを登録し、対応imageとprofile version 5で起動する。
+2. 完成した7 sectionを`agent-handover create --title TITLE`へstdinで送り、返却pathの本文とSession表記を確認する。
 3. `handover_hook`へ`SessionStart` JSONを渡し、本文ではなくpathだけが返ることを確認する。
 4. 専用`CODEX_HOME`でCodexを起動し、`/hooks`でhookをtrustする。
 5. `/statusline`で設定項目と順序を確認する。
@@ -66,7 +115,7 @@ Claudeのmanaged sandboxでは、初期状態のhooksとMCPをEnterprise policy�
 - hookが動かない: `/hooks`でsource、hash、trust状態を確認する。
 - handoverが見つからない: `AGENT_PROJECT_ID`と狭くmountしたhandover directoryの対応を確認する。
 - statusline項目が欠ける: 認証方式、APIデータ、Git repository内かどうかを確認する。
-- 古いhandoverが出る: filenameが`YYYY-MM-DD_HHMM.md`であることとproject IDを確認する。
+- 古いhandoverが出る: 最新fileの日時とproject IDを確認する。新規文書は`YYYY-MM-DD_HHMMSS_一意suffix.md`で、旧形式も探索対象となる。
 
 ## 検証記録
 

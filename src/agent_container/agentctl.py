@@ -81,9 +81,10 @@ from agent_container.podman import run_codex_spec
 from agent_container.podman import run_claude_spec
 from agent_container.podman import run_command
 from agent_container.podman import run_command_supervised
-from agent_container.podman import validate_claude_handover_project
+from agent_container.podman import validate_handover_project
 from agent_container.profile import seed_codex_home
 from agent_container.profile import update_codex_handover_profile
+from agent_container.profile import validate_codex_handover_profile
 from agent_container.project_image import ProjectImageConfig
 from agent_container.project_image import ProjectImageResolution
 from agent_container.project_image import load_project_image_config
@@ -743,8 +744,9 @@ def _runtime_preflight(
     )
     handover_root = _resolve_handover_root(record.handover_root, layout.project_id)
     handover_project = handover_root / layout.project_id
-    if agent == "claude":
-        validate_claude_handover_project(layout, handover_project)
+    validate_handover_project(layout, handover_project)
+    if agent == "codex":
+        validate_codex_handover_profile(layout.codex_home)
     egress_policy = _load_optional_egress_policy(layout.egress_policy_file)
     uid, gid = _validated_process_identity(identity_reader)
     return layout, record, handover_project, uid, gid, egress_policy
@@ -1231,6 +1233,20 @@ def _doctor(
             )
         )
 
+    if "codex" in agents:
+        try:
+            validate_codex_handover_profile(layout.codex_home)
+            profile_ok = True
+        except (ValueError, OSError):
+            profile_ok = False
+        checks.append(
+            CheckResult(
+                "PASS" if profile_ok else "FAIL",
+                "codex-handover-profile",
+                "current" if profile_ok else "update required",
+            )
+        )
+
     if "claude" in agents:
         if runtime_image is None:
             policy_ok = False
@@ -1249,6 +1265,7 @@ def _doctor(
             )
         )
 
+    for selected_agent in agents:
         if runtime_image is None:
             handover_client_ok = False
             handover_client_detail = "image unavailable"
@@ -1264,7 +1281,7 @@ def _doctor(
         checks.append(
             CheckResult(
                 "PASS" if handover_client_ok else "FAIL",
-                "claude-handover-client",
+                f"{selected_agent}-handover-client",
                 handover_client_detail,
             )
         )
@@ -1464,11 +1481,10 @@ def _doctor(
             handover_root = _resolve_handover_root(
                 record.handover_root, layout.project_id
             )
-            if "claude" in agents:
-                validate_claude_handover_project(
-                    layout,
-                    handover_root / layout.project_id,
-                )
+            validate_handover_project(
+                layout,
+                handover_root / layout.project_id,
+            )
             checks.append(
                 CheckResult(
                     "PASS",
@@ -1957,6 +1973,13 @@ def main(
             if egress_policy is not None:
                 egress_probe = egress_adapter_status_spec(resolution.image)
                 _require_success(_suppressed_run(runner, egress_probe), egress_probe)
+            handover_client_probe = handover_broker_client_status_spec(
+                resolution.image
+            )
+            _require_success(
+                _suppressed_run(runner, handover_client_probe),
+                handover_client_probe,
+            )
             if arguments.agent == "claude":
                 policy_spec = claude_policy_status_spec(resolution.image)
                 _require_success(_suppressed_run(runner, policy_spec), policy_spec)
@@ -2005,53 +2028,28 @@ def main(
                     if arguments.github_broker
                     else None
                 )
-                handover_mount = (
-                    stack.enter_context(
-                        HandoverBrokerRuntime.create(layout, handover_project)
-                    )
-                    if arguments.agent == "claude"
-                    else None
+                handover_mount = stack.enter_context(
+                    HandoverBrokerRuntime.create(layout, handover_project)
                 )
-                if arguments.agent == "claude":
-                    assert handover_mount is not None
-                    builder_args = [
-                        layout,
-                        handover_project,
-                        resolution.image,
-                        uid,
-                        gid,
-                        handover_mount,
-                    ]
-                    if github_mount is not None or egress_mount is not None:
-                        builder_args.append(github_mount)
-                    if egress_mount is not None:
-                        builder_args.append(egress_mount)
-                    spec = (
-                        builders[arguments.agent](
-                            *builder_args, family_mount=family_mount
-                        )
-                        if family_mount is not None
-                        else builders[arguments.agent](*builder_args)
+                builder_args = [
+                    layout,
+                    handover_project,
+                    resolution.image,
+                    uid,
+                    gid,
+                    handover_mount,
+                ]
+                if github_mount is not None or egress_mount is not None:
+                    builder_args.append(github_mount)
+                if egress_mount is not None:
+                    builder_args.append(egress_mount)
+                spec = (
+                    builders[arguments.agent](
+                        *builder_args, family_mount=family_mount
                     )
-                else:
-                    builder_args = [
-                        layout,
-                        handover_project,
-                        resolution.image,
-                        uid,
-                        gid,
-                    ]
-                    if github_mount is not None or egress_mount is not None:
-                        builder_args.append(github_mount)
-                    if egress_mount is not None:
-                        builder_args.append(egress_mount)
-                    spec = (
-                        builders[arguments.agent](
-                            *builder_args, family_mount=family_mount
-                        )
-                        if family_mount is not None
-                        else builders[arguments.agent](*builder_args)
-                    )
+                    if family_mount is not None
+                    else builders[arguments.agent](*builder_args)
+                )
                 print(
                     f"Starting {arguments.agent.title()} for project: {layout.project_id}",
                     file=stdout,

@@ -34,7 +34,7 @@ cd agent-container
 bin/setup.sh OWNER/REPOSITORY
 ```
 
-scriptは専用GitHub認証、image build、Codex認証、project登録、診断を順番に案内します。認証済みの項目とbuild済みimageは再利用するため、途中で止まっても同じcommandを再実行できます。既定ではstateとhandoverを`~/.local/share/agent-container`以下へ保存します。
+scriptは専用GitHub認証、image build、Codex認証、project登録、診断を順番に案内します。認証済みの項目とbuild済みimageは再利用するため、途中で止まっても同じcommandを再実行できます。既定のstateは`~/.local/share/agent-container`、handoverはその隣の`~/.local/share/agent-container-handovers`へ保存します。`AGENT_CONTAINER_HOME`を指定した場合も、handoverの既定は末尾の`/`を除いたstate pathに`-handovers`を付けた場所です。`AGENT_HANDOVER_ROOT`で別の保存先を指定できます。
 
 setup完了後は、次の一行でCodexを起動します。
 
@@ -130,11 +130,18 @@ bin/agentctl project add OWNER/REPOSITORY \
 
 新規projectのCodex stateには、`gh pr view/list/checks/status`、`gh issue view/list`、`gh run view/list`、`gh repo view`だけを読み取り用の初期approval rulesとして配置します。既存projectのrulesは暗黙に追加・上書きしません。
 
-handover作成には保存先を環境から固定する専用`agent-handover create`を使い、このcommandだけを初期approval rulesで事前許可します。これによりhandoverごとの承認は不要です。既存projectではimage更新後、次のcommandでcustom rulesを残したまま専用ruleを追加し、managed handover skillを更新し、`config.toml`の他のkeyを保持したままCodex sandbox内commandのnetwork設定（`[sandbox_workspace_write] network_access = true`）を保証します。managed profile version `1`で作られ`rules/`が無いprojectでは、profileの`rules/`を配布してから同じ更新を行います。
+Codex／Claudeのhandoverは、完成した7 sectionを専用`agent-handover create --title TITLE`へstdinで渡し、hostのcreate-only brokerで保存します。選択projectの過去の文書はread-onlyで読めます。空文書を作ってから編集する手順は使いません。brokerが失敗しても直接writeへfallbackしません。
+
+この専用commandだけを初期approval rulesで事前許可します。既存projectは実行中sessionを終了し、対応imageをbuildしてからprofile version `5`へ更新してください。更新はcustom rulesとconfigの他のkeyを保持し、managed handover skill、専用rule、`[sandbox_workspace_write] network_access = true`を配布します。version `1`で`rules/`がない場合も対応します。旧profileのrunは更新案内付きで拒否されます。
 
 ```bash
+bin/agentctl build
 bin/agentctl project update-profile PROJECT
+bin/agentctl doctor PROJECT --agent codex
+bin/agentctl run PROJECT --agent codex
 ```
+
+canonical `Session`は`（未記録）`になり、Codexの会話IDは本文に「agent申告・host未検証」と明示して残します。旧setupでstate配下へ保存していたprojectは保存先の境界検査で拒否されます。既存文書は自動移動しないため、operatorが全sessionを終了して保存先と登録を整合させてください。更新・権限層の切り分けは[Codex運用ガイド](docs/codex-operations.md#handover保存境界)、検証状況は[Issue #120検証記録](docs/codex-handover-broker-validation.md)を参照してください。
 
 ホストCodexからもhandoverごとの承認を省く場合は、変更可能なcheckout内のscriptではなく、standalone実行fileをcheckout外へ一度だけinstallします。
 

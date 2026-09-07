@@ -67,7 +67,7 @@ class BrokerRuntimeMount:
     repository: Repository
 
 
-def validate_claude_handover_project(
+def validate_handover_project(
     layout: StateLayout, handover_project: Path
 ) -> None:
     resolved_handover = handover_project.resolve()
@@ -84,7 +84,9 @@ def validate_claude_handover_project(
             or resolved_writable.is_relative_to(resolved_handover)
         ):
             raise ValueError(
-                "Claude handover project must not overlap agent state or a writable mount"
+                "handover project must not overlap agent state or a writable mount; "
+                "move it outside AGENT_CONTAINER_HOME and update the registered "
+                "handover_root (see docs/codex-operations.md)"
             )
 
 
@@ -676,22 +678,25 @@ def run_codex_spec(
     image: str,
     uid: int,
     gid: int,
+    handover_broker: HandoverRuntimeMount,
     broker: BrokerRuntimeMount | None = None,
     egress: EgressRuntimeMount | None = None,
     family_mount: FamilyRuntimeMount | None = None,
 ) -> CommandSpec:
     if uid != os.getuid() or gid != os.getgid():
         raise ValueError("runtime uid and gid must match the current user")
+    validate_handover_project(layout, handover_project)
     argv = _runtime_prefix(uid, gid) + _AGENT_SANDBOX_ARGS
     argv += _runtime_monitor_args(layout, "codex")
     argv += _git_environment_args() if broker is None else _broker_git_args(layout, broker)
+    argv += _handover_broker_args(handover_broker)
     argv += ["--env", "AGENT_HANDOVER_ROOT=/handovers"]
     mounts = [
         (layout.workspace, "/workspace", False),
         (layout.codex_home, "/home/agent/.codex", False),
         (layout.codex_auth_file, "/home/agent/.codex/auth.json", False),
         (layout.cache, "/home/agent/.cache", False),
-        (handover_project, f"/handovers/{layout.project_id}", False),
+        (handover_project, f"/handovers/{layout.project_id}", True),
     ]
     if broker is None:
         mounts.insert(-1, (layout.gh_dir, "/home/agent/.config/gh", True))
@@ -731,7 +736,7 @@ def run_claude_spec(
 ) -> CommandSpec:
     if uid != os.getuid() or gid != os.getgid():
         raise ValueError("runtime uid and gid must match the current user")
-    validate_claude_handover_project(layout, handover_project)
+    validate_handover_project(layout, handover_project)
     gh_config_dir = "/home/agent/gh-config"
     argv = _runtime_prefix(uid, gid) + _AGENT_SANDBOX_ARGS
     argv += _runtime_monitor_args(layout, "claude")

@@ -7,6 +7,7 @@ Unix socket the way the family, GitHub and egress clients do.
 """
 
 import json
+from contextlib import ExitStack
 import os
 from pathlib import Path
 import subprocess
@@ -14,6 +15,7 @@ import tempfile
 import textwrap
 import unittest
 
+from agent_container.handover_broker_runtime import HandoverBrokerRuntime
 from agent_container.podman import run_codex_spec
 from agent_container.state import StateLayout
 
@@ -93,17 +95,66 @@ SOCKET_SERVER = textwrap.dedent(
     """
 )
 
+HANDOVER_BODY = """## 作業の目的
+Podman integration fixture
+## 現在地
+Codex session ID（agent申告・host未検証）: 00000000-0000-4000-8000-000000000123
+## 決定事項と理由
+create-only broker
+## 変更したファイル・commit・PR
+fixture only
+## 検証結果
+fixture request
+## 未解決事項とリスク
+no credentials
+## 次の一手
+finish probe
+"""
+
 PROBE = textwrap.dedent(
-    """
-    import os, socket
+    r'''
+    import errno, os, socket, subprocess, sys
+    from pathlib import Path
     print("network_disabled_env=" + repr(os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED")))
-    client = socket.socket(socket.AF_UNIX)
-    try:
+    with socket.socket(socket.AF_UNIX) as client:
         client.connect("/workspace/probe.sock")
         print("unix_connect=ok")
-    except OSError as error:
-        print("unix_connect=failed:" + type(error).__name__ + ":" + str(error.errno))
-    """
+    project = Path("/handovers/agent-container")
+    existing = project / "existing.md"
+    assert existing.read_text() == "unchanged fixture\n"
+    for mutation in (
+        lambda: (project / "direct.md").write_text("direct"),
+        lambda: existing.write_text("overwrite"),
+        lambda: existing.rename(project / "renamed.md"),
+        lambda: existing.unlink(),
+    ):
+        try:
+            mutation()
+        except OSError as error:
+            if "--mount-only" in sys.argv:
+                assert error.errno == errno.EROFS
+            else:
+                assert error.errno in (errno.EROFS, errno.EACCES, errno.EPERM)
+        else:
+            raise AssertionError("handover direct mutation succeeded")
+    assert existing.read_text() == "unchanged fixture\n"
+    print("handover_mutations=denied")
+    if "--mount-only" in sys.argv:
+        print("outer_handover_mount=read-only")
+        raise SystemExit(0)
+    body = Path("/workspace/handover-body.md").read_text()
+    result = subprocess.run(
+        ("agent-handover", "create", "--title", "Podman handover fixture"),
+        input=body, text=True, capture_output=True, check=True, timeout=10,
+        env={**os.environ, "CODEX_SESSION_ID": "00000000-0000-4000-8000-000000000123"},
+    )
+    created = Path(result.stdout.strip())
+    assert created.parent == project and result.stderr == ""
+    document = created.read_text()
+    assert "- Session: （未記録）\n" in document
+    assert document.endswith(body)
+    print("handover_create=ok")
+    '''
 )
 
 PAYLOAD = """
@@ -112,6 +163,7 @@ export MOCK_API_KEY=sk-offline-dummy MOCK_CMD="python3 /workspace/probe.py"
 python3 /workspace/socket_server.py &
 python3 /workspace/mock_server.py &
 sleep 1
+python3 /workspace/probe.py --mount-only || exit $?
 cd /workspace
 codex --approve-for-me exec --ephemeral --json --color never --skip-git-repo-check "run the tool"
 status=$?
@@ -128,7 +180,10 @@ class CodexSandboxNetworkPodmanIntegrationTest(unittest.TestCase):
     # Break caught: the shipped Codex profile letting the tool sandbox disable
     # networking again, so agent-family / broker clients get EPERM on connect.
     def test_exec_tool_command_can_connect_to_unix_socket(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="agent-container-codex-net-") as temporary:
+        with (
+            tempfile.TemporaryDirectory(prefix="acn-") as temporary,
+            ExitStack() as brokers,
+        ):
             layout, handover_project = self._runtime_state(Path(temporary))
             profile = (ROOT / "profiles/codex/config.toml").read_text(encoding="utf-8")
             (layout.codex_home / "config.toml").write_text(
@@ -138,8 +193,16 @@ class CodexSandboxNetworkPodmanIntegrationTest(unittest.TestCase):
             (layout.workspace / "mock_server.py").write_text(MOCK_SERVER, encoding="utf-8")
             (layout.workspace / "socket_server.py").write_text(SOCKET_SERVER, encoding="utf-8")
             (layout.workspace / "probe.py").write_text(PROBE, encoding="utf-8")
+            body_file = layout.workspace / "handover-body.md"
+            body_file.write_text(HANDOVER_BODY, encoding="utf-8")
+            body_file.chmod(0o600)
+            (handover_project / "existing.md").write_text("unchanged fixture\n")
+            handover_broker = brokers.enter_context(
+                HandoverBrokerRuntime.create(layout, handover_project)
+            )
             spec = run_codex_spec(
-                layout, handover_project, BASE_IMAGE, os.getuid(), os.getgid()
+                layout, handover_project, BASE_IMAGE, os.getuid(), os.getgid(),
+                handover_broker,
             )
             argv = [
                 argument
@@ -155,6 +218,17 @@ class CodexSandboxNetworkPodmanIntegrationTest(unittest.TestCase):
                 command, check=False, capture_output=True, text=True, timeout=300
             )
 
+            self.assertEqual(
+                (handover_project / "existing.md").read_text(), "unchanged fixture\n"
+            )
+            published = list(handover_project.glob("20*.md"))
+            self.assertEqual(len(published), 1, completed.stderr[-800:])
+            self.assertTrue(published[0].read_text().endswith(HANDOVER_BODY))
+            self.assertEqual(published[0].stat().st_mode & 0o777, 0o600)
+            self.assertEqual(len(list(handover_project.iterdir())), 2)
+            brokers.close()
+            self.assertFalse(handover_broker.run_dir.exists())
+
         outputs = []
         for line in completed.stdout.splitlines():
             try:
@@ -167,9 +241,12 @@ class CodexSandboxNetworkPodmanIntegrationTest(unittest.TestCase):
         self.assertEqual(
             completed.returncode, 0, f"stderr={completed.stderr[-800:]!r}"
         )
+        self.assertIn("outer_handover_mount=read-only", completed.stdout)
         self.assertEqual(len(outputs), 1, completed.stdout[-800:])
         self.assertIn("network_disabled_env=None", outputs[0])
         self.assertIn("unix_connect=ok", outputs[0])
+        self.assertIn("handover_mutations=denied", outputs[0])
+        self.assertIn("handover_create=ok", outputs[0])
 
     @staticmethod
     def _runtime_state(root: Path) -> tuple[StateLayout, Path]:

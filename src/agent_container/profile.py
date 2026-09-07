@@ -4,7 +4,7 @@ import shutil
 import tomllib
 
 
-PROFILE_VERSION = "4\n"
+PROFILE_VERSION = "5\n"
 HANDOVER_APPROVAL_RULE = (
     'prefix_rule(pattern=["agent-handover", "create"], decision="allow")\n'
 )
@@ -14,6 +14,35 @@ _SANDBOX_NETWORK_LINE = f"{SANDBOX_NETWORK_KEY} = true\n"
 _SANDBOX_NETWORK_BLOCK = f"[{SANDBOX_NETWORK_TABLE}]\n{_SANDBOX_NETWORK_LINE}"
 _TABLE_HEADER = re.compile(r"\s*\[")
 _SANDBOX_NETWORK_ASSIGNMENT = re.compile(rf"\s*{SANDBOX_NETWORK_KEY}\s*=")
+
+
+def _require_managed_directory(path: Path) -> None:
+    if path.is_symlink():
+        raise ValueError(f"managed profile path must not be a symlink: {path}")
+    if not path.is_dir():
+        raise FileNotFoundError(path)
+
+
+def _require_managed_file(path: Path) -> None:
+    if path.is_symlink():
+        raise ValueError(f"managed profile path must not be a symlink: {path}")
+    if not path.is_file():
+        raise FileNotFoundError(path)
+
+
+def validate_codex_handover_profile(codex_home: Path) -> None:
+    _require_managed_directory(codex_home)
+    version_file = codex_home / "managed-profile.version"
+    _require_managed_file(version_file)
+    try:
+        current = version_file.read_text(encoding="utf-8")
+    except UnicodeError:
+        current = ""
+    if current != PROFILE_VERSION:
+        raise ValueError(
+            "managed Codex handover profile is out of date; run "
+            "agentctl project update-profile PROJECT"
+        )
 
 
 def seed_codex_home(profile_root: Path, codex_home: Path) -> None:
@@ -81,16 +110,21 @@ def update_codex_handover_profile(profile_root: Path, codex_home: Path) -> None:
     rules_file = rules_dir / "default.rules"
     skill_file = codex_home / "skills/handover/SKILL.md"
     version_file = codex_home / "managed-profile.version"
+    _require_managed_directory(codex_home)
+    for directory in (codex_home / "skills", codex_home / "skills/handover"):
+        _require_managed_directory(directory)
+    for path in (config_file, skill_file, version_file):
+        _require_managed_file(path)
     if rules_dir.is_symlink():
         raise ValueError(f"managed profile path must not be a symlink: {rules_dir}")
-    if not rules_dir.exists():
+    rules_missing = not rules_dir.exists()
+    if not rules_missing:
+        _require_managed_directory(rules_dir)
+        _require_managed_file(rules_file)
+
+    if rules_missing:
         # Managed profile version 1 predates the approval rules directory.
         shutil.copytree(profile_root / "rules", rules_dir, symlinks=False)
-    for path in (config_file, rules_file, skill_file, version_file):
-        if path.is_symlink():
-            raise ValueError(f"managed profile path must not be a symlink: {path}")
-        if not path.is_file():
-            raise FileNotFoundError(path)
 
     rules = rules_file.read_text(encoding="utf-8")
     if HANDOVER_APPROVAL_RULE not in rules.splitlines(keepends=True):

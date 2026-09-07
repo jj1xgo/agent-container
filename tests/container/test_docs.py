@@ -279,7 +279,7 @@ class DevelopmentRoadmapDocumentationTest(unittest.TestCase):
             self.assertIn(f"| Phase {phase} |", roadmap)
         self.assertNotIn("| Phase 0 |", roadmap)
         self.assertNotIn("| Phase 14 |", roadmap)
-        self.assertIn("現在地は**Phase 7**", roadmap)
+        self.assertIn("次のPhaseは**Phase 7**（未着手）", roadmap)
         self.assertIn("| Phase 6 | 共通broker kernel | 完了 |", roadmap)
         self.assertIn("旧Phase番号は現在の進捗管理に使用しない", roadmap)
         self.assertIn("## 当初順序から変更した理由", roadmap)
@@ -662,12 +662,6 @@ class Phase2DocumentationTest(unittest.TestCase):
             self.assertEqual(len(columns), 4)
             self.assertEqual(columns[2], expected_results[name])
             self.assertEqual(columns[3], "2026-08-27")
-
-    def test_codex_retains_direct_handover_path_in_phase_1(self) -> None:
-        body = (ROOT / "docs/codex-operations.md").read_text(encoding="utf-8")
-
-        self.assertIn("Phase 1ではCodexは既存のdirect handover pathを維持します", body)
-
 
 class Phase3DocumentationTest(unittest.TestCase):
     def test_resource_monitor_and_cross_agent_review_are_documented(self) -> None:

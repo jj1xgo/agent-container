@@ -1,5 +1,6 @@
 """Opt-in rootless Podman evidence that the agent's bwrap sandbox can start."""
 
+from contextlib import ExitStack
 import os
 from pathlib import Path
 import secrets
@@ -9,6 +10,7 @@ import unittest
 
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
 from agent_container.podman import run_claude_spec
+from agent_container.handover_broker_runtime import HandoverBrokerRuntime
 from agent_container.podman import run_codex_spec
 from agent_container.state import StateLayout
 
@@ -29,10 +31,17 @@ BASE_IMAGE = os.environ.get(
 class AgentSandboxPodmanIntegrationTest(unittest.TestCase):
     def test_codex_workspace_write_sandbox_runs_a_command(self) -> None:
         token = f"AGENT_SANDBOX_{secrets.token_hex(8)}"
-        with tempfile.TemporaryDirectory(prefix="agent-container-sandbox-") as temporary:
+        with (
+            tempfile.TemporaryDirectory(prefix="acs-") as temporary,
+            ExitStack() as brokers,
+        ):
             layout, handover_project = self._runtime_state(Path(temporary))
+            handover_broker = brokers.enter_context(
+                HandoverBrokerRuntime.create(layout, handover_project)
+            )
             spec = run_codex_spec(
-                layout, handover_project, BASE_IMAGE, os.getuid(), os.getgid()
+                layout, handover_project, BASE_IMAGE, os.getuid(), os.getgid(),
+                handover_broker,
             )
             argv = [
                 argument
