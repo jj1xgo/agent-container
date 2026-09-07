@@ -236,3 +236,19 @@ launcher／processともexit 0、timeoutなし、既存workspaceのfile状態と
 既存の専用projectについて両agentのdoctorがexit 0、必須checkはすべてPASS。domain制限なしの既知network-policy WARNだけが残る。local binding、pending store、auditを検査し、既存recordはrejected 4件／created 2件、pending／unknown 0件、audit 23件でvalid。本文・送信先repository名／ID・credentialを表示していない。通常sandboxでのpending検査はlockアクセス制限により失敗したが、許可されたhost実行では成功した。既存recordやbindingは変更していない。
 
 次の検証範囲は実Codex／Claudeを別runで起動し、各1件の固定fixtureをhost pendingへ提出、同runの2回目はduplicate denial、canonical署名・audit・cleanupを確認すること。実GitHub Issue作成は別の直前承認が必要で、この準備では実行していない。Family live installation inventory、実CLI intakeともまだnot run。
+
+### 承認済みFamily実agent intake（2026-09-07）
+
+利用者が既存専用projectでCodex／Claude各1回、local pending各1件と同runの重複拒否を承認した。host checkout `64e122e`と同じimage、一時driver `/tmp/s2-4-family-cli-smoke.py`から通常のagentctl runtime監視経路を使用した。実GitHub Issue作成は承認範囲に含めず、実行していない。
+
+CodexはPASS。実agentのshell toolが指定CLIを2回実行し、初回はpending、2回目はexit 1の固定拒否。新規pendingは1件、client request IDとhost recordが一致し、canonical fixtureとhost生成署名が一致した。host preview成功、追加auditは`intake/pending/intake`と`preview/pending/validation`各1件、固定schemaでvalid。既存recordとworkspaceのGit状態は不変。launcher／processともexit 0、timeoutなし。通常container境界と単一socket file mountを維持し、Family／handoverの対象artifactとcontainerは終了後不在だった。pendingは承認待ちで保持し、本文・送信先repository名／IDは証跡へ保存していない。
+
+Claudeはintake **not run**。launcher／processはexit 0で終了したが、tool実行0件、新規pending0件、追加audit0件だった。既存recordとGit状態は不変、通常container境界と単一socket file mountを維持し、Family／handover artifactとcontainerのcleanupはPASS。観測eventはassistant 2件、rate_limit_event 1件、result 1件、system 21件、その他1件。rate_limit_eventの存在だけでrate limitを原因と断定しない。raw応答を保存していないため未実行理由は未確定であり、process成功をintake成功へ読み替えない。
+
+追加の実agent起動は行わず、再検証用driver `/tmp/s2-4-family-cli-smoke-v2.py`に固定候補のresult subtype、is_error、permission denial件数、Bash tool提供有無だけを記録する診断を準備し、構文検査した。応答本文やcredentialは記録しない。再実行はnot run。runtime実装・sandbox設定は変更していない。
+
+### Family live installation inventory（2026-09-07）
+
+初回の一時driverはmetadataの存在しない`app_id`を参照し、API接続前に失敗した。一次情報のdataclass定義に合わせて`client_id`比較へ修正。修正後の通常sandbox実行はlive inventory段階で失敗したが、同じdriverの許可済みhost実行はPASS。Family Appと開発用Appのclient IDが異なり、live inventoryのselected repositoryはexact 1件で既存bindingと一致した。App／bindingを変更せず、tokenはメモリ内で扱い最後にcacheをinvalidateした。repository名／ID、token、raw API応答は出力していない。この検査はGitHub設定画面の全権限を確認した証跡ではない。
+
+FamilyのClaude intakeと実Issue作成等の残ゲートは未完了。S2-4全体も未完了のまま保持する。
