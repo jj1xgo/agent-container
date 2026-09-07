@@ -283,11 +283,16 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
                             policy=FamilyPeerPolicy(self.session),
                         )
                         if connection is not None:
-                            handle_family_intake_connection(
-                                connection,
-                                self.session,
-                                self.layout.family_pending_dir,
-                            )
+                            try:
+                                handle_family_intake_connection(
+                                    connection,
+                                    self.session,
+                                    self.layout.family_pending_dir,
+                                )
+                            finally:
+                                # Mirrors kernel _handle_client: the runtime owns the
+                                # stream it admitted, even if the handler is replaced.
+                                connection.stream.close()
                 finally:
                     with self._client_lock:
                         if self._client is client:

@@ -121,7 +121,7 @@ class FamilyKernelRuntimeTest(unittest.TestCase):
 
         with patch("agent_container.family_intake_runtime.handle_family_intake_connection", handle):
             runtime._serve(listener)
-        self.assertEqual(events, ["accept", "accept", "enter", "timeout", "peercred", "makefile", "handle", "exit", "client-close", "listener-close"])
+        self.assertEqual(events, ["accept", "accept", "enter", "timeout", "peercred", "makefile", "handle", "stream-close", "exit", "client-close", "listener-close"])
         self.assertEqual(client.timeout, 30)
         self.assertIsNone(runtime._client)
         self.assertTrue(runtime._stop.is_set())
@@ -177,7 +177,7 @@ class FamilyKernelRuntimeTest(unittest.TestCase):
 
                 with patch("agent_container.family_intake_runtime.handle_family_intake_connection", handle):
                     runtime._serve(listener)
-                self.assertEqual(events, ["accept", "enter", "timeout", "peercred", "makefile", "handle", "exit", "client-close", "listener-close"])
+                self.assertEqual(events, ["accept", "enter", "timeout", "peercred", "makefile", "handle", "stream-close", "exit", "client-close", "listener-close"])
                 self.assertTrue(runtime._stop.is_set())
                 self.assertTrue(runtime._error)
                 self.assertIsNone(runtime._client)
