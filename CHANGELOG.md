@@ -53,7 +53,7 @@
 
 ### Validation
 
-- Phase 6 stage 2 S2-4（照合基準`36f02a8`、2026-09-07）の文書整合を進めました。stage 1設計のegress modeを歴史記録として明示し、現在の`0600`とK2 cleanupへの参照、G1のjoin後失効を追記し、roadmapをS2-4へ更新しました。[検証記録](docs/broker-kernel-stage2-validation.md)で今回の結果を管理します。実host smokeはnot run（この環境にPodmanと実host実行手段がないため）で、Phase 6は進行中です。既存のsmoke手順書と過去の観測結果は変更していません。
+- Phase 6 stage 2 S2-4（照合基準`36f02a8`、2026-09-07）の文書整合を進めました。stage 1設計のegress modeを歴史記録として明示し、現在の`0600`とK2 cleanupへの参照、G1のjoin後失効を追記し、roadmapをS2-4へ更新しました。[検証記録](docs/broker-kernel-stage2-validation.md)で今回の結果を管理します。この時点では実host smokeはnot run（当時の環境にPodmanと実host実行手段がないため）でした。既存のsmoke手順書と過去の観測結果は変更していません。実host結果とPhase 6の完了は次項に記録します。
 
 - 2026-09-07、S2-4の実host smokeをhostで進め、検証記録冒頭に既存smoke手順5件とstage 2設計の必須項目へ証拠を対応付けた現在地一覧を追加しました。Codex／Claude runtime、GitHub broker（直接CLIとguard付きnegative）、Family（実agent intakeと承認付き[Issue #121](https://github.com/jj1xgo/agent-container/issues/121)）に加え、stage 2対象で唯一証拠が無かったClaude handover createを利用者のprivate terminalから専用image `e9791cbc483f`（Claude Code 2.1.263）で1回実施し、host fileのbyte一致、audit `create`／`ok`／`write` 1行、artifact消滅、stale client拒否を確認しました。stage 2対象外のPhase 2 §7／§8とPhase 3 §3 container内検査は利用者判断でstage 1証拠を採用します。S2-4 branchの[required CI](https://github.com/jj1xgo/agent-container/actions/runs/34103416701)はUnit tests／Podman integrationともpassし、[PR #122](https://github.com/jj1xgo/agent-container/pull/122)でroadmapのPhase 6を完了へ変更しました。現在地はPhase 7で、着手前にIssue #120を最優先で行います。
 

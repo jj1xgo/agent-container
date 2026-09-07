@@ -1,6 +1,6 @@
 # Phase 6 stage 2（S2-4）検証記録
 
-2026-09-07、対象実装はmain `36f02a8`（PR #119 merge）。S2-1〜S2-3が取り込まれていることをlocal Git履歴で確認した。S2-4の今回の変更は文書のみで、Phase 6は進行中。stage 1の結果は[CHANGELOG](../CHANGELOG.md)の当時の記録を参照し、今回のPASSへ転用しない。
+2026-09-07、対象実装はmain `36f02a8`（PR #119 merge）。S2-1〜S2-3が取り込まれていることをlocal Git履歴で確認した。S2-4の変更は文書のみ。実host gateとrequired CIの完了後、[PR #122](https://github.com/jj1xgo/agent-container/pull/122)でroadmapのPhase 6を完了へ変更した（merge後に確定）。stage 1の結果は[CHANGELOG](../CHANGELOG.md)の当時の記録を参照し、今回のPASSへ転用しない。
 
 ## 現在地一覧（2026-09-07、handover照合後）
 
@@ -34,7 +34,7 @@
 | Phase 3 §7／Phase 4 §5 | Issue list／view、write・query拒否、stale | 直接CLI／自動test | list／view PASS、stale PASS。write／query拒否は2026-08-29の実host＋unit test | PASS | — |
 | Phase 3 §8／Phase 4 §6 | audit／cleanup | 直接CLI | 固定schema、stageなし、artifact不在 PASS | PASS | — |
 | Phase 3／4 補足 | 実agent経由のbroker操作 | 実agent | Codex非対話1回はtool 0件で非診断。stage 1（6-6）も直接CLI方式 | not run（stage 1と同方式） | agentはbroker境界の外側のため必須にしない |
-| Phase 4 §7 | 自動検証と独立review | 自動test | 全suite PASS。独立reviewはS2-4 PRで | PARTIAL | PR時に実施 |
+| Phase 4 §7 | 自動検証と独立review | 自動test | 全suite PASSとrequired CI pass。PR #122は文書のみで、CHANGELOG・roadmap・検証記録・計画の記述一致をPR内で確認した。独立agent reviewはnot run（runtime変更なし） | PASS（自動）／review not run | — |
 | Phase 4 §8 | release gate | — | v0.4.0専用 | N/A | S2-4対象外 |
 | Egress §1 | local preflight、doctor | 直接CLI | 既存policy（4 domain）保持、doctor PASS | PASS | — |
 | Egress §2 | discovery | — | 既存allowlistで最小応答成功のため不要 | N/A | — |
@@ -52,7 +52,9 @@
 | stage 2受け入れ | required CI（unit、socket 3 module、Podman 17） | CI | [PR #122](https://github.com/jj1xgo/agent-container/pull/122)の`34829c6`で[Unit tests／Podman integration](https://github.com/jj1xgo/agent-container/actions/runs/34103416701)ともpass | PASS | roadmap更新commitの再実行結果はPRで確認 |
 | stage 2受け入れ | main取り込み後にPhase 6を閉じる | — | PR #122でroadmapのPhase 6を完了へ変更。merge後に確定 | PR待ち | merge後、Issue #120へ |
 
-## 実行環境
+## 初回sandbox時点の実行環境（歴史記録）
+
+以下は初回の通常sandboxで作業した時点の記録である。push、PR、required CIの現在値は冒頭の現在地一覧を参照する。
 
 - `/workspace`のsandbox。`command -v podman`はpathを返さず、実host用の実行toolもない。
 - 初回の作業branch作成は通常tool sandbox内で`cannot lock ref ... Read-only file system`となった。その後、利用者のcommit依頼を受け、`require_escalated`で`docs/broker-kernel-s2-4`の作成に成功した。container／hostのGit metadata自体がread-onlyという意味ではない。PR作成はnot run。
