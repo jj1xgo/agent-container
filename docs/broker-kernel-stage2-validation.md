@@ -278,3 +278,11 @@ v3 driverはlauncher／process exit 0、result subtype `success`、is_error fals
 host checkout `60755b8`と同じimageでv4 driverを実行し、**PASS**。実ClaudeのBash toolはexact commandを2回実行し、初回はpending、2回目はexit 1の固定拒否だった。新規pendingは1件、client request IDとhost recordが一致し、canonical fixtureとClaudeのhost生成署名が一致。host preview成功、追加auditは`intake/pending/intake`と`preview/pending/validation`各1件、固定schemaでvalid。既存recordとGit状態は不変。launcher／process／driverともexit 0、timeoutなし、result subtype `success`、is_error false、permission denial 0件。通常境界と単一socket file mountを維持し、Family／handover artifactと対象containerは終了後不在。
 
 v3からv4への変更は失敗時の説明を抽出するhost側診断だけで、agentへの指示と実行許可設定は同一。今回は指定commandを実行したが、以前のtool未実行の原因を修正・特定した証拠ではない。成功済みの実CLI intake／duplicateと、未解決の実行のばらつきを区別する。実GitHub Issueは作成せず、Codex／Claude由来のpendingを各1件保持する。その他の残ゲートがあるためS2-4全体は未完了。
+
+### 承認済みFamily実Issue create／再approve拒否（2026-09-07）
+
+section 5に従い、その場のpreviewからexact target、request ID、canonical title／body、目的、Issue 1件作成・自動削除なしの外部影響を利用者へ提示し、対象1件のfresh explicit approvalを得た。host checkout `b37ccee`の通常`bin/agentctl family issue approve`をprivate PTYで実行。Echoを無効にし、承認済みcanonical内容・target・pending状態・期限とCLIのexact previewを照合してから確認文字列を1回だけ入力した。本文・確認文字列・credential・raw応答は証跡へ保存していない。
+
+**PASS**: [smoke Issue #121](https://github.com/jj1xgo/agent-container/issues/121)を1件作成し、CLI exit 0、host record `created`、canonical本文消去を確認。hostのread-only `gh issue view`でnumber／URL、承認済みtitle／bodyの完全一致、OPEN、期待Family App authorを照合した。Issueは自動close／deleteせず保持する。他のpending recordは不変。
+
+同じrequestへ通常CLIのapproveをもう1回実行すると、確認入力前にexit 1で拒否された。recordとauditは再approve前後で不変。terminal stateの検査がprovider／送信より前にある実装とも一致し、追加Issueを作成していない。作成時の追加auditは`approve/sending/send`と`approve/created/cleanup`各1件、固定schemaでvalid。いずれのCLIも中断なし。Codex由来pendingは未送信のまま保持する。残りの実host gateとrequired CI／main取り込みがあるため、S2-4全体は未完了。
