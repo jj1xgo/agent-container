@@ -6,7 +6,7 @@
 
 Phase 5の成果は専用`release/0.5`系統の`v0.5.0`として切り出す。Phase 6の保守はmainの`0.6.0-dev`で継続する。公開候補と検証状態は[release記録](v0.5.0-release.md)を参照する。
 
-Phase 1〜6は完了した。次のPhaseは**Phase 7**（未着手）である。現在は利用者指定により、Phase 6の保守作業として[Issue #120](https://github.com/jj1xgo/agent-container/issues/120)（Codex handoverのcreate-only broker統一）を最優先で行う。Phase 6は、stage 1（PR #106まで）とstage 2（S2-1〜S2-3、PR #117〜#119）を取り込んだmain `36f02a8`に対し、2026-09-07の実host smoke（[検証記録](broker-kernel-stage2-validation.md)の現在地一覧）で、stage 2が観測挙動を変えた4 broker（handover、egress、GitHub、Family）の既存手順gateがすべてPASSし、その記録をS2-4（PR #122）で取り込んだことで閉じた。stage 2対象外の一部項目はstage 1証拠を採用し、各rollbackはnot run（policy／binding保持）のまま記録している。Phase 5は、2026-09-02の実host smokeで専用App／binding、実PodmanのCodex／Claude両path、Codex intake、承認付き実Issue、non-exposure、duplicate、audit／cleanupがPASSし、残っていたClaude実CLIのintakeを2026-09-04に再実行してPASSしたことで閉じた。以前HTTP 401で停止していた原因は、browserのlogin codeをsetup tokenとして保存していた貼り間違いであり、validatorの強化（PR #79）と折り返しpasteの連結（PR #81）で再発を防いだ。
+Phase 1〜6は完了した。次のPhaseは**Phase 7**（未着手）である。利用者指定で最優先としたPhase 6の保守作業、[Issue #120](https://github.com/jj1xgo/agent-container/issues/120)（Codex handoverのcreate-only broker統一）も、2026-09-07に[PR #123](https://github.com/jj1xgo/agent-container/pull/123)をmain `b17e179`へ取り込み、Issueを完了として閉じた。Phase 6は、stage 1（PR #106まで）とstage 2（S2-1〜S2-3、PR #117〜#119）を取り込んだmain `36f02a8`に対し、2026-09-07の実host smoke（[検証記録](broker-kernel-stage2-validation.md)の現在地一覧）で、stage 2が観測挙動を変えた4 broker（handover、egress、GitHub、Family）の既存手順gateがすべてPASSし、その記録をS2-4（PR #122）で取り込んだことで閉じた。stage 2対象外の一部項目はstage 1証拠を採用し、各rollbackはnot run（policy／binding保持）のまま記録している。Phase 5は、2026-09-02の実host smokeで専用App／binding、実PodmanのCodex／Claude両path、Codex intake、承認付き実Issue、non-exposure、duplicate、audit／cleanupがPASSし、残っていたClaude実CLIのintakeを2026-09-04に再実行してPASSしたことで閉じた。以前HTTP 401で停止していた原因は、browserのlogin codeをsetup tokenとして保存していた貼り間違いであり、validatorの強化（PR #79）と折り返しpasteの連結（PR #81）で再発を防いだ。
 
 状態は次の4種類とする。
 
@@ -43,7 +43,7 @@ Phase 6 stage 2のS2-1（[PR #117](https://github.com/jj1xgo/agent-container/pul
 
 stage 1（6-6）の実host観測と独立修正の経緯は[CHANGELOG](../CHANGELOG.md)に保存しています。Codex／Claude intakeやhandoverの過去のPASSを、stage 2の再実行結果として扱いません。S2-4の[実施計画](superpowers/plans/2026-09-07-broker-kernel-s2-4-validation.md)と[検証記録](broker-kernel-stage2-validation.md)で今回の結果と未実施理由を管理します。2026-09-07のhostで、専用image `e9791cbc483f`（Codex 0.153.4、Claude 2.1.263）を使い、自動gate（lint、unit、socket、実Podman 17件）と、Codex／Claude runtime、GitHub broker、Family、Claude handover createの実host gateが既存手順の変更なしでPASSしました。stage 2対象外で未再実施の項目はstage 1証拠を採用し、rollbackはnot runのまま記録しています。
 
-利用者指定（2026-09-07）: S2-4のmain取り込み直後、Phase 7へ進む前に[Issue #120: Codex handoverのcreate-only broker統一](https://github.com/jj1xgo/agent-container/issues/120)へ最優先で着手する。S2-4へruntime変更を混ぜず、独立した設計・実装PRとする。Issue #120は[設計](superpowers/specs/2026-09-07-codex-handover-broker-design.md)の推奨案が承認済みで実装中。session IDはhost未検証の申告として本文に残す。完了判定は[検証記録](codex-handover-broker-validation.md)に集約し、Phase 7へはまだ着手しない。
+利用者指定（2026-09-07）に従い、S2-4のmain取り込み後、Phase 7より先に[Issue #120: Codex handoverのcreate-only broker統一](https://github.com/jj1xgo/agent-container/issues/120)を独立した[PR #123](https://github.com/jj1xgo/agent-container/pull/123)で完了した。[設計](superpowers/specs/2026-09-07-codex-handover-broker-design.md)に従い、session IDはhost未検証の申告として本文に残す。認証済みCodex／Claudeの非対話CLIから通常sandboxのtoolを実行し、両agentの実host 6 gateがPASSした。対話TUIの操作確認とは区別し、詳細と未実施項目は[検証記録](codex-handover-broker-validation.md)を参照する。既存projectへの適用はこの完了判定に含めず、必要な場合は[既存projectの更新手順](codex-operations.md#既存projectの更新)に従って別途確認する。次の開発候補はPhase 7の設計であり、現時点では未着手。
 
 実施順はPhase番号と一致します。
 
