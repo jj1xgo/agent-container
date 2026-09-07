@@ -1165,7 +1165,7 @@ class Phase4DocumentationTest(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("Latest stable: `v0.5.0`", readme)
+        self.assertIn("Latest stable: `v0.6.0`", readme)
         self.assertIn("## [Unreleased]", changelog)
         self.assertIn("## [0.4.0] - 2026-08-29", changelog)
         self.assertIn(
@@ -1964,16 +1964,16 @@ class ReleaseVersionContractTest(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
-        self.assertIn("Latest stable: `v0.5.0`", readme)
-        self.assertIn(f"Release candidate: `{RELEASE_TAG}`（未公開）", readme)
+        self.assertIn("Latest stable: `v0.6.0`", readme)
+        self.assertNotIn("Release candidate:", readme)
         self.assertIn(
             f"Development branch: `main` (`{DEVELOPMENT_VERSION}`)", readme
         )
-        self.assertIn("git clone --branch v0.5.0 --depth 1", readme)
+        self.assertIn("git clone --branch v0.6.0 --depth 1", readme)
         notes = (ROOT / "docs/v0.6.0-release-notes.md").read_text(encoding="utf-8")
         self.assertIn(f"git clone --branch {RELEASE_TAG} --depth 1", notes)
         self.assertIn("git clone https://github.com/jj1xgo/agent-container.git", readme)
-        self.assertIn(f"## [{RELEASE_VERSION}] - Unreleased", changelog)
+        self.assertIn(f"## [{RELEASE_VERSION}] - 2026-09-07", changelog)
 
     def test_ci_records_resolved_version_in_job_summary(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
