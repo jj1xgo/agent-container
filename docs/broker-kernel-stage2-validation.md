@@ -78,6 +78,22 @@ GitHubはSameUserによる実clientの許可とjoin後失効を確認し、30秒
 
 [PR #119](https://github.com/jj1xgo/agent-container/pull/119)はmerge済みで、head `91585c6bd89cfdfbaa27576d498db7fad5894eca`、merge commit `36f02a87c14603114bd5856575c0c92b49a07d66`を照合した。[同PRのCI](https://github.com/jj1xgo/agent-container/actions/runs/34072250396)はUnit tests／Podman integrationともpass。これは先行PRの結果であり、S2-4 commitの新規required CIはnot run（push／PR未実施）。
 
-認証済み実CLIの操作、GitHub clone／fetchとcreate-only push／PR、Issue read／stale client、egress実サービス接続、Family両CLI intake／実Issue作成、各rollbackはnot run。専用smoke projectの既存workspaceは追跡branchに対してahead 2／behind 1であり、resetや既存branch変更はしていない。次の実サービスgateは対象project・agent・exact domain・操作を具体化し、各手順書のfresh approval条件を満たしてから行う。Phase 6は引き続き進行中。
+Codexの最小応答とegress cleanupは下記のとおり確認した。Claude実CLI、GitHub clone／fetchとcreate-only push／PR、Issue read／stale client、Family両CLI intake／実Issue作成、各rollbackはnot run。専用smoke projectの既存workspaceは追跡branchに対してahead 2／behind 1であり、resetや既存branch変更はしていない。次の実サービスgateは対象project・agent・exact domain・操作を具体化し、各手順書のfresh approval条件を満たしてから行う。Phase 6は引き続き進行中。
 
 今回のlocalログ: `/tmp/s2-4-host-{build,codex,container,socket,podman,doctor-smoke,docs}.log`。credential本文を取得せず、認証関連の直接観測は既存手順で許可されたmetadataとdoctor結果に限定した。
+
+### 承認済みCodex runtime gate（2026-09-07）
+
+利用者が専用`agent-container-smoke`でのCodex起動1回、最小応答、終了後cleanupを直前承認した。既存のexact domainは`chatgpt.com`、`ab.chatgpt.com`、`pypi.org`、`sdmntprsouthcentralus.oaiusercontent.com`であり、policyを変更していない。
+
+host checkout `c27563a`（runtime実装は`5a2a49a`と同一）と上記imageを使用。`agentctl.main`の通常run・egress supervision経路を使い、一時driver `/tmp/s2-4-codex-runtime-smoke.py`のruntime builderでPodmanの対話用flagsを外し、標準Codex commandへ`exec --ephemeral --json --color never`とtool使用・file変更をしない最小promptを付加した。mount、network、credential、broker、監視処理は標準builderのまま。prompt／response、stderrの生本文はevidenceへ保存せず、子process出力はメモリ内で判定して破棄した。
+
+| 観測 | 結果 |
+| --- | --- |
+| 認証済み最小応答 | PASS、期待応答一致、turn completed、tool使用なし、launcher／processともexit 0、timeoutなし。起動は1回だけ |
+| Egress | PASS、runtime specは`--network=none`、capability file modeは`0600`、既存allowlist不変 |
+| Content-free audit | 固定schema検査PASS。このproject／agentの追加分は`connect`成功16件、`denied`／`policy` 1件。拒否domainは収集せず、必要な追加domainがあるかは未判定。最小応答成功をCLI全機能成功へ読み替えない |
+| Cleanup | PASS、通常終了後に対象container、socket、capability、run directoryがすべて不在 |
+| Workspace | 実行前後のGit status（branchを含む）が一致 |
+
+この実行ではgateway故障時のfallback、stale client、rollbackは再検証していない。先行する17件の実Podman統合testの結果と区別し、Egress手順全体とS2-4全体はPARTIALのまま維持する。
