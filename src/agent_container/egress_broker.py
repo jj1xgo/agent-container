@@ -29,9 +29,6 @@ MANAGED_EGRESS_DOMAINS: dict[str, frozenset[str]] = {
 }
 _LABEL = "egress broker"
 _AUDIT_LABEL = "egress broker audit"
-# The container-side adapter reads the capability through a read-only bind
-# mount and rejects writable files, so the file is created owner-read-only.
-_CAPABILITY_FILE_MODE = 0o400
 _AUDIT_STATUSES = frozenset({"ok", "denied", "error"})
 _AUDIT_STAGES = frozenset(
     {"authentication", "policy", "resolve", "connect", "limit", "relay", "unavailable"}
@@ -99,12 +96,7 @@ class EgressBrokerSession:
             raise
         capability_path = run_dir / "capability"
         try:
-            create_private_file(
-                capability_path,
-                capability + "\n",
-                label=_LABEL,
-                mode=_CAPABILITY_FILE_MODE,
-            )
+            create_private_file(capability_path, capability + "\n", label=_LABEL)
         except Exception:
             shutil.rmtree(run_dir)
             raise

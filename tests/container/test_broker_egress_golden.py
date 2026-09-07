@@ -129,8 +129,11 @@ class EgressAuditGoldenTest(unittest.TestCase):
                 self.assertEqual(
                     stat.S_IMODE(session.audit_file.stat().st_mode), 0o600
                 )
+                # Stage 2 E1: the host writes the capability with the kernel
+                # default mode 0600 so the container-side kernel reader accepts
+                # it. Golden request/response/audit bytes above are unchanged.
                 self.assertEqual(
-                    stat.S_IMODE(session.capability_path.stat().st_mode), 0o400
+                    stat.S_IMODE(session.capability_path.stat().st_mode), 0o600
                 )
             finally:
                 session.close()

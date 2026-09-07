@@ -12,6 +12,7 @@ from agent_container.broker.runtime import open_connection
 from agent_container.egress_broker import EgressBrokerSession
 from agent_container.egress_broker_protocol import EgressResponse
 from agent_container.egress_broker_protocol import encode_response_frame
+from agent_container.egress_broker_protocol import PROTOCOL_VERSION
 from agent_container.egress_broker_protocol import read_request_frame
 from agent_container.egress_gateway import connect_target
 from agent_container.egress_gateway import RelayLimits
@@ -144,7 +145,7 @@ class EgressBrokerRuntime(AbstractContextManager[EgressRuntimeMount]):
     def _write_response(
         self, stream: BinaryIO, status: str, code: str
     ) -> None:
-        stream.write(encode_response_frame(EgressResponse(1, status, code)))
+        stream.write(encode_response_frame(EgressResponse(PROTOCOL_VERSION, status, code)))
         stream.flush()
 
     def _handle_client(self, client: socket.socket) -> None:

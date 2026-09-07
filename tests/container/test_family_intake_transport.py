@@ -7,11 +7,14 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from agent_container.broker.runtime import admit_connection
+from agent_container.broker.runtime import Connection
 from agent_container.family_intake_broker import FamilyIntakeInternalError
 from agent_container.family_intake_broker import FamilyIntakeSession
 from agent_container.family_intake_protocol import decode_response_frame
 from agent_container.family_intake_protocol import encode_request_frame
 from agent_container.family_intake_protocol import FamilyIntakeRequest
+from agent_container.family_intake_transport import FamilyPeerPolicy
 from agent_container.family_intake_transport import handle_family_intake_connection
 from agent_container.family_pending import list_pending
 
@@ -43,12 +46,18 @@ class FakeStream:
         self.closed = True
 
 
-class FakeConnection:
+class FakeClient:
+    """Accepted socket as admit_connection sees it: settimeout, SO_PEERCRED, makefile."""
+
     def __init__(self, stream: FakeStream, *, pid: int = PEER_PID, uid: int = os.getuid()) -> None:
         self.stream = stream
         self.pid = pid
         self.uid = uid
+        self.timeout: object = None
         self.credential_calls: list[tuple[int, int, int]] = []
+
+    def settimeout(self, timeout: object) -> None:
+        self.timeout = timeout
 
     def getsockopt(self, level: int, option: int, size: int) -> bytes:
         self.credential_calls.append((level, option, size))
@@ -56,6 +65,10 @@ class FakeConnection:
 
     def makefile(self, *_: object, **__: object) -> FakeStream:
         return self.stream
+
+
+def admitted(stream: FakeStream, *, pid: int = PEER_PID, uid: int = os.getuid()) -> Connection:
+    return Connection(None, stream, uid, pid, 9999)
 
 
 class FamilyIntakeTransportTest(unittest.TestCase):
@@ -117,18 +130,13 @@ class FamilyIntakeTransportTest(unittest.TestCase):
         session.register_runtime(PEER_PID)
         return session
 
-    # Break caught: transport trusting caller-supplied identity instead of SO_PEERCRED.
-    def test_reads_peer_credentials_and_writes_one_exact_response(self) -> None:
+    # Break caught: the handler writing more than one frame or leaving the stream open.
+    def test_writes_one_exact_response_for_an_admitted_connection(self) -> None:
         session = self.session()
         stream = FakeStream(encode_request_frame(self.request()))
-        connection = FakeConnection(stream)
 
-        handle_family_intake_connection(connection, session, self.store)
+        handle_family_intake_connection(admitted(stream), session, self.store)
 
-        self.assertEqual(
-            connection.credential_calls,
-            [(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)],
-        )
         response, consumed = decode_response_frame(stream.outgoing.getvalue())
         self.assertEqual(consumed, len(stream.outgoing.getvalue()))
         self.assertEqual(
@@ -143,7 +151,7 @@ class FamilyIntakeTransportTest(unittest.TestCase):
         incomplete = encode_request_frame(self.request())[:-3]
 
         handle_family_intake_connection(
-            FakeConnection(FakeStream(incomplete)),
+            admitted(FakeStream(incomplete)),
             session,
             self.store,
         )
@@ -151,7 +159,7 @@ class FamilyIntakeTransportTest(unittest.TestCase):
         self.assertFalse(session.consumed)
         self.assertEqual(list_pending(self.store, "demo"), ())
         valid = FakeStream(encode_request_frame(self.request()))
-        handle_family_intake_connection(FakeConnection(valid), session, self.store)
+        handle_family_intake_connection(admitted(valid), session, self.store)
         self.assertEqual(len(list_pending(self.store, "demo")), 1)
 
     # Break caught: response disconnect rolling back or replaying a durable request.
@@ -163,7 +171,7 @@ class FamilyIntakeTransportTest(unittest.TestCase):
         )
 
         handle_family_intake_connection(
-            FakeConnection(disconnected),
+            admitted(disconnected),
             session,
             self.store,
         )
@@ -171,7 +179,7 @@ class FamilyIntakeTransportTest(unittest.TestCase):
         self.assertTrue(session.consumed)
         self.assertEqual(len(list_pending(self.store, "demo")), 1)
         replay = FakeStream(encode_request_frame(self.request()))
-        handle_family_intake_connection(FakeConnection(replay), session, self.store)
+        handle_family_intake_connection(admitted(replay), session, self.store)
         self.assertEqual(replay.outgoing.getvalue(), b"")
         self.assertEqual(len(list_pending(self.store, "demo")), 1)
 
@@ -186,7 +194,7 @@ class FamilyIntakeTransportTest(unittest.TestCase):
         ):
             with self.assertRaises(FamilyIntakeInternalError) as raised:
                 handle_family_intake_connection(
-                    FakeConnection(stream),
+                    admitted(stream),
                     session,
                     self.store,
                 )
@@ -198,30 +206,72 @@ class FamilyIntakeTransportTest(unittest.TestCase):
         self.assertTrue(stream.closed)
         self.assertTrue(session.failed)
 
-    # Break caught: a different process consuming the capability before the expected runtime.
-    def test_peer_mismatch_is_silent_and_does_not_read_or_consume(self) -> None:
-        session = self.session()
-        stream = FakeStream(encode_request_frame(self.request()))
-
-        handle_family_intake_connection(
-            FakeConnection(stream, pid=PEER_PID + 1),
-            session,
-            self.store,
-        )
-
-        self.assertEqual(stream.incoming.tell(), 0)
-        self.assertEqual(stream.outgoing.getvalue(), b"")
-        self.assertFalse(session.consumed)
-
     # Break caught: a valid capability being redirected to another project's pending store.
     def test_rejects_store_mismatch_without_consumption(self) -> None:
         session = self.session()
         other = self.store.parent.parent / "other" / "pending"
         stream = FakeStream(encode_request_frame(self.request()))
 
-        handle_family_intake_connection(FakeConnection(stream), session, other)
+        handle_family_intake_connection(admitted(stream), session, other)
 
         self.assertEqual(stream.outgoing.getvalue(), b"")
+        self.assertFalse(session.consumed)
+
+    # Break caught: a different process consuming the capability before the expected runtime.
+    def test_policy_denies_unregistered_pid_before_a_byte_is_read(self) -> None:
+        session = self.session()
+        stream = FakeStream(encode_request_frame(self.request()))
+        client = FakeClient(stream, pid=PEER_PID + 1)
+
+        connection = admit_connection(client, timeout=30, policy=FamilyPeerPolicy(session))
+
+        self.assertIsNone(connection)
+        self.assertEqual(client.timeout, 30)
+        self.assertEqual(
+            client.credential_calls, [(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)]
+        )
+        self.assertEqual(stream.incoming.tell(), 0)
+        self.assertEqual(stream.outgoing.getvalue(), b"")
+        self.assertTrue(stream.closed)
+        self.assertFalse(session.consumed)
+        self.assertEqual(list_pending(self.store, "demo"), ())
+
+    # Break caught: a same-pid connection from another uid being admitted.
+    def test_policy_denies_foreign_uid_and_admits_the_registered_runtime(self) -> None:
+        session = self.session()
+        denied = FakeClient(FakeStream(b""), uid=os.getuid() + 1)
+        self.assertIsNone(
+            admit_connection(denied, timeout=30, policy=FamilyPeerPolicy(session))
+        )
+        self.assertTrue(denied.stream.closed)
+
+        stream = FakeStream(encode_request_frame(self.request()))
+        connection = admit_connection(
+            FakeClient(stream), timeout=30, policy=FamilyPeerPolicy(session)
+        )
+
+        self.assertIsNotNone(connection)
+        self.assertEqual(
+            (connection.peer_pid, connection.peer_uid),  # type: ignore[union-attr]
+            (PEER_PID, os.getuid()),
+        )
+        self.assertIs(connection.stream, stream)  # type: ignore[union-attr]
+        self.assertFalse(stream.closed)
+        self.assertEqual(stream.incoming.tell(), 0)
+
+    # Break caught: an unexpected validation failure being downgraded to a silent denial.
+    def test_policy_propagates_unexpected_validation_failures_and_closes_the_stream(self) -> None:
+        session = self.session()
+        stream = FakeStream(encode_request_frame(self.request()))
+        with patch.object(
+            session, "validate_peer", side_effect=RuntimeError("private-peer-marker")
+        ):
+            with self.assertRaises(RuntimeError):
+                admit_connection(
+                    FakeClient(stream), timeout=30, policy=FamilyPeerPolicy(session)
+                )
+        self.assertTrue(stream.closed)
+        self.assertEqual(stream.incoming.tell(), 0)
         self.assertFalse(session.consumed)
 
 
