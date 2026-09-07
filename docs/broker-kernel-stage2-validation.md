@@ -258,3 +258,23 @@ FamilyのClaude intakeと実Issue作成等の残ゲートは未完了。S2-4全�
 利用者がlocal pending作成と重複拒否の範囲でClaudeの追加1回を直前承認し、host checkout `d113a11`と同じimageから`/tmp/s2-4-family-cli-smoke-v2.py claude`を1回実行した。intakeは引き続き **not run**、検証driverはexit 1。実agentのlauncher／processはexit 0、timeoutなし、result subtypeは`success`、is_error false、Bash tool提供あり、permission denial 0件だったが、tool実行0件、新規pending0件、追加audit0件だった。これらはintake成功の証拠ではなく、未実行の原因も未確定。
 
 既存pendingを含む全recordとworkspaceのGit状態は不変、audit valid。通常container境界と単一socket file mountを維持し、Family／handover artifactと対象containerは終了後不在。event件数はassistant 2、rate_limit_event 1、result 1、system 13、その他1。応答本文・credentialは保存していない。GitHub Issue作成は実行せず、追加の実agent再試行も行っていない。Claude intakeの未解決を残し、S2-4を完了扱いにしない。
+
+### Claude通常対話経路の切り分け（2026-09-07）
+
+利用者の継続指示に基づき、host checkout `60755b8`と同じimageで通常の`run_claude_spec`／Family supervisorを維持したPTY診断を行った。intakeを指示したrunは2回、起動画面だけを調べたrunは2回。全4回とも停止後のFamily／handover artifactと対象containerは不在、既存recordとGit状態は不変、新規pending 0件、追加audit 0件。停止には監視processへのSIGINTを使用し、launcher／processのexit 1を正常完了へ読み替えていない。
+
+初期driverはANSI cursor更新を単純除去していたため、画面上の空白を正しく復元できず、入力待ちや承認画面の検出がfalseになった。`error`という単語だけから起動エラーを疑ったが、失敗原因としては確認できなかった。画面復元を追加し、送信先・fixture等を伏せた表示で、通常の入力待ち画面とmanual modeを確認した。端末照会への応答不足を疑った診断でもcursor queryは観測されず、その仮説は確定していない。
+
+最後の対話runでは、Claudeは指定fixtureの直接提出に先立ち、未知のhelperの意味を確認すると述べ、`agent-family issue create --help`とファイル種別確認を組み合わせた補助commandを提案した。これは指定intake commandではなく、承認画面で待機していた。画面全体に元のcommandが含まれるだけでは実行対象との一致を証明できず、直前dialogの一致判定もfalseだった。途中で一度Enterを入力したが、補助commandの完了は観測できていない。intake／重複拒否はnot runであり、toolの実行意図や確認画面をbroker到達へ読み替えない。
+
+この観測だけでは、以前の非対話runがtool 0件だった理由を確定できない。sandbox／App／bindingは変更せず、既に確認済みのhelper仕様を指示へ含め、指定commandが実行不能なら短い理由を返す非対話driver `/tmp/s2-4-family-cli-smoke-v3.py`を準備した。構文検査成功。最初の実行tool callは中断されたため、再開時に対象containerが不在であることを確認してから実行した。結果は次節へ記録する。
+
+### 仕様説明付き非対話Claude診断（2026-09-07）
+
+v3 driverはlauncher／process exit 0、result subtype `success`、is_error false、Bash提供あり、permission denial 0件で終了したが、tool実行0件、新規pending0件、追加audit0件だった。短い理由の抽出条件に適合する応答は得られず、原因は未確定。driverはexit 1、timeoutなし。既存recordとGit状態は不変、audit valid、通常境界と単一socket file mountを維持、Family／handover artifactと対象containerは不在。続いて診断部分だけを変更したv4を準備し、fixture／識別情報／command blockを伏せたagent説明部分を確認することとした。sandboxや実行許可の範囲は変更していない。
+
+### Claude intake／duplicateの実測成功（2026-09-07）
+
+host checkout `60755b8`と同じimageでv4 driverを実行し、**PASS**。実ClaudeのBash toolはexact commandを2回実行し、初回はpending、2回目はexit 1の固定拒否だった。新規pendingは1件、client request IDとhost recordが一致し、canonical fixtureとClaudeのhost生成署名が一致。host preview成功、追加auditは`intake/pending/intake`と`preview/pending/validation`各1件、固定schemaでvalid。既存recordとGit状態は不変。launcher／process／driverともexit 0、timeoutなし、result subtype `success`、is_error false、permission denial 0件。通常境界と単一socket file mountを維持し、Family／handover artifactと対象containerは終了後不在。
+
+v3からv4への変更は失敗時の説明を抽出するhost側診断だけで、agentへの指示と実行許可設定は同一。今回は指定commandを実行したが、以前のtool未実行の原因を修正・特定した証拠ではない。成功済みの実CLI intake／duplicateと、未解決の実行のばらつきを区別する。実GitHub Issueは作成せず、Codex／Claude由来のpendingを各1件保持する。その他の残ゲートがあるためS2-4全体は未完了。
