@@ -39,7 +39,7 @@
 
 ### Changed
 
-- Claude runtimeのnested sandboxをstrong mode（`sandbox.enableWeakerNestedSandbox=false`）に切り替え、launcherが`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`を設定するようにしました。PR #108の`/proc` unmaskによりstrong modeが必要とする新しい`/proc`のuser namespace内mountが可能になったため、2026-08-24設計がglobal scrub採用を見送った前提が解消しました（[設計](superpowers/specs/2026-09-06-claude-strong-nested-sandbox-design.md)）。fallbackは設けず、`failIfUnavailable: true`は維持します。この変更は、修正を取り込んで再buildしたimageにだけ適用され、既存imageはrebuildするまで旧設定のまま動作します。
+- Claude runtimeのnested sandboxをstrong mode（`sandbox.enableWeakerNestedSandbox=false`）に切り替え、launcherが`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`を設定するようにしました。PR #108の`/proc` unmaskによりstrong modeが必要とする新しい`/proc`のuser namespace内mountが可能になったため、2026-08-24設計がglobal scrub採用を見送った前提が解消しました（[設計](docs/superpowers/specs/2026-09-06-claude-strong-nested-sandbox-design.md)）。fallbackは設けず、`failIfUnavailable: true`は維持します。この変更は、修正を取り込んで再buildしたimageにだけ適用され、既存imageはrebuildするまで旧設定のまま動作します。
 
 ### Security boundaries
 
@@ -52,6 +52,10 @@
 - Claude sandbox内から見える`/proc`が、strong modeの新しいPID namespaceにより構造的にsandbox内processだけへ縮小されます。従来のweaker modeでは親Claude processを含むcontainer内の他processが構造的には見えており、防御は専用probeの`parent_token_via_proc_readable=false`という観測だけに依存していました。global scrubにより、Bash toolを含む全subprocessからcredential環境変数が除去されます。既存のcredential deny list、token file deny、built-in Read deny、`allowAllUnixSockets`、`failIfUnavailable`、unsandboxed command禁止、hooks／MCPのmanaged限定は変更しません。
 
 ### Validation
+
+- Phase 6 stage 2 S2-4（照合基準`36f02a8`、2026-09-07）の文書整合を進めました。stage 1設計のegress modeを歴史記録として明示し、現在の`0600`とK2 cleanupへの参照、G1のjoin後失効を追記し、roadmapをS2-4へ更新しました。[検証記録](docs/broker-kernel-stage2-validation.md)で今回の結果を管理します。この時点では実host smokeはnot run（当時の環境にPodmanと実host実行手段がないため）でした。既存のsmoke手順書と過去の観測結果は変更していません。実host結果とPhase 6の完了は次項に記録します。
+
+- 2026-09-07、S2-4の実host smokeをhostで進め、検証記録冒頭に既存smoke手順5件とstage 2設計の必須項目へ証拠を対応付けた現在地一覧を追加しました。Codex／Claude runtime、GitHub broker（直接CLIとguard付きnegative）、Family（実agent intakeと承認付き[Issue #121](https://github.com/jj1xgo/agent-container/issues/121)）に加え、stage 2対象で唯一証拠が無かったClaude handover createを利用者のprivate terminalから専用image `e9791cbc483f`（Claude Code 2.1.263）で1回実施し、host fileのbyte一致、audit `create`／`ok`／`write` 1行、artifact消滅、stale client拒否を確認しました。stage 2対象外のPhase 2 §7／§8とPhase 3 §3 container内検査は利用者判断でstage 1証拠を採用します。S2-4 branchの[required CI](https://github.com/jj1xgo/agent-container/actions/runs/34103416701)はUnit tests／Podman integrationともpassし、[PR #122](https://github.com/jj1xgo/agent-container/pull/122)でroadmapのPhase 6を完了へ変更しました。現在地はPhase 7で、着手前にIssue #120を最優先で行います。
 
 - 2026-09-06、前項で`not run`とした残り2項目（`agent-handover create`、`agent-family issue create`）を、同じ再build済みimage`8cfae6888ee9`で、利用者のprivate terminalから追加実施しました。`agent-container-claude-smoke`（Claude専用smoke project、handover本文の実データ混入を避けるため専用projectを使用）で`agent-handover create --title "Strong sandbox gate test"`を1回実行し、`/handovers/agent-container-claude-smoke/2026-09-06_081822_53dd945a.md`が作成されました。host側file（`/home/tsu/obsidian-vault/handovers/agent-container-claude-smoke/`、mode 600、1446 bytes）はcanonical metadata（`Project`／`Created`／`Session`）と固定7 sectionを持ち、テスト目的である旨と実際に検証した状態（差分・commit・PRなし）だけを記載していました。brokerとの通信が成功したことは、strong modeのglobal scrubが`AGENT_HANDOVER_BROKER_SOCKET`／`AGENT_HANDOVER_BROKER_CAPABILITY`のような非credential環境変数を落としていないことも示します。通常終了後、`agent-container-claude-smoke`のcontainerは0件、残存socketなしを確認しました。続けて`findsummits`で`agent-family issue create`を同一session内で2回実行し、1回目は`pending`（request `0a6b74484b29ef5a170ed480475a681b`、期限unix `1788769340`）でexit 0、2回目（title・contextに`[TEST]`と`do not action`を明記した内容）は`family intake request failed`でexit 1（one-time capability消費済み）でした。通常終了後、`findsummits`のcontainerは0件、残存socketなしを確認しました。request `0a6b74484b29ef5a170ed480475a681b`は内容自体が非承認を明記したテストのため、approve／rejectとも行わずpendingのまま残しています。これでClaude strong nested sandbox設計のSecurity acceptance gate全6項目（sandbox固定、hooks／MCP、credential非露出probe、`agent-handover create`、Family intake、正常cleanup）がPASSしました。
 

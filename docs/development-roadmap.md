@@ -6,7 +6,7 @@
 
 Phase 5の成果は専用`release/0.5`系統の`v0.5.0`として切り出す。Phase 6はmainの`0.6.0-dev`で継続する。公開候補と検証状態は[release記録](v0.5.0-release.md)を参照する。
 
-Phase 1〜5は完了した。現在地は**Phase 6**である。Phase 5は、2026-09-02の実host smokeで専用App／binding、実PodmanのCodex／Claude両path、Codex intake、承認付き実Issue、non-exposure、duplicate、audit／cleanupがPASSし、残っていたClaude実CLIのintakeを2026-09-04に再実行してPASSしたことで閉じた。以前HTTP 401で停止していた原因は、browserのlogin codeをsetup tokenとして保存していた貼り間違いであり、validatorの強化（PR #79）と折り返しpasteの連結（PR #81）で再発を防いだ。
+Phase 1〜6は完了した。現在地は**Phase 7**である。ただし利用者指定により、Phase 7の実装に着手する前にPhase 6の保守作業として[Issue #120](https://github.com/jj1xgo/agent-container/issues/120)（Codex handoverのcreate-only broker統一）を最優先で行う。Phase 6は、stage 1（PR #106まで）とstage 2（S2-1〜S2-3、PR #117〜#119）を取り込んだmain `36f02a8`に対し、2026-09-07の実host smoke（[検証記録](broker-kernel-stage2-validation.md)の現在地一覧）で、stage 2が観測挙動を変えた4 broker（handover、egress、GitHub、Family）の既存手順gateがすべてPASSし、その記録をS2-4（PR #122）で取り込んだことで閉じた。stage 2対象外の一部項目はstage 1証拠を採用し、各rollbackはnot run（policy／binding保持）のまま記録している。Phase 5は、2026-09-02の実host smokeで専用App／binding、実PodmanのCodex／Claude両path、Codex intake、承認付き実Issue、non-exposure、duplicate、audit／cleanupがPASSし、残っていたClaude実CLIのintakeを2026-09-04に再実行してPASSしたことで閉じた。以前HTTP 401で停止していた原因は、browserのlogin codeをsetup tokenとして保存していた貼り間違いであり、validatorの強化（PR #79）と折り返しpasteの連結（PR #81）で再発を防いだ。
 
 状態は次の4種類とする。
 
@@ -24,7 +24,7 @@ Phase 1〜5は完了した。現在地は**Phase 6**である。Phase 5は、202
 | Phase 3 | GitHub App broker | 完了 | credentialをcontainerへ渡さず、exact repositoryのclone／fetch、create-only push、PR、Issue readを提供する。 |
 | Phase 4 | scope整合・安全性安定化・`v0.4.0` | 完了 | private fixture gate、create-only強制、Issue read、cleanup、releaseを完了する。 |
 | Phase 5 | Family機能の運用完成 | 完了 | 専用App、binding、Codex／Claude intake、non-exposure、duplicate、承認付き実Issue、unknown reconciliation、cleanupの実host smokeがPASSする。 |
-| Phase 6 | 共通broker kernel | 進行中 | GitHub／handover／egress／Familyの4 brokerが仕様に記録した共通kernel部品と互換adapter上で動き（stage 1）、残したlifecycle・capability・audit opener等を統一し、kernelがreadiness gate・fail-closed cleanup・統一auditを全brokerへ提供し（stage 2）、既存の実host smoke手順が変更なしでPASSする。設計は[`docs/superpowers/specs/2026-09-04-broker-kernel-design.md`](superpowers/specs/2026-09-04-broker-kernel-design.md)。 |
+| Phase 6 | 共通broker kernel | 完了 | GitHub／handover／egress／Familyの4 brokerが仕様に記録した共通kernel部品と互換adapter上で動き（stage 1）、残したlifecycle・capability・audit opener等を統一し、kernelがreadiness gate・fail-closed cleanup・統一auditを全brokerへ提供し（stage 2）、既存の実host smoke手順が変更なしでPASSする。設計は[`docs/superpowers/specs/2026-09-04-broker-kernel-design.md`](superpowers/specs/2026-09-04-broker-kernel-design.md)。 |
 | Phase 7 | Obsidian Vault config sync | 未着手 | review可能なschemaをVault原本から検査済みprivate stateへ同期し、credential、session、cacheを除外する。 |
 | Phase 8 | Worktree・task lease | 未着手 | task・event・agentのhost側contractをleaseの最初の消費者として定義し、agent別worktree、exclusive claim、期限、回収、stale writer拒否を提供する。 |
 | Phase 9 | Conversation room | 未着手 | Codex／Claudeがtask単位のroomへ対等なparticipantとしてbounded read/postできる。 |
@@ -37,17 +37,15 @@ Phase 7〜10が「Obsidianを第2の脳として使う」ための中心範囲�
 
 ## 現在の実施順
 
-Phase 6-5はPR #106で完了し、6-6の実host smokeを進めています。GitHubのfetch／Issue参照／新規branch push／PR create・view・checks、専用branchの更新拒否、Familyのlocal doctor／live inventory照合まで観測済みです。実施commitと限界はCHANGELOGに記録しています。smoke PR #4と専用branchはmerge・削除せず保持しています。`/proc` unmask後のClaude sandbox、security probe、Family Claude intake、対話TUI経路は2026-09-06に実hostで再確認済みで、Codex／Claude handover createも同日に使い捨てsmoke projectで再確認済みで、残るのはrollback（binding保持のため意図的にnot run）だけです。
+Phase 6 stage 2のS2-1（[PR #117](https://github.com/jj1xgo/agent-container/pull/117)）、S2-2（[PR #118](https://github.com/jj1xgo/agent-container/pull/118)）、S2-3（[PR #119](https://github.com/jj1xgo/agent-container/pull/119)）はmainへ取り込み済みです。2026-09-07の照合基準は`36f02a8`です。S2-4（文書整合とstage 2実host smoke、[PR #122](https://github.com/jj1xgo/agent-container/pull/122)）で実host smokeの記録を取り込み、Phase 6を閉じました。
 
-egressの実Codex検証で見つかったsequence不整合は、stage 1のrefactorと分離したPR #107で修正し、main `7a9e927`へmergeしました。拒否後・到着順逆転の回帰testを含むcontainer1119／Codex48／local socket18件、独立review、required CIの実Podman14件が成功しています。[診断記録](superpowers/plans/2026-09-05-egress-sequence-investigation.md)は修正前の観測・再現です。
+範囲は[stage 2設計](superpowers/specs/2026-09-06-broker-kernel-stage2-design.md)で固定しています。kernelのfail-closed lifecycle、identity付きcleanup、peer policy、frame error、audit envelopeを整備し、handover／egress／GitHubを統一しました。Familyはpeer policyとcleanupを共通部品へ移し、request毎のpeer検証、audit transaction、Mountを保持しています。readiness gateの新しい消費者と全brokerへの祖先chain検証は後続課題です。
 
-修正版imageでの承認済みCodex egress runtime gateは、`ab.chatgpt.com`追加後の1回で最小応答一致と自然終了を確認しPASSしました。`github.com`の拒否を維持したまま、拒否requestより大きいsequenceの受理、authentication denial 0件、cleanup成功を観測しました。専用projectの許可先は`chatgpt.com`／`pypi.org`／`sdmntprsouthcentralus.oaiusercontent.com`／`ab.chatgpt.com`の4件を保持しています。rollback／Claude egress／Family実intake・実Issue／handoverなどの残存gateとstage 2は未完了で、Phase 6全体は進行中です。
+stage 1（6-6）の実host観測と独立修正の経緯は[CHANGELOG](../CHANGELOG.md)に保存しています。Codex／Claude intakeやhandoverの過去のPASSを、stage 2の再実行結果として扱いません。S2-4の[実施計画](superpowers/plans/2026-09-07-broker-kernel-s2-4-validation.md)と[検証記録](broker-kernel-stage2-validation.md)で今回の結果と未実施理由を管理します。2026-09-07のhostで、専用image `e9791cbc483f`（Codex 0.153.4、Claude 2.1.263）を使い、自動gate（lint、unit、socket、実Podman 17件）と、Codex／Claude runtime、GitHub broker、Family、Claude handover createの実host gateが既存手順の変更なしでPASSしました。stage 2対象外で未再実施の項目はstage 1証拠を採用し、rollbackはnot runのまま記録しています。
 
-stage 2の設計は[stage 2設計](superpowers/specs/2026-09-06-broker-kernel-stage2-design.md)で固定した。範囲はkernel保証の強化（fail-closed lifecycle、identity付きcleanup、接続毎peer policy、frame errorの種別化、audit envelope）とhandover／egress／GitHubの完全統一で、Familyはpeer policyとcleanupの共通部品に乗せ、audit transactionとMountは保持する。最初のcode PR S2-1（[PR #117](https://github.com/jj1xgo/agent-container/pull/117)）はkernel保証とhandover／egressの乗せ替えを含む。6-6の証拠を先に固定してからS2-1をmergeし、stage 2完了時に既存smoke手順書を変更なしで再実行してPhase 6を閉じる。
+利用者指定（2026-09-07）: S2-4のmain取り込み直後、Phase 7へ進む前に[Issue #120: Codex handoverのcreate-only broker統一](https://github.com/jj1xgo/agent-container/issues/120)へ最優先で着手する。S2-4へruntime変更を混ぜず、独立した設計・実装PRとする。
 
-実施順はPhase番号と一致する。
-
-Family実Codex intakeは新規pending／audit追加0件で未達のままです。診断で切り分けたsandboxの`/proc` mount拒否は、Podman既定の`/proc` masked／read-only submountがbwrapのuser namespaceでlocked child mountとなり、kernelの`mount_too_revealing`（`fs/namespace.c`）が新しいproc mountを拒否するものと確定し、独立修正PR #108（main `425e944`）でCodex／Claude runtime specだけに`--security-opt=unmask=/proc/*`を追加しました。offlineの`codex --sandbox workspace-write sandbox`は実spec argvで修正前exit 1、修正後exit 0で、real Podman gateは15件へ更新しました。利用者承認により再実行した実認証Family Codex intake（2026-09-06）では、Codexが`agent-family issue create`を2回実行したものの（`command_execution` 2件、修正前は0件）、1回目から`family intake request failed`で、host auditとpendingは不変でした。offline再現で、Codex 0.153.4のsandboxが既定でtool commandのnetworkを切り`connect(AF_UNIX)`をEPERMにすること、同じcontainerでsandbox外からは`pending`を受け付けることを確認し、独立修正PR #109で`profiles/codex/config.toml`に`[sandbox_workspace_write] network_access = true`を追加しました。模擬Responses API経由のsandbox内`agent-family issue create`は修正後に`pending`を返します。PR #109のmerge後にimageを再buildして実認証intakeを再実行しましたが、同じ失敗でした。原因は`config.toml`が`project add`時にしか配布されず、2026-09-02に作った`findsummits`の`CODEX_HOME`に新設定が無いことで、独立修正PR #110で`bin/agentctl project update-profile`が他のkeyを保持したまま同設定を保証するようにしました。merge後に`update-profile`を`findsummits`へ適用し、再buildした専用image `edd9916b52f3`で実認証intakeを再実行したところ、1回目が`pending`（request `6b119494…`）、同runの2回目が拒否となり、Family Codex intake gateはPASSしました。auditは固定field 1行の追加だけでした。続けてsection 5のfresh approvalにより利用者が対話terminalでapproveし、Issue #111を1件作成、state `created`と本文消去、audit固定field 2行の追加を確認しました。残る既存project（Claude専用の`agent-container-claude-smoke`を除く）へは`update-profile`を適用済みです。残るのはClaude intake、rollback、handover等の未実施gateとstage 2です。権限設定は変更していません。
+実施順はPhase番号と一致します。
 
 1. Phase 6で、後続機能が共有するbroker kernelを固定する。
 2. Phase 7で、安全なVault原本と実行用copyの同期を作る。
