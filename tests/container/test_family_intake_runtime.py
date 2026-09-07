@@ -17,6 +17,7 @@ from agent_container.family_intake_runtime import FamilyIntakeRuntimeError
 from agent_container.family_intake_runtime import FamilyRuntimeMount
 from agent_container.family_issue import CanonicalFamilyIssue
 from agent_container.family_pending import create_pending
+from agent_container.family_pending import list_pending
 from agent_container.family_pending import load_pending
 from agent_container.family_pending import pending_lock
 from agent_container.family_pending import PendingState
@@ -210,6 +211,26 @@ class FamilyIntakeRuntimeTest(unittest.TestCase):
 
         self.assertFalse(run_dir.exists())
         runtime.close()
+
+    # Break caught: an unregistered process reading a frame or consuming the capability.
+    def test_unregistered_peer_is_closed_without_response_or_consumption(self) -> None:
+        runtime = self.runtime()
+        with runtime as mount:
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(2)
+            try:
+                client.connect(str(mount.socket_path))
+                client.sendall(b"\x00\x00\x00\x01x")
+                try:
+                    self.assertEqual(client.recv(1), b"")
+                except ConnectionResetError:
+                    pass
+            finally:
+                client.close()
+            self.assertFalse(runtime.session.consumed)
+            self.assertEqual(list_pending(self.layout.family_pending_dir, "demo"), ())
+            self.assertTrue(runtime.is_alive())
+        self.assertFalse(mount.socket_dir.exists())
 
     def test_mount_revalidation_rejects_socket_inode_replacement(self) -> None:
         runtime = self.runtime()

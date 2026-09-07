@@ -14,7 +14,9 @@ from typing import Callable
 
 from agent_container.broker.artifacts import RuntimeArtifacts
 from agent_container.broker.runtime import accept_clients
+from agent_container.broker.runtime import admit_connection
 from agent_container.family_intake_broker import FamilyIntakeSession
+from agent_container.family_intake_transport import FamilyPeerPolicy
 from agent_container.family_intake_transport import handle_family_intake_connection
 from agent_container.family_pending import initialize_pending_store
 from agent_container.family_state import FamilyStateLayout
@@ -271,14 +273,21 @@ class FamilyIntakeRuntime(AbstractContextManager[FamilyRuntimeMount]):
                     self._client = client
                 try:
                     with client:
-                        client.settimeout(_CLIENT_TIMEOUT_SECONDS)
                         if self.session is None:
                             raise ValueError("family intake session is unavailable")
-                        handle_family_intake_connection(
+                        # F1: settimeout, SO_PEERCRED and the peer check happen in
+                        # the kernel; a denied peer is closed before any read.
+                        connection = admit_connection(
                             client,
-                            self.session,
-                            self.layout.family_pending_dir,
+                            timeout=_CLIENT_TIMEOUT_SECONDS,
+                            policy=FamilyPeerPolicy(self.session),
                         )
+                        if connection is not None:
+                            handle_family_intake_connection(
+                                connection,
+                                self.session,
+                                self.layout.family_pending_dir,
+                            )
                 finally:
                     with self._client_lock:
                         if self._client is client:
