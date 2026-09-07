@@ -6,6 +6,11 @@
 - 必要な範囲で `README.md`、`docs/development-roadmap.md`、対象の仕様・計画を読む。Codex の運用は `docs/codex-operations.md` を参照する。
 - `docs/agent-collaboration-notes.md` は未採用・未検証の分担案。確定したルールやモデルの優劣として扱わない。
 
+## コミットの共同作者
+
+- Codex が作成・編集に関与した変更をコミットするときは、本文末尾に空行を挟み、`Co-authored-by: Codex <codex@openai.com>` を付ける。
+- 既存の author と他の共同作者の記載は保持する。Codex が関与していない変更には付けない。
+
 ## 検証
 
 以下はルートで実行する代表例。変更に関係する検証を選び、必須 CI と対象仕様の要求を満たす。
