@@ -188,3 +188,25 @@ class RuntimeArtifactsTest(unittest.TestCase):
             link.symlink_to(real_parent)
             with self.assertRaises(OSError):
                 RuntimeArtifacts.open(link / "run", label=LABEL)
+
+    def test_exposes_descriptors_while_open_and_refuses_them_after_close(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ra-") as directory:
+            run_dir = _run_dir(Path(directory))
+            artifacts = RuntimeArtifacts.open(run_dir, label=LABEL)
+            try:
+                self.assertEqual(
+                    (
+                        os.fstat(artifacts.dir_fd).st_ino,
+                        os.fstat(artifacts.parent_dir_fd).st_ino,
+                    ),
+                    (run_dir.stat().st_ino, run_dir.parent.stat().st_ino),
+                )
+                probe = os.stat(".", dir_fd=artifacts.dir_fd)
+                self.assertEqual(probe.st_ino, run_dir.stat().st_ino)
+            finally:
+                artifacts.close()
+            for name in ("dir_fd", "parent_dir_fd"):
+                with self.subTest(name=name), self.assertRaisesRegex(
+                    ValueError, "^test broker run directory is closed$"
+                ):
+                    getattr(artifacts, name)

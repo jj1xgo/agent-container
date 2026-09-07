@@ -68,6 +68,18 @@ class RuntimeArtifacts:
         if self._descriptor < 0:
             raise ValueError(f"{self.label} run directory is closed")
 
+    @property
+    def dir_fd(self) -> int:
+        """Run directory descriptor for dir_fd-relative operations on tracked names."""
+        self._require_open()
+        return self._descriptor
+
+    @property
+    def parent_dir_fd(self) -> int:
+        """Parent directory descriptor; the run directory is removed through it."""
+        self._require_open()
+        return self._parent_descriptor
+
     def _track(
         self, name: str, expected_type: Callable[[int], bool], into: list[_Tracked]
     ) -> None:
