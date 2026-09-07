@@ -2,16 +2,16 @@
 
 AI coding agentsをホスト環境から分離して動かす、Linux・rootless Podman向けの開発環境です。CodexとClaude Codeを、projectごとに分けたworkspace・設定・cache・handoverとともに実行します。
 
-Latest stable: `v0.5.0`
+Latest stable: `v0.6.0`
 
-Development branch: `main` (`0.6.0-dev`)
+Development branch: `main` (`0.7.0-dev`)
 
-Release candidate: `v0.6.0`（未公開）。Phase 6 と Codex handover broker 統一を含む候補を準備しています。[release 記録](docs/v0.6.0-release.md)と[更新時の注意](docs/v0.6.0-release-notes.md)を参照してください。公開までは以下の安定版を利用します。
+`v0.6.0` は Phase 6 と Codex handover broker 統一を含む公開済み安定版です。[release 記録](docs/v0.6.0-release.md)と[更新時の注意](docs/v0.6.0-release-notes.md)を参照してください。
 
 安定版を利用する場合はrelease tagを指定します。
 
 ```bash
-git clone --branch v0.5.0 --depth 1 \
+git clone --branch v0.6.0 --depth 1 \
   https://github.com/jj1xgo/agent-container.git
 ```
 

@@ -4,9 +4,9 @@
 
 ## 現在地
 
-Phase 5の成果は専用`release/0.5`系統の`v0.5.0`として切り出す。Phase 6の保守はmainの`0.6.0-dev`で継続する。公開候補と検証状態は[release記録](v0.5.0-release.md)を参照する。
+Phase 5は`v0.5.0`として公開済み。Phase 6 と Issue #120 は`v0.6.0`として公開を完了し、mainは次の開発系列`0.7.0-dev`（base `v0.6.0`）へ進む。
 
-Phase 6完了時のrelease判断が未記録だったため、2026-09-07に`v0.6.0`の準備を開始した。公開済みstableは引き続き`v0.5.0`。候補の検証・移行上の注意は[v0.6.0 release記録](v0.6.0-release.md)にまとめる。公開判断は最終候補のrequired CI完了後、Phase 7実装前に行う。機能完了とrelease公開は区別する。
+2026-09-08（JST）、利用者承認を受けて[PR #126](https://github.com/jj1xgo/agent-container/pull/126)をマージし、承認候補`62b104b`にannotated tagを付け、[v0.6.0 Release](https://github.com/jj1xgo/agent-container/releases/tag/v0.6.0)を公開した。候補CI成功、既知の未解決事項、未実施検証は[v0.6.0 release記録](v0.6.0-release.md)にまとめる。Phase 7の設計・実装は未着手。
 
 Phase 1〜6は完了した。次のPhaseは**Phase 7**（未着手）である。利用者指定で最優先としたPhase 6の保守作業、[Issue #120](https://github.com/jj1xgo/agent-container/issues/120)（Codex handoverのcreate-only broker統一）も、2026-09-07に[PR #123](https://github.com/jj1xgo/agent-container/pull/123)をmain `b17e179`へ取り込み、Issueを完了として閉じた。Phase 6は、stage 1（PR #106まで）とstage 2（S2-1〜S2-3、PR #117〜#119）を取り込んだmain `36f02a8`に対し、2026-09-07の実host smoke（[検証記録](broker-kernel-stage2-validation.md)の現在地一覧）で、stage 2が観測挙動を変えた4 broker（handover、egress、GitHub、Family）の既存手順gateがすべてPASSし、その記録をS2-4（PR #122）で取り込んだことで閉じた。stage 2対象外の一部項目はstage 1証拠を採用し、各rollbackはnot run（policy／binding保持）のまま記録している。Phase 5は、2026-09-02の実host smokeで専用App／binding、実PodmanのCodex／Claude両path、Codex intake、承認付き実Issue、non-exposure、duplicate、audit／cleanupがPASSし、残っていたClaude実CLIのintakeを2026-09-04に再実行してPASSしたことで閉じた。以前HTTP 401で停止していた原因は、browserのlogin codeをsetup tokenとして保存していた貼り間違いであり、validatorの強化（PR #79）と折り返しpasteの連結（PR #81）で再発を防いだ。
 

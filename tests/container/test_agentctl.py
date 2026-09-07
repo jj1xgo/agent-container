@@ -62,7 +62,7 @@ from agent_container.state import Repository
 
 
 VERSION_OUTPUT_PATTERN = re.compile(
-    r"^agentctl (?:0\.6\.0|0\.6\.0-dev\.\d+"
+    r"^agentctl (?:0\.6\.0|0\.7\.0-dev\.\d+"
     r"\+g[0-9a-f]{7}(?:\.dirty)?)\n$"
 )
 
@@ -5264,7 +5264,7 @@ class AgentCtlParserTest(unittest.TestCase):
 
     def test_main_development_version_pattern_requires_commit_identity(self) -> None:
         self.assertNotRegex(
-            "agentctl 0.6.0-dev.0\n",
+            "agentctl 0.7.0-dev.0\n",
             VERSION_OUTPUT_PATTERN,
         )
 

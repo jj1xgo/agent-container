@@ -4,9 +4,9 @@
 
 ## [Unreleased]
 
-## [0.6.0] - Unreleased
+## [0.6.0] - 2026-09-07
 
-Phase 6 と Issue #120 を含む公開候補です。公開判断・候補の検証結果は [release 記録](docs/v0.6.0-release.md)、利用者向け概要・移行手順は [release notes](docs/v0.6.0-release-notes.md)を参照してください。以下の時系列の検証記録は当時の観測であり、判定の現在値は release 記録の参照先に集約します。
+Phase 6 と Issue #120 を含む公開済みreleaseです（公開日はUTC）。公開判断・候補の検証結果は [release 記録](docs/v0.6.0-release.md)、利用者向け概要・移行手順は [release notes](docs/v0.6.0-release-notes.md)を参照してください。以下の時系列の検証記録は当時の観測であり、判定の現在値は release 記録の参照先に集約します。
 
 ### Added
 
@@ -270,7 +270,7 @@ Phase 6 と Issue #120 を含む公開候補です。公開判断・候補の検
 
 通常のlocal image buildは既定で各agent CLIの`latest`を解決します。このbaselineは`v0.1.0`のCI再現用固定値であり、runtime dependencyを恒久固定するものではありません。
 
-[0.6.0]: docs/v0.6.0-release-notes.md
+[0.6.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.6.0
 [0.5.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.5.0
 [0.4.1]: https://github.com/jj1xgo/agent-container/releases/tag/v0.4.1
 [0.4.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.4.0
