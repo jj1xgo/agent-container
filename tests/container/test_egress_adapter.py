@@ -21,6 +21,7 @@ from agent_container.egress_adapter import run as run_adapter
 from agent_container.egress_broker_protocol import decode_request_frame
 from agent_container.egress_broker_protocol import EgressResponse
 from agent_container.egress_broker_protocol import encode_response_frame
+from agent_container.egress_broker_protocol import PROTOCOL_VERSION
 
 
 class ConnectRequestTest(unittest.TestCase):
@@ -102,6 +103,10 @@ class _GatewaySocket:
         self.sent = bytearray()
         self.connected_to: object = None
         self.closed = False
+        self.timeouts: list[object] = []
+
+    def settimeout(self, timeout: object) -> None:
+        self.timeouts.append(timeout)
 
     def connect(self, address: object) -> None:
         self.connected_to = address
@@ -114,6 +119,11 @@ class _GatewaySocket:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _RefusingGatewaySocket(_GatewaySocket):
+    def connect(self, address: object) -> None:
+        raise TimeoutError("private-connect-marker")
 
 
 def _write_capability(path: Path, body: str, mode: int) -> None:
@@ -261,12 +271,14 @@ class AdapterGatewayTest(unittest.TestCase):
 
         self.assertIs(connected, gateway)
         self.assertEqual(gateway.connected_to, str(config.socket_path))
+        self.assertEqual(gateway.timeouts, [30, None])
         request, consumed = decode_request_frame(bytes(gateway.sent))
         self.assertEqual(consumed, len(gateway.sent))
         self.assertEqual(
             (request.project_id, request.sequence, request.domain, request.port),
             ("demo-project", 7, "api.example.com", 443),
         )
+        self.assertEqual(request.version, PROTOCOL_VERSION)
 
     def test_denial_closes_tunnel_and_uses_fixed_error(self) -> None:
         marker = "SECRET-MARKER"
@@ -285,6 +297,23 @@ class AdapterGatewayTest(unittest.TestCase):
 
         self.assertTrue(gateway.closed)
         self.assertNotIn(marker, str(raised.exception))
+
+    def test_connect_failure_closes_gateway_and_uses_fixed_error(self) -> None:
+        gateway = _RefusingGatewaySocket(b"")
+        config = AdapterConfig(Path("/run/broker.sock"), "A" * 43, "demo", "codex")
+
+        with self.assertRaisesRegex(ValueError, "^egress gateway request failed$") as raised:
+            open_gateway_tunnel(
+                config,
+                "api.example.com",
+                1,
+                socket_factory=lambda *_args: gateway,
+            )
+
+        self.assertTrue(gateway.closed)
+        self.assertEqual(gateway.timeouts, [30])
+        self.assertEqual(bytes(gateway.sent), b"")
+        self.assertNotIn("private-connect-marker", str(raised.exception))
 
     def test_connect_client_relays_opaque_bytes_after_fixed_success(self) -> None:
         proxy_client, adapter_client = socket.socketpair()

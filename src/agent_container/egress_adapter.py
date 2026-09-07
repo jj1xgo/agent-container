@@ -10,6 +10,7 @@ from typing import Callable
 from typing import Mapping
 from typing import Sequence
 
+from agent_container.broker.capability import connect_unix
 from agent_container.broker.capability import read_capability
 from agent_container.broker.capability import validate_exact_path
 from agent_container.broker.capability import validate_socket
@@ -27,6 +28,7 @@ from agent_container.state import validate_project_id
 
 
 MAX_CONNECT_HEADER_BYTES = 16_384
+_GATEWAY_CONNECT_TIMEOUT_SECONDS = 30
 CONNECTED_RESPONSE = b"HTTP/1.1 200 Connection Established\r\n\r\n"
 BAD_GATEWAY_RESPONSE = b"HTTP/1.1 502 Bad Gateway\r\n\r\n"
 _REQUEST_LINE = re.compile(r"CONNECT ([a-z0-9.-]+):443 HTTP/1\.1")
@@ -140,9 +142,18 @@ def open_gateway_tunnel(
     sequence: int,
     socket_factory: Callable[..., socket.socket] = socket.socket,
 ) -> socket.socket:
-    gateway = socket_factory(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        gateway.connect(str(config.socket_path))
+        gateway = connect_unix(
+            config.socket_path,
+            timeout=_GATEWAY_CONNECT_TIMEOUT_SECONDS,
+            socket_factory=socket_factory,
+        )
+    except (OSError, ValueError):
+        raise ValueError("egress gateway request failed") from None
+    try:
+        # E3: only the connect wait is bounded. The request/response exchange
+        # and the relay stay blocking, as before the kernel connect helper.
+        gateway.settimeout(None)
         request = EgressRequest(
             PROTOCOL_VERSION,
             config.capability,
