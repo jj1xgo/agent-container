@@ -2,6 +2,55 @@
 
 2026-09-07、対象実装はmain `36f02a8`（PR #119 merge）。S2-1〜S2-3が取り込まれていることをlocal Git履歴で確認した。S2-4の今回の変更は文書のみで、Phase 6は進行中。stage 1の結果は[CHANGELOG](../CHANGELOG.md)の当時の記録を参照し、今回のPASSへ転用しない。
 
+## 現在地一覧（2026-09-07、handover照合後）
+
+後続sectionは時系列の追記であり、判定の現在値は本表が正である。担当交代時のhandover（`2026-09-07_083807`）の指示に従い、既存smoke手順5件と[stage 2設計](superpowers/specs/2026-09-06-broker-kernel-stage2-design.md)の必須項目へ、これまでの証拠を対応付けた。追加の実サービス操作は行っていない。
+
+共通の対象版: host checkout `5a2a49a`〜`d46d51a`（runtime実装はmain `36f02a8`と同一、後続commitは文書のみ）、専用image `e9791cbc483f`、Codex `0.153.4`、Claude `2.1.263`、rootless Podman `5.8.6`／crun。stage 1（6-6）の証拠は2026-09-05〜06、image `edd9916b52f3`、Claude `2.1.261`、旧broker実装であり、本表では「stage 1証拠」と明記して区別する。
+
+証拠種別: `自動test`（unit／socket／実Podman suite）、`直接CLI`（通常runtime経路のmount・network・brokerを保ちagent commandだけを固定commandへ置換）、`guard付き`（直接CLIに加えテストprocess内で送信直前を止めるguard）、`実agent`（認証済みCodex／Claudeのtool実行）、`手動TUI`（利用者のprivate terminal）。stage 2が観測挙動を変える項目（K1〜K5、H1〜H4、E1〜E4、G1〜G8、F1〜F2）は「stage 2対象」と記す。
+
+| 手順書 | 必須項目 | 証拠種別 | 採用証拠と対象版 | 判定 | 不足・次の確認 |
+| --- | --- | --- | --- | --- | --- |
+| Phase 2 preflight | 全unit、`git diff --check`、derived image実Podman | 自動test | 2026-09-07 host: lint、Codex 49、container 1169、socket 18＋forced unknown 4、実Podman 17（`test_project_image_podman`含む）、skip 0 | PASS | — |
+| Phase 2 §2 | clean projectのdoctorと最小inference | 実agent（非対話`--print`） | `agent-container-claude-smoke`のdoctor PASS、最小応答PASS | PASS | 対話TUI経路の起動は未実施 |
+| Phase 2 §3 | `/status`、`/sandbox` Config、`/hooks`、`/mcp` | 手動TUI | S2-4 not run。非対話runのMCP init一覧は空、managed policy doctor PASSのみ。stage 1証拠: 2026-09-06 `findsummits`でPASS（hook 1件はpolicyでblock済みと証拠付きで判断） | not run（stage 1証拠あり） | stage 2はClaude sandbox設定を変えない。stage 1証拠を採用するか、下記handover create runと同じTUIで1回確認するかは利用者判断 |
+| Phase 2 §4 | security probe 3項目false | 実agent（Bash tool） | S2-4 PASS: 3項目false、追加tool呼び出しなし | PASS | — |
+| Phase 2 §4 | `/proc` process数照合 | 手動TUI | S2-4 not run。`test_agent_sandbox_podman`（自動test）で`/proc` unmask後のsandbox実行を確認。stage 1証拠なし（2026-09-06はprobeのみ） | not run（自動test代替） | 上記TUI runで併せて確認可 |
+| Phase 2 §5〜6 | quarantined credentialの回復 | — | 2026-08-26に1回限り実施済み | N/A | 再実行対象外 |
+| Phase 2 §7 | 編集・focused test・local commit・resume | 実agent（TUI） | S2-4 not run。stage 1（6-6、2026-09-06）でも未実施、2026-08-26のみPASS | not run（stage 1でも対象外） | stage 2対象外。採用か実施かは利用者判断 |
+| Phase 2 §8 | project `.credentials.json`不在、他projectからの非観測 | metadata | S2-4: project `.credentials.json`は実行前後とも不在PASS。他projectからの観測不能はnot run | PARTIAL | stage 2対象外 |
+| Phase 2 §9 | dual-agent doctor、Codex回帰 | 直接CLI／実agent | doctor両agent PASS、Codex最小応答PASS、全suite PASS | PASS | — |
+| Phase 2 handover gate 1 | Claude handover create（7 section、path-only stdout、audit `create`／`ok`／`write` 1行） | 実agent | **S2-4 not run**。S2-4のClaude runはhandover brokerの起動とcleanupだけで`agent-handover create`を発行していない。stage 1証拠: 2026-09-06 PASS（旧broker実装） | **not run（stage 2対象H1〜H4）** | 最優先の不足。直前承認後、利用者のprivate terminalのTUI runで1回実施する。Codex handoverはbrokerを使わないdirect writerのためstage 2 gateにならない（Issue #120） |
+| Phase 2 handover gate 2〜5 | read-only拒否、cross-project拒否、malformed／secret拒否、non-logging | 自動test（実hostは2026-08-27のみ） | S2-1後の`test_handover_broker_socket`等PASS。stage 1（6-6）でも実host再実施なし | PARTIAL（自動test） | create runのstdout／auditでnon-loggingを併せて確認 |
+| Phase 2 handover gate 6 | 終了後のsocket／capability消滅、stale client拒否 | 直接CLI | artifact不在はS2-4 Claude runでPASS。stale client requestはnot run | PARTIAL | create runの終了後にstale clientを追加（GitHubと同方式） |
+| Phase 3 §1 | rootless Podman、App installation／permission | host read-only | rootless PASS。開発用App installation／permissionはS2-4未再確認（2026-08-26／29の記録） | PARTIAL | stage 2対象外、採用 |
+| Phase 3 §2 | broker doctor | 直接CLI | 両agent＋`--github-broker` PASS | PASS | — |
+| Phase 3 §3 | runtime credential非露出（env、mount、argv、`/proc`、`gh auth status`） | spec検査 | S2-4はruntime specの`--network=none`とlegacy gh mount不在のみ。container内のenv／argv／`/proc`検査と`gh auth status`はnot run。stage 1証拠: 2026-09-05 PASS | PARTIAL | stage 1より狭い。次のcontainer runで固定probeを併せるか、spec検査で採用するかは利用者判断 |
+| Phase 3 §4／Phase 4 §4 | clone／fetch、別repository拒否、broker停止後の失敗 | 直接CLI | clone（保存origin HTTPS、実効origin broker URL）／fetch PASS、別repository read拒否PASS、終了後stale client（issue view）PASS | PASS | fetchによるstaleは未実施、issue viewで代替 |
+| Phase 3 §5／Phase 4 §4 | create-only push、既存branch FF／NFF・protected・delete・tag拒否 | 直接CLI／guard付き | push（新規branch、空commit）PASS。negative 5件はguard到達0で拒否、remote refs不変。stage 1も同じguard方式 | PASS | — |
+| Phase 3 §6／Phase 4 §4 | PR create／view／checks、merge・close・generic不在 | 直接CLI／自動test | smoke PR #5 PASS。不在interfaceはunit test | PASS | smoke PRはOPENのまま保持 |
+| Phase 3 §7／Phase 4 §5 | Issue list／view、write・query拒否、stale | 直接CLI／自動test | list／view PASS、stale PASS。write／query拒否は2026-08-29の実host＋unit test | PASS | — |
+| Phase 3 §8／Phase 4 §6 | audit／cleanup | 直接CLI | 固定schema、stageなし、artifact不在 PASS | PASS | — |
+| Phase 3／4 補足 | 実agent経由のbroker操作 | 実agent | Codex非対話1回はtool 0件で非診断。stage 1（6-6）も直接CLI方式 | not run（stage 1と同方式） | agentはbroker境界の外側のため必須にしない |
+| Phase 4 §7 | 自動検証と独立review | 自動test | 全suite PASS。独立reviewはS2-4 PRで | PARTIAL | PR時に実施 |
+| Phase 4 §8 | release gate | — | v0.4.0専用 | N/A | S2-4対象外 |
+| Egress §1 | local preflight、doctor | 直接CLI | 既存policy（4 domain）保持、doctor PASS | PASS | — |
+| Egress §2 | discovery | — | 既存allowlistで最小応答成功のため不要 | N/A | — |
+| Egress §3 | Codex approved runtime、capability `0600`、adapter起動、cleanup | 実agent | PASS: connect ok 16、policy denied 1、cleanup | PASS（stage 2対象E1〜E4） | — |
+| Egress §3 | Claude egress | 実agent | not run。Claude smoke projectはdomain制限なし、stage 1でもnot run | not run（stage 1と同じ） | 採用 |
+| Egress §4 | remove／rollback | — | not run、policy保持 | not run（stage 1と同じ） | 記録のみ |
+| Egress 補足 | gateway故障時fallbackなし | 自動test | `test_egress_podman`のgateway death PASS | PASS（自動test） | — |
+| Family §1 | local automated | 自動test | PASS（件数は上記） | PASS | — |
+| Family §2 | real Podman 17 | 自動test | PASS、skip 0 | PASS（stage 2対象F1〜F2） | — |
+| Family §3 | App／binding | host | doctor＋live inventory PASS、変更なし | PASS | — |
+| Family §4 | Codex／Claude intake、duplicate、non-exposure | 実agent＋自動test | Codex PASS、Claude PASS（v4 driver）。non-exposureは実Podman suite | PASS | Claude非対話のtool 0件履歴は保持 |
+| Family §5 | 承認付き実Issue、再approve拒否 | 手動CLI | Issue #121 PASS、再approve拒否 | PASS | — |
+| Family §6 | forced unknown | 自動test | PASS 4件 | PASS | — |
+| Family §7 | audit／cleanup／rollback | 直接CLI | cleanup PASS。rollbackはnot run（binding保持、stage 1と同じ） | PASS／rollback not run | Codex由来pending 1件は未送信、期限を確認して無断で送信／rejectしない |
+| stage 2受け入れ | required CI（unit、socket 3 module、Podman 17） | CI | S2-4 commitでnot run（push／PR未実施）。PR #119の成功は先行PRの結果 | not run | 文書のみのbranchをpush・PR（承認後） |
+| stage 2受け入れ | main取り込み後にPhase 6を閉じる | — | not run | not run | 上記gateとCIの後 |
+
 ## 実行環境
 
 - `/workspace`のsandbox。`command -v podman`はpathを返さず、実host用の実行toolもない。
@@ -25,9 +74,9 @@
 
 文書検査: `git diff --check`成功。変更・新規Markdown 6件の相対linkと空白を確認し、CHANGELOGの既存の相対link誤り1件（Claude sandbox設計への`docs/`欠落）を修正した。既存smoke手順書5件はHEADとbyte一致。
 
-## 前セッション時点の実host smoke（すべてnot run）
+## 初回sandbox時点の実host smoke（歴史記録、当時すべてnot run）
 
-理由: このsandboxにはPodmanと実host実行手段がない。認証やfixtureの現在状態も未確認。以下の既存手順書は変更していない。
+以下は初回の通常sandboxで作業した時点の記録で、現在の判定は冒頭の現在地一覧が正である。理由: 当時のsandboxにはPodmanと実host実行手段がなかった。認証やfixtureの現在状態も未確認。以下の既存手順書は変更していない。
 
 | 手順書 | 再実行するgate | 今回の結果 |
 | --- | --- | --- |
