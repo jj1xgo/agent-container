@@ -78,7 +78,7 @@ GitHubはSameUserによる実clientの許可とjoin後失効を確認し、30秒
 
 [PR #119](https://github.com/jj1xgo/agent-container/pull/119)はmerge済みで、head `91585c6bd89cfdfbaa27576d498db7fad5894eca`、merge commit `36f02a87c14603114bd5856575c0c92b49a07d66`を照合した。[同PRのCI](https://github.com/jj1xgo/agent-container/actions/runs/34072250396)はUnit tests／Podman integrationともpass。これは先行PRの結果であり、S2-4 commitの新規required CIはnot run（push／PR未実施）。
 
-Codexの最小応答とegress cleanup、Claudeの最小応答とcredential非露出probe、直接CLIによるGitHub clone／fetch／Issue read／新規branch作成push／PR create・view・checks、終了後stale client拒否は下記のとおり確認した。cloneのorigin検査はdriver修正後の直前承認付き再実行でPASS。negative push、Family両CLI intake／実Issue作成、各rollbackはnot run。専用smoke projectの既存workspaceは追跡branchに対してahead 2／behind 1であり、resetや既存branch変更はしていない。次の実サービスgateは対象project・agent・exact domain・操作を具体化し、各手順書のfresh approval条件を満たしてから行う。Phase 6は引き続き進行中。
+Codexの最小応答とegress cleanup、Claudeの最小応答とcredential非露出probe、直接CLIによるGitHub clone／fetch／Issue read／新規branch作成push／PR create・view・checks、終了後stale client拒否、guard付きnegative 6件は下記のとおり確認した。cloneのorigin検査はdriver修正後の直前承認付き再実行でPASS。Family両CLI intake／実Issue作成、各rollbackはnot run。専用smoke projectの既存workspaceは追跡branchに対してahead 2／behind 1であり、resetや既存branch変更はしていない。次の実サービスgateは対象project・agent・exact domain・操作を具体化し、各手順書のfresh approval条件を満たしてから行う。Phase 6は引き続き進行中。
 
 今回のlocalログ: `/tmp/s2-4-host-{build,codex,container,socket,podman,doctor-smoke,docs}.log`。credential本文を取得せず、認証関連の直接観測は既存手順で許可されたmetadataとdoctor結果に限定した。
 
@@ -213,3 +213,26 @@ runtime終了後の旧path設定を使ったstale clientはexit 1、stdout空、
 - broker helperによる別repository `jj1xgo/agent-container`へのread要求。
 
 live advertisementと前後の全ref照合だけはGitHubへ接続する。実行前後のremote refs不変、各CLIのnonzero、guard未到達、audit、cleanupを検査する。main／既存branch／tagへの実書き込みはguardで送信不能とし、各対象を提示したfresh approval後だけ実行する。
+
+### 承認済みcreate-only拒否gate（2026-09-07）
+
+利用者が上記6件を直前承認し、host checkout `97e6bd4`と同じimage、準備済みguard付きdriverを1回実行した。**6件すべてPASS**。CLIの各終了値と実測秒数は次のとおり。
+
+| case | exit | 秒数 |
+| --- | --- | --- |
+| 専用branchのFF更新 | 128 | 0.556 |
+| 同branchのnon-fast-forward巻戻し | 128 | 0.572 |
+| protected main更新 | 128 | 0.540 |
+| 専用branchのdelete | 128 | 0.464 |
+| non-head tag作成 | 128 | 0.480 |
+| 別repositoryへのbroker helper read | 128 | 0.082 |
+
+receive-pack送信前guardの到達回数は0。5種類のpushは`git-receive-pack`／`denied` auditを各1件、計5件残し、remote前後照合は`git-upload-pack`／`ok` 2件だった。別repository要求はclient側で拒否され、追加broker auditなし。auditは固定schema、stageなし。全remote refsは実行前後で一致し、許可外の書き込みは行われなかった。
+
+launcher／processともexit 0、timeoutなし、既存workspaceのfile状態とHEADは不変。GitHub／egress双方のsocket・capability・run directoryと対象containerは不在。標準broker policyがguard手前で拒否した実測であり、テスト用guardによる拒否をbroker成功へ読み替えていない。
+
+### Family実CLI gateの事前確認
+
+既存の専用projectについて両agentのdoctorがexit 0、必須checkはすべてPASS。domain制限なしの既知network-policy WARNだけが残る。local binding、pending store、auditを検査し、既存recordはrejected 4件／created 2件、pending／unknown 0件、audit 23件でvalid。本文・送信先repository名／ID・credentialを表示していない。通常sandboxでのpending検査はlockアクセス制限により失敗したが、許可されたhost実行では成功した。既存recordやbindingは変更していない。
+
+次の検証範囲は実Codex／Claudeを別runで起動し、各1件の固定fixtureをhost pendingへ提出、同runの2回目はduplicate denial、canonical署名・audit・cleanupを確認すること。実GitHub Issue作成は別の直前承認が必要で、この準備では実行していない。Family live installation inventory、実CLI intakeともまだnot run。
