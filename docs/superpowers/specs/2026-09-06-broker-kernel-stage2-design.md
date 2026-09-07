@@ -118,7 +118,7 @@ egressの `_handle_client`（`raw_client=True`、tunnel予約、audit stage）�
 
 | # | 変更 | 観測挙動 | 更新するtest |
 | --- | --- | --- | --- |
-| G1 | `UploadPackBrokerRuntime` を `SocketBrokerRuntime`（inline、`raw_client=False`、`client_timeout=30`、`peer_policy=SameUser()`、thread name `github-broker`、`join_timeout=2`）の上に載せ、`BrokerSession.deactivate`（`_closed`／`_capability` をlock内で更新）を `close` から分離 | 起動失敗は `GitHubBrokerRuntimeError("GitHub broker failed to start")`（CLIは `error: GitHub broker failed`）、停止時のcleanup失敗は `cleanup failed`、stop後のhandler例外も `failed` として報告、`did not stop` 時に失効済み、host側30秒timeout、実行user以外のpeerは無応答で切断 | `test_github_broker_compatibility.py` L92-137 を本項の契約へ書き換え、`_thread`／`_stop`／`_error`／`_listener` の直接参照を公開挙動の検証に置き換える |
+| G1 | `UploadPackBrokerRuntime` を `SocketBrokerRuntime`（inline、`raw_client=False`、`client_timeout=30`、`peer_policy=SameUser()`、thread name `github-broker`、`join_timeout=2`、`deactivate_after_join=True`）の上に載せ、`BrokerSession.deactivate`（`_closed`／`_capability` をlock内で更新）を `close` から分離 | 起動失敗は `GitHubBrokerRuntimeError("GitHub broker failed to start")`（CLIは `error: GitHub broker failed`）、停止時のcleanup失敗は `cleanup failed`、stop後のhandler例外も `failed` として報告、`did not stop` 時に失効済み、host側30秒timeout、実行user以外のpeerは無応答で切断 | `test_github_broker_compatibility.py` L92-137 を本項の契約へ書き換え、`_thread`／`_stop`／`_error`／`_listener` の直接参照を公開挙動の検証に置き換える |
 | G2 | capability生成とfileを `generate_capability`／`create_private_file` に | umaskに依らず `0600`、write失敗messageがkernel固定文 | なし（`test_github_broker.py` L73-80は満たす） |
 | G3 | listener bindを `bind_private_listener` に | messageが `broker socket path ...` からkernelの `<label> socket path ...` に | 該当messageを固定するtestは無い |
 | G4 | session `close` を `RuntimeArtifacts` に | 順序がcapability → socket → rmdirに、失敗は累積して `cleanup failed`、再試行可能、run directory不在は成功扱い | `test_github_broker.py` L134-138は満たす。順序とfail-fastを固定するtestは無い |
@@ -126,6 +126,8 @@ egressの `_handle_client`（`raw_client=True`、tunnel予約、audit stage）�
 | G6 | request／response codecとstreamをkernelに完全移行。request encodeは `encode_frame`、response decodeは `decode_frame`（typed validationはGitHub側に残しbool versionを拒否）、`_read_exact` は `read_exact(initial_eof=...)`、chunk writeは `write_all` | encode失敗が `TypeError` から `ValueError("broker request is invalid")` に、response decodeのmessageが種別ごと（`frame is incomplete`／`frame size is invalid`／`JSON is invalid`／`schema is invalid`）に、重複keyのmessageが `broker response JSON is invalid` に、`NaN`／`Infinity` を拒否、`version=True` を拒否、list statusは `ValueError`、stream `OSError` は `ValueError("broker stream is invalid")`、short writeを再試行して修復（1 byteずつしか書けないstreamへの `ab` がhex `006100` ではなく4 byte header付きの `00000002616200000000` になる） | `test_github_broker_compatibility.py` L17-90 を本項の契約へ書き換え |
 | G7 | container側 `read_broker_capability`／`validate_broker_socket`／`_validate_exact_path` をkernel `read_capability`／`validate_socket`／`validate_exact_path` に | 例外種別とmessageがkernel固定文に、size 44完全一致、open後のidentity再検証。CLI境界（`github_client.py` L341、`git_remote_helper_cli.py` L41）では不可視 | `test_github_broker_transport.py` L876-895 と、`read_broker_capability` をpatchするseam（L272-273、L310-311、L344-345、`github_client.py` 側） |
 | G8 | K1／K5に乗る | H3と同じ | 追加のみ |
+
+S2-2実装で確認したG1の停止順序: `deactivate_after_join=True`とし、進行中のgit／PR handlerがauditを完了できるようjoin後に失効する。stage 1でもGitHubはjoin前に失効していなかった。kernelは`did not stop`の報告前に失効するため、G1の「did not stop時に失効済み」は維持する。根拠は`src/agent_container/github_broker_runtime.py`と`broker/runtime.py`（S2-4照合基準`36f02a8`）。
 
 GitHubのoperation handler、policy、audit record（key、順序、`policy_version`、任意key）、`BrokerRuntimeMount`、`podman.py` は変えない。
 
@@ -161,7 +163,7 @@ Familyのaccept loop、consumed後の自己停止、失敗時のclient中断、`
 - 更新する既存testは本文書の項目番号をPR本文に列挙する。番号を引けない変更は止めて報告する。
 - frame goldenとaudit goldenは不変（E1のmode断言のみ意図的更新）。
 - kernelの新契約にはunit testを追加する（K1の注入4条件、K2の順序・冪等・差し替え、K3の許可・拒否・policy例外、K4の種別、K5の必須key）。
-- `bin/lint`、required CI（unit、socket integration 3本、Podman 14件）がPASSする。
+- `bin/lint`、required CI（unit、socket integration 3本、Podman 17件。stage 1の独立修正後の件数をS2-4でHEADと照合）がPASSする。
 - Familyを触るPR（S2-3）はCIに含まれない `tests/integration/test_family_intake_socket.py` と `test_family_forced_unknown.py` をlocalで実行し、結果を記録する。
 - 既存brokerのbugを見つけても、本文書の項目に無ければIssueにして別PRとする。
 
@@ -184,7 +186,9 @@ Familyのaccept loop、consumed後の自己停止、失敗時のclient中断、`
 
 - pid登録をruntime共通にし、祖先chain検証を全brokerへ適用する（`podman.py` の常時supervised化を伴う）。
 - Familyのaudit transactionをkernel `AuditLog` へ統合し、validatorの二重schemaかmigrationを設計する。
-- Phase 10のObsidian UIが読むaudit形式。
+- Phase 10のObsidian UIが読むaudit形式と、`SameUser`で拒否したpeerのaudit要否。
+- GitHubの`_write_response`を`write_all`へ移してshort writeを扱う変更（S2-2から分離した既存挙動）。
+- compatibility testの命名整理と、broker sessionのcreate／track重複処理のhelper化。
 - `StateLayout` の畳み込みとMount型の共通protocol。
 - `ReadinessGate` の新しい消費者（Phase 8のleaseなど）。
 
