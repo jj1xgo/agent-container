@@ -358,3 +358,15 @@ container側のsession記録（内容はcommandと固定出力だけを照合）
 | workspace | 一時本文fileは検査後に削除し、smoke workspaceのGit状態は`main...origin/main`のまま |
 
 これでstage 2が観測挙動を変える4 broker（handover、egress、GitHub、Family）すべてに実host証拠が揃った。gate 2〜4（read-only拒否、cross-project、malformed／secret）は自動testのみで、stage 1（6-6）と同じ範囲で受け入れる。
+
+
+## 2026-09-07 検証後の後片付け
+
+利用者の後片付け継続指示に基づき、GitHubの現在値を照合してから通常の認証済みGitHub CLIで以下を実施した。検証時のOPEN・保持という上記記録は当時の観測として残す。
+
+- [smoke Issue #121](https://github.com/jj1xgo/agent-container/issues/121)は、titleとFamily App authorを照合し、11:37:07 UTCにcompletedでclose。再照会でCLOSEDを確認した。
+- [smoke PR #5](https://github.com/jj1xgo/agent-container-smoke/pull/5)は、title、base `main`、head `test/github-broker-smoke-s2-4-20260907`、head SHA `99a8a51e629f0b5fd0a65931b93bae6d1b9b8d84`が検証記録と一致することを確認し、11:37:08 UTCに未mergeのままcloseした。同じ専用head branchも削除し、PRのCLOSED／mergedAtなしと、branch一覧からの対象不在を再確認した。他のfixture branchは保持した。
+
+ホスト側の後片付けはnot run。この再開環境はコンテナ内でPodmanとhost管理CLIを利用できず、元の`/workspace/.git`もread-onlyだった。ホストで保持していた`/tmp/s2-4-github-push-fixture`、`/tmp/s2-4-github-negative-fixture`、Issue #120の専用project `issue120-smoke`・image・合成fixtureの現在状態は未確認。今回のコンテナから見えないことを削除済みとは扱わない。
+
+次はホストで稼働session、project登録、image参照、fixtureの未保存変更を確認し、不要な専用物だけを整理する。元workspaceの既存CI差分と未追跡`handover-s2-4.md`は保持している。古いworktreeは現在のmainへの取り込みと未保存変更を照合してから削除する。既存egress policyとFamily bindingは運用設定なので保持し、Family pendingはhostで現在の状態・期限・用途を確認するまで操作しない。これらの未実施をruntime cleanupのPASSに含めない。
