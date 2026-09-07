@@ -78,7 +78,7 @@ GitHubはSameUserによる実clientの許可とjoin後失効を確認し、30秒
 
 [PR #119](https://github.com/jj1xgo/agent-container/pull/119)はmerge済みで、head `91585c6bd89cfdfbaa27576d498db7fad5894eca`、merge commit `36f02a87c14603114bd5856575c0c92b49a07d66`を照合した。[同PRのCI](https://github.com/jj1xgo/agent-container/actions/runs/34072250396)はUnit tests／Podman integrationともpass。これは先行PRの結果であり、S2-4 commitの新規required CIはnot run（push／PR未実施）。
 
-Codexの最小応答とegress cleanup、Claudeの最小応答とcredential非露出probeは下記のとおり確認した。GitHub clone／fetchとcreate-only push／PR、Issue read／stale client、Family両CLI intake／実Issue作成、各rollbackはnot run。専用smoke projectの既存workspaceは追跡branchに対してahead 2／behind 1であり、resetや既存branch変更はしていない。次の実サービスgateは対象project・agent・exact domain・操作を具体化し、各手順書のfresh approval条件を満たしてから行う。Phase 6は引き続き進行中。
+Codexの最小応答とegress cleanup、Claudeの最小応答とcredential非露出probe、直接CLIによるGitHub fetch／Issue readは下記のとおり確認した。GitHub新規clone、create-only push／PR、stale client、Family両CLI intake／実Issue作成、各rollbackはnot run。専用smoke projectの既存workspaceは追跡branchに対してahead 2／behind 1であり、resetや既存branch変更はしていない。次の実サービスgateは対象project・agent・exact domain・操作を具体化し、各手順書のfresh approval条件を満たしてから行う。Phase 6は引き続き進行中。
 
 今回のlocalログ: `/tmp/s2-4-host-{build,codex,container,socket,podman,doctor-smoke,docs}.log`。credential本文を取得せず、認証関連の直接観測は既存手順で許可されたmetadataとdoctor結果に限定した。
 
@@ -123,4 +123,25 @@ host checkout `b127e14`（runtime実装は`5a2a49a`と同一）と上記imageを
 
 CleanupはPASS。GitHub／egress双方のsocket・capability・run directory、対象containerがすべて不在。既存egress policy、fixture manifest、workspace fileのGit状態、local HEADは不変。runtime specは`--network=none`でlegacy host gh mountなし。
 
-追加の外部試行は未実施。次の候補として、同じPodman mount・network-none・GitHub brokerとhost側監視を使い、container内の実`git`／`agent-github`を直接実行する一時driver `/tmp/s2-4-github-direct-read-smoke.py`を準備し、構文検査だけ行った。この候補はCodexのtool実行を検証するものではなく、実clientとbrokerのgateとして別に記録する。Codex／egress agent commandはPythonの固定4commandに置き換えるが、外向きnetworkを追加しない。実行はfresh approval待ち。
+この時点では追加の外部試行は未実施。次の候補として、同じPodman mount・network-none・GitHub brokerとhost側監視を使い、container内の実`git`／`agent-github`を直接実行する一時driver `/tmp/s2-4-github-direct-read-smoke.py`を準備し、構文検査だけ行った。この候補はCodexのtool実行を検証するものではなく、実clientとbrokerのgateとして別に記録する。Codex／egress agent commandはPythonの固定4commandに置き換えるが、外向きnetworkを追加しない。直前承認後の結果を次節に記録する。
+
+### 直接CLIによるGitHub read gate（2026-09-07）
+
+利用者のfresh approval後、host checkout `0768370`と上記imageから準備済みの直接CLI driverを1回実行した。通常`agentctl.main run --github-broker`、標準mountと`--network=none`、GitHub／egress brokerの生成・監視・停止は維持し、container commandのみ固定4操作を順番に実行するPythonへ置換。Codexとegress adapter自体は起動していない。この結果をCodex sandbox内tool実行やegress adapter成功へ読み替えない。
+
+| 実CLI command | exit | 実測秒数 | 判定 |
+| --- | --- | --- | --- |
+| `git fetch origin` | 0 | 1.513 | PASS、`git-upload-pack` audit 1件ok |
+| `agent-github issue list` | 0 | 0.798 | PASS、固定schema、open Issue #1あり、closed Issue #2とPR #3は不在、stderr空 |
+| `agent-github issue view 1` | 0 | 0.512 | PASS、固定schema、open state、exact URL、期待body sentinel、stderr空 |
+| `agent-github issue view 2` | 0 | 0.497 | PASS、固定schema、closed state、exact URL、期待body sentinel、stderr空 |
+
+全体5.364秒、launcher／processともexit 0、timeoutなし。GitHub brokerのSameUser peer policyは実container clientの4操作を許可し、30秒client timeoutの影響はこの4操作では観測されなかった。audit追加4件は`git-upload-pack` 1件、`issue-list` 1件、`issue-view` 2件で、すべて`ok`、stageなし、固定schema。stdout／driver stderrにexcluded-field sentinelとPR sentinelは不在。fetchのstderrは非空で、本文を保存していないため内容の分類は行っていない。Issue本文を含むCLI出力はメモリ内だけで照合して破棄した。
+
+Cleanup PASS: GitHub／egress双方のsocket・capability・run directoryと対象containerが不在。legacy host gh mountなし。egress policy、fixture manifest、workspaceの追跡／未追跡file状態、local HEADは不変（fetchによるremote-tracking ref／FETCH_HEAD更新は許可操作）。
+
+### 次のcreate-only pushのローカル準備
+
+専用smoke repositoryの既存workspaceとbranchを保持し、`origin/main`の`98ecc7c`から`/tmp/s2-4-github-push-fixture`へworktreeを作成した。新規branchは`test/github-broker-smoke-s2-4-20260907`、空commitは`99a8a51`（`test: GitHub broker S2-4 smoke`）。親commitとのfile差分は0。remoteへは未送信。
+
+次の外部操作候補は、GitHub broker経由でexact repository `jj1xgo/agent-container-smoke`へこのbranchの初回作成pushを1回だけ行うこと。push、PR作成、negative push、stale client、rollbackは引き続きnot runで、それぞれ既存手順の対象・承認条件を満たしてから実施する。S2-4は未完了。
