@@ -78,7 +78,7 @@ GitHubはSameUserによる実clientの許可とjoin後失効を確認し、30秒
 
 [PR #119](https://github.com/jj1xgo/agent-container/pull/119)はmerge済みで、head `91585c6bd89cfdfbaa27576d498db7fad5894eca`、merge commit `36f02a87c14603114bd5856575c0c92b49a07d66`を照合した。[同PRのCI](https://github.com/jj1xgo/agent-container/actions/runs/34072250396)はUnit tests／Podman integrationともpass。これは先行PRの結果であり、S2-4 commitの新規required CIはnot run（push／PR未実施）。
 
-Codexの最小応答とegress cleanupは下記のとおり確認した。Claude実CLI、GitHub clone／fetchとcreate-only push／PR、Issue read／stale client、Family両CLI intake／実Issue作成、各rollbackはnot run。専用smoke projectの既存workspaceは追跡branchに対してahead 2／behind 1であり、resetや既存branch変更はしていない。次の実サービスgateは対象project・agent・exact domain・操作を具体化し、各手順書のfresh approval条件を満たしてから行う。Phase 6は引き続き進行中。
+Codexの最小応答とegress cleanup、Claudeの最小応答とcredential非露出probeは下記のとおり確認した。GitHub clone／fetchとcreate-only push／PR、Issue read／stale client、Family両CLI intake／実Issue作成、各rollbackはnot run。専用smoke projectの既存workspaceは追跡branchに対してahead 2／behind 1であり、resetや既存branch変更はしていない。次の実サービスgateは対象project・agent・exact domain・操作を具体化し、各手順書のfresh approval条件を満たしてから行う。Phase 6は引き続き進行中。
 
 今回のlocalログ: `/tmp/s2-4-host-{build,codex,container,socket,podman,doctor-smoke,docs}.log`。credential本文を取得せず、認証関連の直接観測は既存手順で許可されたmetadataとdoctor結果に限定した。
 
@@ -97,3 +97,20 @@ host checkout `c27563a`（runtime実装は`5a2a49a`と同一）と上記imageを
 | Workspace | 実行前後のGit status（branchを含む）が一致 |
 
 この実行ではgateway故障時のfallback、stale client、rollbackは再検証していない。先行する17件の実Podman統合testの結果と区別し、Egress手順全体とS2-4全体はPARTIALのまま維持する。
+
+### 承認済みClaude runtime gate（2026-09-07）
+
+利用者が専用`agent-container-claude-smoke`でのClaude起動1回、最小応答、sandbox内のcredential非露出probe、終了後cleanupを直前承認した。このprojectはdomain制限なしであることを提示済み。事前doctorは必須checkすべてPASS、network-policyだけ既知WARN。
+
+host checkout `b127e14`（runtime実装は`5a2a49a`と同一）と上記imageを使用。一時driver `/tmp/s2-4-claude-runtime-smoke.py`から通常`agentctl.main run`経路を呼び、標準Claude runtime builderのPodman対話flagsを外した。Claude commandには`--print --verbose --output-format stream-json --no-session-persistence`、`--permission-mode dontAsk`、`--tools Bash`、既存probe commandだけの`--allowedTools`を付加した。通常のmanaged policy、credential launcher、mount、network、handover broker、container境界を維持し、sandbox無効化やbypassは使用していない。生の応答・stderrはメモリ内で判定して破棄し、本文をevidenceへ保存していない。
+
+| 観測 | 結果 |
+| --- | --- |
+| 認証済み最小応答 | PASS、期待応答一致、result success、launcher／processともexit 0、timeoutなし。起動は1回だけ |
+| Bash probe | PASS、`python3 -m agent_container.claude_security_probe`を1回だけ実行。実tool resultが期待する3行だけで、`oauth_token_visible=false`、`token_file_readable=false`、`parent_token_via_proc_readable=false`。sandbox無効化指定なし、追加tool呼び出しなし |
+| MCP | init eventのMCP server一覧は空 |
+| Container境界 | 標準specのread-only、cap-drop all、no-new-privilegesを確認 |
+| Cleanup | PASS、通常終了後に対象project／agentのcontainer、handover brokerのsocket・capability・run directoryがすべて不在 |
+| Workspace／project credential | Git status（branchを含む）は実行前後で一致、project `.credentials.json`は実行前後とも不在 |
+
+`/status`、`/sandbox` Config、`/hooks`の対話画面、`/proc`のprocess数照合、編集・test・local commit・resume、handover create／stale client、他projectとの分離はこのrunではnot run。managed policyの事前doctor成功と上記probe成功を、それらの手動gate成功へ読み替えない。Claude runtimeの今回承認範囲はPASS、Phase 2手順全体とS2-4全体はPARTIALのまま維持する。
