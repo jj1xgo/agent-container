@@ -42,6 +42,7 @@ from agent_container.family_state import FamilyStateLayout
 from agent_container.family_state import load_family_binding
 from agent_container.family_state import write_family_binding
 from agent_container.handover_broker_runtime import HandoverBrokerRuntimeError
+from agent_container.handover_broker_runtime import HandoverBrokerRuntime
 from agent_container.handover_broker_runtime import HandoverRuntimeMount
 from agent_container.github_app import HttpResponse
 from agent_container.github_app import InstallationToken
@@ -1788,6 +1789,8 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "project-image",
         "agent-node",
         "project-node",
+        "codex-handover-profile",
+        "codex-handover-client",
         "codex-version",
         "private-state",
         "codex-auth",
@@ -1827,7 +1830,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
         "project-image",
         "agent-node",
         "project-node",
+        "codex-handover-profile",
         "claude-managed-policy",
+        "codex-handover-client",
         "claude-handover-client",
         "codex-version",
         "claude-version",
@@ -1855,12 +1860,16 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             root / "gh",
             root / "projects",
             root / "projects/agent-container",
-            root / "projects/agent-container/codex-home",
             root / "projects/agent-container/cache",
             root / "workspaces",
         )
         for directory in private_directories:
             directory.mkdir(mode=0o700)
+
+        seed_codex_home(
+            Path(__file__).resolve().parents[2] / "profiles/codex",
+            root / "projects/agent-container/codex-home",
+        )
 
         workspace = root / "workspaces/agent-container"
         (workspace / ".git").mkdir(parents=True)
@@ -2169,7 +2178,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             )
 
             self.assertEqual(result, 0)
-            self.assertEqual(len(calls), 4)
+            self.assertEqual(len(calls), 5)
             self.assertIn("codex", calls[-1].argv)
             self.assertEqual(
                 calls[-1].argv[-7:-2],
@@ -2191,6 +2200,77 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             )
             self.assertNotIn(str(root / "shared-auth/codex/auth.json"), output.getvalue())
             self.assertEqual(os.getuid(), root.stat().st_uid)
+
+    def test_run_rejects_old_codex_profile_before_podman_or_broker(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            (root / "projects/agent-container/codex-home/managed-profile.version").write_text(
+                "4\n", encoding="utf-8"
+            )
+            calls = []
+            stderr = StringIO()
+
+            with patch(
+                "agent_container.agentctl.HandoverBrokerRuntime.create"
+            ) as create_handover:
+                result = main(
+                    ["run", "agent-container"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=lambda spec: calls.append(spec)
+                    or successful_podman_result(spec),
+                    git_remote_reader=lambda path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    stdout=StringIO(),
+                    stderr=stderr,
+                )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(calls, [])
+            create_handover.assert_not_called()
+            self.assertIn(
+                "agentctl project update-profile PROJECT", stderr.getvalue()
+            )
+
+    def test_run_codex_client_failure_prevents_broker_and_runtime_start(self) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            calls = []
+            builder_calls = []
+            marker = "DO-NOT-PRINT-HANDOVER-CLIENT-PROBE"
+            stdout = StringIO()
+            stderr = StringIO()
+
+            def runner(spec):
+                calls.append(spec)
+                if self._is_handover_client_status_spec(spec):
+                    return subprocess.CompletedProcess(
+                        spec.argv, 19, stdout=marker, stderr=marker
+                    )
+                return successful_podman_result(spec)
+
+            with patch(
+                "agent_container.agentctl.HandoverBrokerRuntime.create"
+            ) as create_handover:
+                result = main(
+                    ["run", "agent-container"],
+                    environment={"AGENT_CONTAINER_HOME": str(root)},
+                    runner=runner,
+                    git_remote_reader=lambda path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
+                    runtime_spec_builder=lambda *args: builder_calls.append(args),
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+            self.assertEqual(result, 19)
+            self.assertEqual(builder_calls, [])
+            create_handover.assert_not_called()
+            self.assertNotIn(marker, stdout.getvalue() + stderr.getvalue())
+            self.assertEqual(
+                sum(self._is_handover_client_status_spec(spec) for spec in calls), 1
+            )
 
     def test_bound_run_starts_family_runtime_and_uses_pid_supervisor(self) -> None:
         with TemporaryDirectory() as temp:
@@ -2562,7 +2642,8 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                         handover_mount,
                         events,
                         on_enter=lambda: self.assertTrue(
-                            (root / "projects/agent-container/claude-config").is_dir()
+                            agent != "claude"
+                            or (root / "projects/agent-container/claude-config").is_dir()
                         ),
                     )
                     egress_mount = EgressRuntimeMount(
@@ -2590,7 +2671,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                         events.append("builder")
                         builder_calls.append(args)
                         self.assertEqual(github_context.active, github_enabled)
-                        self.assertEqual(handover_context.active, agent == "claude")
+                        self.assertTrue(handover_context.active)
                         self.assertEqual(egress_context.active, egress_enabled)
                         return CommandSpec(("runtime", agent), {})
 
@@ -2643,15 +2724,12 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                         os.getuid(),
                         os.getgid(),
                     ))
-                    if agent == "claude":
-                        self.assertIs(args[5], handover_mount)
-                        create_handover.assert_called_once()
-                    else:
-                        self.assertEqual(
-                            len(args),
-                            5 + int(github_enabled or egress_enabled) + int(egress_enabled),
-                        )
-                        create_handover.assert_not_called()
+                    self.assertIs(args[5], handover_mount)
+                    create_handover.assert_called_once()
+                    self.assertEqual(
+                        len(args),
+                        6 + int(github_enabled or egress_enabled) + int(egress_enabled),
+                    )
                     if github_enabled:
                         self.assertIs(
                             args[-2] if egress_enabled else args[-1], github_mount
@@ -2671,11 +2749,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                         expected.append("egress-enter")
                     if github_enabled:
                         expected.append("github-enter")
-                    if agent == "claude":
-                        expected.append("handover-enter")
+                    expected.append("handover-enter")
                     expected.extend(("builder", "runtime"))
-                    if agent == "claude":
-                        expected.append("handover-exit")
+                    expected.append("handover-exit")
                     if github_enabled:
                         expected.append("github-exit")
                     if egress_enabled:
@@ -2751,6 +2827,119 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
             self.assertNotIn(
                 "DO-NOT-PRINT-HANDOVER-RUNTIME-DETAIL", stderr.getvalue()
             )
+
+    def test_run_codex_real_handover_runtime_start_failure_cleans_session(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            original_create = HandoverBrokerRuntime.create
+            runtimes = []
+            listener_patches = []
+            builder_calls = []
+            runtime_calls = []
+
+            def create(layout, handover_project):
+                runtime = original_create(layout, handover_project)
+                runtimes.append(runtime)
+                listener_patch = patch.object(
+                    runtime.session,
+                    "open_listener",
+                    side_effect=OSError("private-listener-failure"),
+                )
+                listener_patch.start()
+                listener_patches.append(listener_patch)
+                return runtime
+
+            try:
+                with patch(
+                    "agent_container.agentctl.HandoverBrokerRuntime.create",
+                    side_effect=create,
+                ):
+                    result = main(
+                        ["run", "agent-container"],
+                        environment={"AGENT_CONTAINER_HOME": str(root)},
+                        runner=lambda spec: runtime_calls.append(spec)
+                        or successful_podman_result(spec),
+                        git_remote_reader=lambda path: (
+                            "https://github.com/jj1xgo/agent-container.git"
+                        ),
+                        runtime_spec_builder=lambda *args: builder_calls.append(args),
+                        stdout=StringIO(),
+                        stderr=StringIO(),
+                    )
+            finally:
+                for listener_patch in listener_patches:
+                    listener_patch.stop()
+
+            self.assertEqual(result, 1)
+            self.assertEqual(builder_calls, [])
+            self.assertEqual(len(runtimes), 1)
+            self.assertFalse(runtimes[0].session.run_dir.exists())
+            self.assertFalse(any(spec.argv[:1] == ("runtime",) for spec in runtime_calls))
+
+    def test_run_codex_real_handover_runtime_close_failure_allows_cleanup_retry(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp:
+            root, _ = self._runtime_state(temp)
+            original_create = HandoverBrokerRuntime.create
+            runtimes = []
+            deactivate_patches = []
+            deactivate_calls = 0
+
+            def create(layout, handover_project):
+                nonlocal deactivate_calls
+                runtime = original_create(layout, handover_project)
+                runtimes.append(runtime)
+                real_deactivate = runtime.session.deactivate
+
+                def fail_first_deactivate():
+                    nonlocal deactivate_calls
+                    deactivate_calls += 1
+                    if deactivate_calls == 1:
+                        raise ValueError("private-deactivate-failure")
+                    real_deactivate()
+
+                deactivate_patch = patch.object(
+                    runtime.session, "deactivate", fail_first_deactivate
+                )
+                deactivate_patch.start()
+                deactivate_patches.append(deactivate_patch)
+                return runtime
+
+            try:
+                with patch(
+                    "agent_container.agentctl.HandoverBrokerRuntime.create",
+                    side_effect=create,
+                ):
+                    result = main(
+                        ["run", "agent-container"],
+                        environment={"AGENT_CONTAINER_HOME": str(root)},
+                        runner=successful_podman_result,
+                        git_remote_reader=lambda path: (
+                            "https://github.com/jj1xgo/agent-container.git"
+                        ),
+                        runtime_spec_builder=lambda *_args: CommandSpec(
+                            ("runtime", "codex"), {}
+                        ),
+                        stdout=StringIO(),
+                        stderr=StringIO(),
+                    )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(len(runtimes), 1)
+                runtime = runtimes[0]
+                self.assertFalse(runtime.session.run_dir.exists())
+                self.assertFalse(runtime._runtime.exited)
+                runtime.__exit__(None, None, None)
+                runtime.__exit__(None, None, None)
+            finally:
+                for deactivate_patch in deactivate_patches:
+                    deactivate_patch.stop()
+
+            self.assertTrue(runtimes[0]._runtime.exited)
+            self.assertEqual(deactivate_calls, 3)
 
     def test_run_rejects_handover_overlap_before_any_broker_or_podman(self) -> None:
         for direction in ("same", "ancestor", "descendant"):
@@ -3033,8 +3222,9 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
 
             def runtime_spec_builder(*args):
                 builder_calls.append(args)
-                self.assertEqual(len(calls), 4)
-                self.assertEqual(calls[-2].argv[:3], ("podman", "image", "exists"))
+                self.assertEqual(len(calls), 5)
+                self.assertEqual(calls[-3].argv[:3], ("podman", "image", "exists"))
+                self.assertTrue(self._is_handover_client_status_spec(calls[-2]))
                 self.assertEqual(
                     calls[-1].argv[-3:],
                     ("python3", "-m", "agent_container.claude_policy"),
@@ -3067,7 +3257,7 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
 
             self.assertEqual(result, 0)
             self.assertEqual(len(builder_calls), 1)
-            self.assertEqual(len(calls), 5)
+            self.assertEqual(len(calls), 6)
             self.assertEqual(broker_events, ["handover-enter", "handover-exit"])
             self.assertEqual(calls[-1].argv[-1], "claude")
             self.assertIn(
@@ -3457,6 +3647,14 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                         "--userns=keep-id:uid=1000,gid=1000",
                         "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
                         "localhost/agent-container:dev", "/opt/agent-node/bin/node", "--version",
+                    ),
+                    (
+                        "podman", "run", "--rm", "--read-only", "--cap-drop=all",
+                        "--security-opt=no-new-privileges",
+                        "--userns=keep-id:uid=1000,gid=1000",
+                        "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
+                        "localhost/agent-container:dev", "python3", "-m",
+                        "agent_container.handover_broker_client", "--self-check",
                     ),
                     (
                         "podman", "run", "--rm", "--read-only", "--cap-drop=all",
@@ -4032,57 +4230,86 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
 
     def test_doctor_reports_handover_client_without_probe_output_or_mounts(self) -> None:
         marker = "DO-NOT-PRINT-HANDOVER-CLIENT-PROBE"
-        for returncode, expected in (
-            (0, "PASS  claude-handover-client: available"),
-            (19, "FAIL  claude-handover-client: unavailable"),
+        for agent in ("codex", "claude"):
+            for returncode, level in ((0, "PASS"), (19, "FAIL")):
+                with self.subTest(agent=agent, returncode=returncode):
+                    with TemporaryDirectory() as temp:
+                        root, _ = self._runtime_state(temp)
+                        if agent == "claude":
+                            (root / "projects/agent-container/claude-config").mkdir(
+                                mode=0o700
+                            )
+                        calls = []
+                        output = StringIO()
+
+                        def runner(spec):
+                            calls.append(spec)
+                            if self._is_handover_client_status_spec(spec):
+                                return subprocess.CompletedProcess(
+                                    spec.argv,
+                                    returncode,
+                                    stdout=marker,
+                                    stderr=marker,
+                                )
+                            return self._successful_doctor_runner(spec)
+
+                        result = main(
+                            ["doctor", "agent-container", "--agent", agent],
+                            environment={"AGENT_CONTAINER_HOME": str(root)},
+                            runner=runner,
+                            git_remote_reader=lambda path: (
+                                "https://github.com/jj1xgo/agent-container.git"
+                            ),
+                            stdout=output,
+                        )
+
+                        rendered = output.getvalue()
+                        self.assertEqual(result, 0 if returncode == 0 else 1)
+                        self.assertIn(
+                            f"{level}  {agent}-handover-client: "
+                            f"{'available' if returncode == 0 else 'unavailable'}",
+                            rendered,
+                        )
+                        self.assertNotIn(marker, rendered)
+                        probes = [
+                            spec
+                            for spec in calls
+                            if self._is_handover_client_status_spec(spec)
+                        ]
+                        self.assertEqual(len(probes), 1)
+                        self.assertNotIn("--mount", probes[0].argv)
+                        self.assertNotIn("--env", probes[0].argv)
+
+    def test_codex_doctor_reports_profile_version_without_file_content(self) -> None:
+        marker = "DO-NOT-PRINT-PROFILE-VERSION"
+        for version, expected in (
+            ("5\n", "PASS  codex-handover-profile: current"),
+            (marker, "FAIL  codex-handover-profile: update required"),
         ):
-            with self.subTest(returncode=returncode), TemporaryDirectory() as temp:
+            with self.subTest(version=version), TemporaryDirectory() as temp:
                 root, _ = self._runtime_state(temp)
-                (root / "projects/agent-container/claude-config").mkdir(mode=0o700)
-                calls = []
+                (root / "projects/agent-container/codex-home/managed-profile.version").write_text(
+                    version, encoding="utf-8"
+                )
                 output = StringIO()
 
-                def runner(spec):
-                    calls.append(spec)
-                    if self._is_handover_client_status_spec(spec):
-                        return subprocess.CompletedProcess(
-                            spec.argv,
-                            returncode,
-                            stdout=marker,
-                            stderr=marker,
-                        )
-                    return self._successful_doctor_runner(spec)
-
                 result = main(
-                    ["doctor", "agent-container", "--agent", "claude"],
+                    ["doctor", "agent-container", "--agent", "codex"],
                     environment={"AGENT_CONTAINER_HOME": str(root)},
-                    runner=runner,
-                    git_remote_reader=lambda path: "https://github.com/jj1xgo/agent-container.git",
+                    runner=self._successful_doctor_runner,
+                    git_remote_reader=lambda path: (
+                        "https://github.com/jj1xgo/agent-container.git"
+                    ),
                     stdout=output,
                 )
 
-                rendered = output.getvalue()
-                self.assertEqual(result, 0 if returncode == 0 else 1)
-                self.assertIn(expected, rendered)
-                self.assertNotIn(marker, rendered)
-                probes = [
-                    spec for spec in calls if self._is_handover_client_status_spec(spec)
-                ]
-                self.assertEqual(len(probes), 1)
-                self.assertNotIn("--mount", probes[0].argv)
-                self.assertNotIn("--env", probes[0].argv)
+                self.assertEqual(result, 0 if version == "5\n" else 1)
+                self.assertIn(expected, output.getvalue())
+                self.assertNotIn(marker, output.getvalue())
 
-    def test_claude_doctor_rejects_state_tree_handover_but_codex_is_unchanged(
-        self,
-    ) -> None:
+    def test_agent_doctor_rejects_state_tree_handover(self) -> None:
         for area in ("shared-auth/claude", "github-broker", "handover-broker"):
-            for agent, expected in (
-                ("claude", "FAIL  handover-project: state validation failed"),
-                (
-                    "codex",
-                    "PASS  handover-project: real directory within configured root",
-                ),
-            ):
+            for agent in ("codex", "claude"):
                 with (
                     self.subTest(area=area, agent=agent),
                     TemporaryDirectory() as temp,
@@ -4112,11 +4339,11 @@ class AgentCtlRunDoctorTest(unittest.TestCase):
                         stdout=output,
                     )
 
-                    self.assertIn(expected, output.getvalue())
-                    if agent == "claude":
-                        self.assertEqual(result, 1)
-                    else:
-                        self.assertEqual(result, 0)
+                    self.assertIn(
+                        "FAIL  handover-project: state validation failed",
+                        output.getvalue(),
+                    )
+                    self.assertEqual(result, 1)
 
     def test_codex_doctor_does_not_probe_claude_policy(self) -> None:
         with TemporaryDirectory() as temp:

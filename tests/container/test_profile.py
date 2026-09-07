@@ -2,9 +2,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import tomllib
 import unittest
+from unittest.mock import patch
 
 from agent_container.profile import seed_codex_home
 from agent_container.profile import update_codex_handover_profile
+from agent_container.profile import validate_codex_handover_profile
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -35,7 +37,7 @@ class ProfileSeedTest(unittest.TestCase):
             self.assertTrue((codex_home / "skills/handover/SKILL.md").is_file())
             self.assertEqual(
                 (codex_home / "managed-profile.version").read_text(encoding="utf-8"),
-                "4\n",
+                "5\n",
             )
 
     def test_seed_refuses_to_overwrite_existing_rules(self) -> None:
@@ -86,7 +88,7 @@ class ProfileSeedTest(unittest.TestCase):
                 (codex_home / "managed-profile.version").read_text(
                     encoding="utf-8"
                 ),
-                "4\n",
+                "5\n",
             )
 
     # Break caught: a project seeded before the sandbox network setting keeps
@@ -116,7 +118,7 @@ class ProfileSeedTest(unittest.TestCase):
             self.assertEqual(text.count("[sandbox_workspace_write]"), 1)
             self.assertEqual(
                 (codex_home / "managed-profile.version").read_text(encoding="utf-8"),
-                "4\n",
+                "5\n",
             )
 
     def test_update_profile_overrides_disabled_sandbox_network_in_place(self) -> None:
@@ -210,7 +212,7 @@ class ProfileSeedTest(unittest.TestCase):
             self.assertIs(config["plugins"]["custom@dev"]["enabled"], True)
             self.assertEqual(
                 (codex_home / "managed-profile.version").read_text(encoding="utf-8"),
-                "4\n",
+                "5\n",
             )
 
     def test_update_profile_rejects_symlinked_rules_directory_when_seeding(self) -> None:
@@ -227,3 +229,64 @@ class ProfileSeedTest(unittest.TestCase):
                 update_codex_handover_profile(ROOT / "profiles/codex", codex_home)
 
             self.assertEqual(list(outside.iterdir()), [])
+
+    def test_validate_handover_profile_accepts_current_version(self) -> None:
+        with TemporaryDirectory() as temp:
+            codex_home = Path(temp) / "codex-home"
+            seed_codex_home(ROOT / "profiles/codex", codex_home)
+
+            validate_codex_handover_profile(codex_home)
+
+    def test_validate_handover_profile_rejects_old_version_with_update_command(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp:
+            codex_home = Path(temp) / "codex-home"
+            seed_codex_home(ROOT / "profiles/codex", codex_home)
+            (codex_home / "managed-profile.version").write_text(
+                "4\n", encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(
+                ValueError, r"agentctl project update-profile PROJECT"
+            ):
+                validate_codex_handover_profile(codex_home)
+
+    def test_update_profile_rejects_symlinked_skill_ancestor_before_writes(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp:
+            codex_home = Path(temp) / "codex-home"
+            seed_codex_home(ROOT / "profiles/codex", codex_home)
+            version_file = codex_home / "managed-profile.version"
+            version_file.write_text("4\n", encoding="utf-8")
+            rules_file = codex_home / "rules/default.rules"
+            original_rules = rules_file.read_text(encoding="utf-8")
+            skill_directory = codex_home / "skills"
+            outside = Path(temp) / "outside-skills"
+            skill_directory.rename(outside)
+            skill_directory.symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaisesRegex(ValueError, "must not be a symlink"):
+                update_codex_handover_profile(ROOT / "profiles/codex", codex_home)
+
+            self.assertEqual(rules_file.read_text(encoding="utf-8"), original_rules)
+            self.assertEqual(version_file.read_text(encoding="utf-8"), "4\n")
+
+    def test_update_failure_does_not_advance_profile_version(self) -> None:
+        with TemporaryDirectory() as temp:
+            codex_home = Path(temp) / "codex-home"
+            seed_codex_home(ROOT / "profiles/codex", codex_home)
+            version_file = codex_home / "managed-profile.version"
+            version_file.write_text("4\n", encoding="utf-8")
+
+            with patch(
+                "agent_container.profile.shutil.copy2",
+                side_effect=OSError("private-copy-failure"),
+            ):
+                with self.assertRaises(OSError):
+                    update_codex_handover_profile(
+                        ROOT / "profiles/codex", codex_home
+                    )
+
+            self.assertEqual(version_file.read_text(encoding="utf-8"), "4\n")

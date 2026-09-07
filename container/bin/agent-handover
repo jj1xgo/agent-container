@@ -7,26 +7,8 @@ if [ "$#" -ne 3 ] || [ "$1" != "create" ] || [ "$2" != "--title" ]; then
 fi
 
 : "${AGENT_PROJECT_ID:?AGENT_PROJECT_ID is required}"
+: "${AGENT_HANDOVER_BROKER_SOCKET:?AGENT_HANDOVER_BROKER_SOCKET is required}"
+: "${AGENT_HANDOVER_BROKER_CAPABILITY:?AGENT_HANDOVER_BROKER_CAPABILITY is required}"
 
 title=$3
-if [ -n "${AGENT_HANDOVER_BROKER_SOCKET:-}" ] || \
-   [ -n "${AGENT_HANDOVER_BROKER_CAPABILITY:-}" ]; then
-    : "${AGENT_HANDOVER_BROKER_SOCKET:?required}"
-    : "${AGENT_HANDOVER_BROKER_CAPABILITY:?required}"
-    exec python3 -m agent_container.handover_broker_client create --title="$title"
-fi
-
-: "${AGENT_HANDOVER_ROOT:?AGENT_HANDOVER_ROOT is required}"
-
-if [ -n "${CODEX_SESSION_ID:-}" ]; then
-    exec python3 -m agent_container.handover_cli create \
-        --root="$AGENT_HANDOVER_ROOT" \
-        --project="$AGENT_PROJECT_ID" \
-        --session-id="$CODEX_SESSION_ID" \
-        --title="$title"
-fi
-
-exec python3 -m agent_container.handover_cli create \
-    --root="$AGENT_HANDOVER_ROOT" \
-    --project="$AGENT_PROJECT_ID" \
-    --title="$title"
+exec python3 -m agent_container.handover_broker_client create --title="$title"

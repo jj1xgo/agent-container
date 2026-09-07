@@ -473,6 +473,7 @@ class PodmanCommandTest(unittest.TestCase):
             specs = (
                 run_codex_spec(
                     layout, handover, IMAGE, os.getuid(), os.getgid(),
+                    HANDOVER_BROKER,
                     family_mount=family,
                 ),
                 run_claude_spec(
@@ -524,6 +525,7 @@ class PodmanCommandTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 run_codex_spec(
                     layout, handover, IMAGE, os.getuid(), os.getgid(),
+                    HANDOVER_BROKER,
                     family_mount=family,
                 )
 
@@ -879,6 +881,7 @@ class PodmanCommandTest(unittest.TestCase):
                         IMAGE,
                         os.getuid(),
                         os.getgid(),
+                        HANDOVER_BROKER,
                         egress=egress,
                     )
                 else:
@@ -939,6 +942,7 @@ class PodmanCommandTest(unittest.TestCase):
                     IMAGE,
                     os.getuid(),
                     os.getgid(),
+                    HANDOVER_BROKER,
                     egress=egress,
                 )
 
@@ -1316,6 +1320,7 @@ class PodmanCommandTest(unittest.TestCase):
                 IMAGE,
                 os.getuid(),
                 os.getgid(),
+                HANDOVER_BROKER,
                 broker,
             ),
             run_claude_spec(
@@ -1347,6 +1352,7 @@ class PodmanCommandTest(unittest.TestCase):
             IMAGE,
             os.getuid(),
             os.getgid(),
+            HANDOVER_BROKER,
             broker,
         )
         joined = " ".join(spec.argv)
@@ -1365,7 +1371,17 @@ class PodmanCommandTest(unittest.TestCase):
         )
 
         for agent, spec in (
-            ("codex", run_codex_spec(layout, handover, IMAGE, os.getuid(), os.getgid())),
+            (
+                "codex",
+                run_codex_spec(
+                    layout,
+                    handover,
+                    IMAGE,
+                    os.getuid(),
+                    os.getgid(),
+                    HANDOVER_BROKER,
+                ),
+            ),
             (
                 "claude",
                 run_claude_spec(
@@ -1438,12 +1454,28 @@ class PodmanCommandTest(unittest.TestCase):
             image=IMAGE,
             uid=os.getuid(),
             gid=os.getgid(),
+            handover_broker=HANDOVER_BROKER,
         )
         joined = " ".join(spec.argv)
         for required in ("--rm", "--read-only", "--cap-drop=all", "no-new-privileges"):
             self.assertIn(required, spec.argv if required != "no-new-privileges" else joined)
         self.assertIn("src=/state/workspaces/agent-container,dst=/workspace", joined)
-        self.assertIn("src=/vault/handovers/agent-container,dst=/handovers/agent-container", joined)
+        self.assertIn(
+            "src=/vault/handovers/agent-container,dst=/handovers/agent-container,ro=true",
+            joined,
+        )
+        self.assertIn(
+            "src=/state/handover-broker/one,dst=/run/agent-handover,ro=true",
+            joined,
+        )
+        self.assertIn(
+            "AGENT_HANDOVER_BROKER_SOCKET=/run/agent-handover/broker.sock",
+            joined,
+        )
+        self.assertIn(
+            "AGENT_HANDOVER_BROKER_CAPABILITY=/run/agent-handover/capability",
+            joined,
+        )
         self.assertNotIn("/vault,dst=", joined)
         self.assertNotIn("token", joined.lower())
         self.assertEqual(
@@ -1466,7 +1498,12 @@ class PodmanCommandTest(unittest.TestCase):
         unmask = "--security-opt=unmask=/proc/*"
 
         codex = run_codex_spec(
-            layout, handover_project, IMAGE, os.getuid(), os.getgid()
+            layout,
+            handover_project,
+            IMAGE,
+            os.getuid(),
+            os.getgid(),
+            HANDOVER_BROKER,
         )
         claude = run_claude_spec(
             layout, handover_project, IMAGE, os.getuid(), os.getgid(), HANDOVER_BROKER
@@ -1498,6 +1535,7 @@ class PodmanCommandTest(unittest.TestCase):
             IMAGE,
             os.getuid(),
             os.getgid(),
+            HANDOVER_BROKER,
         )
 
         claude_joined = " ".join(claude.argv)
@@ -1523,6 +1561,7 @@ class PodmanCommandTest(unittest.TestCase):
                 IMAGE,
                 os.getuid() + 1,
                 os.getgid(),
+                HANDOVER_BROKER,
             )
         with self.assertRaisesRegex(ValueError, "current user"):
             run_codex_spec(
@@ -1531,6 +1570,7 @@ class PodmanCommandTest(unittest.TestCase):
                 IMAGE,
                 os.getuid(),
                 os.getgid() + 1,
+                HANDOVER_BROKER,
             )
 
     def test_claude_run_has_hardened_flags_and_isolated_mounts(self) -> None:
@@ -1627,7 +1667,7 @@ class PodmanCommandTest(unittest.TestCase):
             },
         )
 
-    def test_claude_handover_project_rejects_any_writable_mount_overlap(self) -> None:
+    def test_agent_handover_project_rejects_any_writable_mount_overlap(self) -> None:
         layout = StateLayout(Path("/state"), "agent-container")
         overlapping_projects = (
             ("same-state-root", Path("/state")),
@@ -1670,10 +1710,11 @@ class PodmanCommandTest(unittest.TestCase):
             ),
         )
 
-        for direction, handover_project in overlapping_projects:
-            with self.subTest(direction=direction):
-                with self.assertRaisesRegex(ValueError, "overlap"):
-                    run_claude_spec(
+        for agent, builder in (("codex", run_codex_spec), ("claude", run_claude_spec)):
+            for direction, handover_project in overlapping_projects:
+                with self.subTest(agent=agent, direction=direction):
+                    with self.assertRaisesRegex(ValueError, "overlap"):
+                        builder(
                         layout,
                         handover_project,
                         IMAGE,

@@ -27,32 +27,61 @@ VALID_BODY = """## 作業の目的
 
 
 class AgentHandoverWrapperTest(unittest.TestCase):
-    def test_create_uses_fixed_environment_scope_and_session(self) -> None:
-        with TemporaryDirectory() as temp:
-            handover_root = Path(temp) / "handovers"
-            (handover_root / "project").mkdir(parents=True)
-            environment = {
-                **os.environ,
-                "PYTHONPATH": str(ROOT / "src"),
-                "AGENT_HANDOVER_ROOT": str(handover_root),
-                "AGENT_PROJECT_ID": "project",
-                "CODEX_SESSION_ID": "session-123",
-            }
+    def test_create_without_complete_broker_environment_never_writes_directly(
+        self,
+    ) -> None:
+        cases = (
+            ("missing-both", {}),
+            ("missing-both-with-session", {"CODEX_SESSION_ID": "session-123"}),
+            ("socket-only", {"AGENT_HANDOVER_BROKER_SOCKET": "/missing/socket"}),
+            (
+                "capability-only",
+                {"AGENT_HANDOVER_BROKER_CAPABILITY": "/missing/capability"},
+            ),
+            (
+                "connection-failure",
+                {
+                    "AGENT_HANDOVER_BROKER_SOCKET": "/missing/socket",
+                    "AGENT_HANDOVER_BROKER_CAPABILITY": "/missing/capability",
+                },
+            ),
+        )
+        for name, broker_environment in cases:
+            with self.subTest(case=name), TemporaryDirectory() as temp:
+                handover_root = Path(temp) / "handovers"
+                project = handover_root / "project"
+                project.mkdir(parents=True)
+                environment = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if key
+                    not in {
+                        "AGENT_HANDOVER_BROKER_SOCKET",
+                        "AGENT_HANDOVER_BROKER_CAPABILITY",
+                        "CODEX_SESSION_ID",
+                    }
+                }
+                environment.update(
+                    {
+                        "PYTHONPATH": str(ROOT / "src"),
+                        "AGENT_HANDOVER_ROOT": str(handover_root),
+                        "AGENT_PROJECT_ID": "project",
+                        **broker_environment,
+                    }
+                )
 
-            completed = subprocess.run(
-                (str(WRAPPER), "create", "--title", "Safe title"),
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+                completed = subprocess.run(
+                    (str(WRAPPER), "create", "--title", "Safe title"),
+                    env=environment,
+                    input=VALID_BODY,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
 
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            created = Path(completed.stdout.strip())
-            self.assertEqual(created.parent, handover_root / "project")
-            body = created.read_text(encoding="utf-8")
-            self.assertIn("# Handover: Safe title", body)
-            self.assertIn("Session: session-123", body)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(completed.stdout, "")
+                self.assertEqual(list(project.iterdir()), [])
 
     def test_rejects_scope_override_arguments(self) -> None:
         completed = subprocess.run(
@@ -72,7 +101,7 @@ class AgentHandoverWrapperTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 2)
         self.assertIn("usage:", completed.stderr)
 
-    def test_claude_mode_routes_stdin_only_to_broker_client(self) -> None:
+    def test_create_routes_stdin_only_to_broker_client(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp)
             bin_dir = root / "bin"
@@ -127,7 +156,7 @@ class AgentHandoverWrapperTest(unittest.TestCase):
                 "/handovers/project/2026-08-27_123456_abcdef12.md",
             )
 
-    def test_claude_mode_rejects_scope_override_without_echoing_stdin(self) -> None:
+    def test_create_rejects_scope_override_without_echoing_stdin(self) -> None:
         environment = {
             **os.environ,
             "AGENT_PROJECT_ID": "project",
