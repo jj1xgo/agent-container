@@ -4,15 +4,18 @@ from pathlib import Path
 import re
 import selectors
 import socket
-import stat
 import sys
 import threading
 from typing import Callable
 from typing import Mapping
 from typing import Sequence
 
+from agent_container.broker.capability import read_capability
+from agent_container.broker.capability import validate_exact_path
+from agent_container.broker.capability import validate_socket
 from agent_container.egress_broker_protocol import EgressRequest
 from agent_container.egress_broker_protocol import MAX_SEQUENCE
+from agent_container.egress_broker_protocol import PROTOCOL_VERSION
 from agent_container.egress_broker_protocol import encode_request_frame
 from agent_container.egress_broker_protocol import read_response_frame
 from agent_container.egress_gateway import RelayCounts
@@ -28,8 +31,8 @@ CONNECTED_RESPONSE = b"HTTP/1.1 200 Connection Established\r\n\r\n"
 BAD_GATEWAY_RESPONSE = b"HTTP/1.1 502 Bad Gateway\r\n\r\n"
 _REQUEST_LINE = re.compile(r"CONNECT ([a-z0-9.-]+):443 HTTP/1\.1")
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
-_CAPABILITY = re.compile(r"[A-Za-z0-9_-]{43}")
-_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_CAPABILITY_LABEL = "egress adapter capability"
+_SOCKET_LABEL = "egress adapter socket"
 
 
 @dataclass(frozen=True)
@@ -103,34 +106,19 @@ def parse_connect_request(header: bytes) -> str:
     return domain
 
 
-def _read_capability(path: Path) -> str:
-    descriptor = -1
+def _read_adapter_capability(path: Path) -> str:
+    return read_capability(
+        validate_exact_path(path, label=_CAPABILITY_LABEL), label=_CAPABILITY_LABEL
+    )
+
+
+def _validate_adapter_socket(path: Path) -> Path:
     try:
-        descriptor = os.open(path, os.O_RDONLY | _NOFOLLOW)
-        metadata = os.fstat(descriptor)
-        current = os.stat(path, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or stat.S_IMODE(metadata.st_mode) not in {0o400, 0o444}
-            or metadata.st_dev != current.st_dev
-            or metadata.st_ino != current.st_ino
-        ):
-            raise ValueError("egress adapter configuration is invalid")
-        body = os.read(descriptor, 128)
-        if os.read(descriptor, 1):
-            raise ValueError("egress adapter configuration is invalid")
-    except (OSError, ValueError):
-        raise ValueError("egress adapter configuration is invalid") from None
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-    try:
-        capability = body.decode("ascii").removesuffix("\n")
-    except UnicodeDecodeError:
-        raise ValueError("egress adapter configuration is invalid") from None
-    if _CAPABILITY.fullmatch(capability) is None or body != (capability + "\n").encode():
-        raise ValueError("egress adapter configuration is invalid")
-    return capability
+        return validate_socket(
+            validate_exact_path(path, label=_SOCKET_LABEL), label=_SOCKET_LABEL
+        )
+    except OSError:
+        raise ValueError(f"{_SOCKET_LABEL} is invalid") from None
 
 
 def load_adapter_config(environment: Mapping[str, str]) -> AdapterConfig:
@@ -141,9 +129,8 @@ def load_adapter_config(environment: Mapping[str, str]) -> AdapterConfig:
         agent = validate_agent(environment["AGENT_EGRESS_AGENT"])
     except (KeyError, TypeError, ValueError):
         raise ValueError("egress adapter configuration is invalid") from None
-    if not socket_path.is_absolute() or not capability_path.is_absolute():
-        raise ValueError("egress adapter configuration is invalid")
-    capability = _read_capability(capability_path)
+    socket_path = _validate_adapter_socket(socket_path)
+    capability = _read_adapter_capability(capability_path)
     return AdapterConfig(socket_path, capability, project_id, agent)
 
 
@@ -157,7 +144,7 @@ def open_gateway_tunnel(
     try:
         gateway.connect(str(config.socket_path))
         request = EgressRequest(
-            1,
+            PROTOCOL_VERSION,
             config.capability,
             config.project_id,
             sequence,
