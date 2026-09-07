@@ -6,6 +6,8 @@ Latest stable: `v0.5.0`
 
 Development branch: `main` (`0.6.0-dev`)
 
+Release candidate: `v0.6.0`（未公開）。Phase 6 と Codex handover broker 統一を含む候補を準備しています。[release 記録](docs/v0.6.0-release.md)と[更新時の注意](docs/v0.6.0-release-notes.md)を参照してください。公開までは以下の安定版を利用します。
+
 安定版を利用する場合はrelease tagを指定します。
 
 ```bash
