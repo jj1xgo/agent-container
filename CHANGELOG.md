@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+## [0.6.0] - Unreleased
+
+Phase 6 と Issue #120 を含む公開候補です。公開判断・候補の検証結果は [release 記録](docs/v0.6.0-release.md)、利用者向け概要・移行手順は [release notes](docs/v0.6.0-release-notes.md)を参照してください。以下の時系列の検証記録は当時の観測であり、判定の現在値は release 記録の参照先に集約します。
+
 ### Added
 
 - Phase 6 stage 2のS2-3として、egressとFamilyの残りを共通broker kernelへ乗せ替えました。egressはhost側capability fileをkernel既定のmode `0600`で作り（E1）、container側adapterのcapability検証をkernelの`read_capability`／`validate_exact_path`に置き換え、これまで無かったsocket検証を`validate_exact_path`／`validate_socket`で追加し（E2: `0400`／`0444`を拒否し`0600`のみ受理、実行user所有、size 44完全一致、`O_NONBLOCK`、失敗は`egress adapter capability is invalid`／`egress adapter socket is invalid`。adapterはbroker socketが無い・privateでない場合に起動時点で終了します）、gatewayへの接続を`connect_unix`の30秒timeoutで区切って接続後にblockingへ戻し（E3）、literalの`1`を`PROTOCOL_VERSION`にしました（E4）。Family intakeは`SO_PEERCRED`の読み取りとpeer検証をkernelの`admit_connection`と`FamilyPeerPolicy`（`validate_peer`を包む）に移し、拒否した接続は従来どおり1 byteも読まず応答もauditも書かずに閉じます（F1）。run directoryとsocketの片付けは`RuntimeArtifacts`（identity検査付き、descriptor保持）に委譲し、差し替えinodeの温存と固定message、descriptorの確実なcloseは変わりません（F2）。`RuntimeArtifacts`に`dir_fd`／`parent_dir_fd`を追加しました。wire byte、audit行、golden fixtureは不変（E1のmode断言のみ更新）です。意図的な変更は設計文書のE1〜E4／F1〜F2です。
@@ -266,6 +270,7 @@
 
 通常のlocal image buildは既定で各agent CLIの`latest`を解決します。このbaselineは`v0.1.0`のCI再現用固定値であり、runtime dependencyを恒久固定するものではありません。
 
+[0.6.0]: docs/v0.6.0-release-notes.md
 [0.5.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.5.0
 [0.4.1]: https://github.com/jj1xgo/agent-container/releases/tag/v0.4.1
 [0.4.0]: https://github.com/jj1xgo/agent-container/releases/tag/v0.4.0
